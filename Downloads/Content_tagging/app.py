@@ -502,9 +502,19 @@ def run_apify_tiktok_scraper_api(links, apify_token):
         'proxyCountryCode': 'None',
     }
     run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
-    dataset_id = run.get('defaultDatasetId')
+
+    # Apify Python client may return either a dict-like object or a Run object
+    if isinstance(run, dict):
+        dataset_id = run.get('defaultDatasetId') or run.get('default_dataset_id')
+    else:
+        dataset_id = (
+            getattr(run, 'default_dataset_id', None)
+            or getattr(run, 'defaultDatasetId', None)
+        )
+
     if not dataset_id:
         raise RuntimeError('Apify run finished but no default dataset was returned.')
+
     return list(client.dataset(dataset_id).iterate_items())
 
 def _apply_original_market_to_results(result_df):
