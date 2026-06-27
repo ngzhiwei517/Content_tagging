@@ -1,48 +1,45 @@
-# 🎵 UGC Tagger
+# 🎵 AI UGC Content Tagging Platform
 
-An AI-assisted TikTok UGC tagging platform built with Streamlit to automate content trend analysis for music marketing.
+An AI-assisted Streamlit application for automating TikTok User Generated Content (UGC) analysis and tagging.
 
----
-
-## Overview
-
-UGC Tagger is designed to reduce the manual effort required to analyse TikTok User Generated Content (UGC) collected from MelodyIQ.
-
-Instead of manually watching every TikTok and filling content tags, the application uses Google's Gemini model to automatically generate:
-
-- Narrative
-- Creative Type
-- Content Details
-
-Posts with low confidence or incomplete information are automatically routed to a human review workflow before exporting the final dataset.
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
+![Gemini](https://img.shields.io/badge/Google-Gemini_AI-blue)
+![Apify](https://img.shields.io/badge/Apify-TikTok_Scraper-green)
 
 ---
 
-# Features
+## 📌 Overview
+
+This project automates the manual workflow of tagging TikTok UGC posts for music marketing analysis.
+
+Instead of manually reviewing every TikTok post, the application uses Google's Gemini AI to generate structured content tags while allowing analysts to review uncertain cases before exporting the final dataset.
+
+---
+
+## ✨ Features
 
 ### 📥 Data Input
 
 - Upload MelodyIQ CSV/XLSX reports
+
 ---
 
 ### 🤖 AI Tagging Pipeline
 
 The application uses a multi-stage AI workflow.
 
-Tier 0
-- Visual-only analysis
-- Used when captions are missing or too vague
+#### Tier 0
+Visual-only analysis for posts with missing or weak captions.
 
-Tier 1
-- Cover image + metadata analysis
+#### Tier 1
+Cover image + metadata analysis.
 
-Tier 2
-- Video frame analysis
-- Activated only when Tier 1 confidence is low
+#### Tier 2
+Video frame analysis when confidence is low.
 
-Tier 3
-- Human review
-- Manual correction for uncertain or incomplete posts
+#### Tier 3
+Human review for uncertain or incomplete posts.
 
 ---
 
@@ -50,60 +47,55 @@ Tier 3
 
 Supports:
 
-- AI Suggest
-- Manual Narrative editing
-- Custom Narrative
+- Narrative editing
 - Creative Type editing
 - Content Details editing
-- Manual Market correction
+- AI Suggest
+- Custom Narrative
+- Manual market correction
 - Manual engagement metrics
-    - Views
-    - Likes
-    - Comments
-    - Shares
-    - Saves
-- Remove unavailable posts from export
+- Remove unavailable/private posts from export
 
 ---
 
 ### 📊 Dashboard
 
-Includes:
+Interactive dashboard showing:
 
-- Total Posts
-- AI Tagged
-- Automation Rate
-- Review Rate
-- Average Confidence
-- Market Summary
-- Narrative Distribution
-- Creative Type Distribution
-- Track Leaderboard
+- Total posts
+- Automation rate
+- AI confidence
+- Review status
+- Market overview
+- Narrative distribution
+- Creative type distribution
+- Track leaderboard
 
 ---
 
 ### 📤 Export
 
-- Merge AI results back into the original MelodyIQ spreadsheet
+- Merge AI results back into the original spreadsheet
 - Match using TikTok Video ID
-- Export as CSV
-- Export as Excel (.xlsx)
+- Export CSV
+- Export Excel (.xlsx)
 
 ---
 
-# Workflow
+# 🏗 Workflow
 
-MelodyIQ Report
+TikTok Viral Radar
+        │
+Select Country + Track
         │
         ▼
-Upload CSV / XLSX
+MelodyIQ / TikTok Source
         │
         ▼
 Apify TikTok Scraper
-(API or JSON Upload)
         │
         ▼
-AI Tagging Pipeline
+Gemini AI Tagging
 
 Tier 0
    │
@@ -115,70 +107,58 @@ Tier 3 (Human Review)
 
         │
         ▼
-Merge into Original Report
-        │
-        ▼
 Export Final Dataset
 ---
 
-# Installation
+# 📂 Project Structure
+
+Content_tagging/
+│
+├── app.py
+├── requirements.txt
+├── README.md
+├── .gitignore
+└── assets/
+---
+
+# ⚙ Installation
 
 Clone the repository
 
-git clone https://github.com/<your-username>/ugc-tagger.git
-cd ugc-tagger
+git clone https://github.com/YOUR_USERNAME/Content_tagging.git
+cd Content_tagging
 Install dependencies
 
 pip install -r requirements.txt
 Run locally
 
 streamlit run app.py
----
-
-# Required Packages
-
-Main packages used:
-
-- streamlit
-- pandas
-- plotly
-- requests
-- openpyxl
-- opencv-python
-- google-genai
-- apify-client
 
 ---
 
-# API Keys
-
-The application requires:
+# 🔑 Required API Keys
 
 - Google Gemini API Key
 - Apify API Token
 
-For local development these can be entered in the application.
-
-For deployment they should be stored securely using Streamlit Secrets or environment variables.
+For production deployments, API keys should be stored using Streamlit Secrets or environment variables.
 
 ---
 
-# Disclaimer
+# ⚠ Disclaimer
 
-This project is intended as an AI-assisted workflow tool.
+This project is intended for research and workflow automation purposes.
 
-AI-generated tags should be reviewed by analysts before being used in downstream reporting.
+All TikTok content processed by the application is publicly available content.
 
-TikTok content analysed by this application is publicly available content.
-
----
-
-# Author
-
-Developed as an internship project for exploring AI-assisted UGC content tagging and workflow automation in music marketing analytics.
+AI-generated tags should be reviewed by a human before being used in downstream reporting.
 
 ---
 
-# License
+# 👨‍💻 Author
 
-This repository is currently provided for demonstration and evaluation purposes.
+Developed as an AI workflow automation project for large-scale TikTok UGC content analysis.
+
+---
+
+## ⭐ If you find this project useful, consider giving it a star.
