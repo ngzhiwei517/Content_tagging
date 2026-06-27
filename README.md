@@ -110,17 +110,6 @@ Tier 3 (Human Review)
 Export Final Dataset
 ---
 
-# 📂 Project Structure
-
-Content_tagging/
-│
-├── app.py
-├── requirements.txt
-├── README.md
-├── .gitignore
-└── assets/
----
-
 # ⚙ Installation
 
 Clone the repository
