@@ -1,0 +1,9 @@
+streamlit
+pandas
+requests
+opencv-python
+google-genai
+apify-client
+plotly
+openpyxl
+numpy
