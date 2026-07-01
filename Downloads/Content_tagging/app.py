@@ -1519,7 +1519,7 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
 # ══════════════════════════════════════════════════════════
 # TOP NAVBAR (session state routing)
 # ══════════════════════════════════════════════════════════
-PAGES = ["Home", "Upload & Tag", "Review Flagged", "Summary", "Export"]
+PAGES = ["Home", "Batch Filter", "Upload & Tag", "Review Flagged", "Summary", "Export"]
 if 'page' not in st.session_state:
     st.session_state.page = "Home"
 
@@ -1566,7 +1566,7 @@ div.navbar-row > div[data-testid="stHorizontalBlock"] > div:first-child {
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="navbar-row">', unsafe_allow_html=True)
-brand, *btn_cols = st.columns([2.5, 1.1, 1.1, 1.5, 1.1, 1.0])
+brand, *btn_cols = st.columns([2.2, 1.0, 1.15, 1.15, 1.35, 1.0, 0.9])
 with brand:
     st.markdown(
         "<p style='color:white;font-weight:700;font-size:15px;margin:0;line-height:36px;padding-left:4px'>"
@@ -1623,8 +1623,9 @@ if page == "Home":
         <div class='section-card'>
             <h3>Getting Started</h3>
             <ol style='color:#374151;font-size:14px;line-height:2'>
-                <li>Enter your <strong>Gemini</strong> and <strong>Apify</strong> API keys in the sidebar</li>
-                <li>Go to <strong>Upload &amp; Tag</strong> — upload the original MelodyIQ CSV/XLSX first, then upload Apify JSON, enter the track name, click Run</li>
+                <li>Start at <strong>Batch Filter</strong> — upload the tracklist and MelodyIQ CSVs, filter the rows you want, then send the filtered report into tagging</li>
+                <li>Enter your <strong>Gemini</strong> and <strong>Apify</strong> API keys above</li>
+                <li>Go to <strong>Upload &amp; Tag</strong> — use the filtered MelodyIQ report as the source of truth, then run Apify + AI tagging</li>
                 <li>Repeat for each track / market</li>
                 <li>Go to <strong>Review Flagged</strong> — manually tag any posts the AI couldn't handle</li>
                 <li>Go to <strong>Export</strong> — download the final CSV</li>
@@ -1842,19 +1843,27 @@ elif page == "Upload & Tag":
         st.markdown("<div class='warn-banner'>⚠️ Enter your API keys above before continuing.</div>", unsafe_allow_html=True)
         st.stop()
 
-    # ── Step 0: Original report upload ─────────────────────
+    # ── Step 0: Source report from Batch Filter or manual upload ─────────────────────
     st.markdown("""
     <div class='section-card' style='margin-bottom:16px'>
-        <h3>Step 0 — Upload Original MelodyIQ / Tracking Report</h3>
+        <h3>Step 0 — Source MelodyIQ / Tracking Report</h3>
         <p style='font-size:13px;color:#64748b;margin:0 0 14px'>
-            Upload the original CSV/XLSX first so the app can use its <strong>Country / Market</strong>
-            column as the source of truth. This avoids using TikTok JSON <code>locationCreated</code>, which can be wrong
-            for market-level analysis.
+            If you already completed <strong>Batch Filter</strong>, the filtered output is used automatically here.
+            You can still upload another CSV/XLSX below if you want to replace it manually. The app uses the
+            <strong>Country / Market</strong> column as the source of truth.
         </p>
     """, unsafe_allow_html=True)
 
+    if not st.session_state.original_df.empty:
+        source_note = "Batch Filter output" if not st.session_state.get('batch_filter_df', pd.DataFrame()).empty else "Uploaded original report"
+        st.markdown(
+            f"<div class='info-banner'>✅ Using <strong>{source_note}</strong> as the source report · "
+            f"{len(st.session_state.original_df)} rows. Upload another file below only if you want to replace it.</div>",
+            unsafe_allow_html=True
+        )
+
     original_file = st.file_uploader(
-        "Upload original CSV / XLSX report first",
+        "Upload another original CSV / XLSX report (optional)",
         type=["csv", "xlsx", "xls"],
         key="original_master_uploader"
     )
@@ -3389,6 +3398,800 @@ elif page == "Summary":
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
+# BATCH FILTER
+# ══════════════════════════════════════════════════════════
+elif page == "Batch Filter":
+    import streamlit as st
+    import pandas as pd
+    import re
+    import io
+    import tempfile
+    from datetime import timedelta
+    from pathlib import Path
+
+    try:
+        from rapidfuzz import fuzz
+    except Exception:
+        fuzz = None
+
+
+
+
+    # -----------------------------
+    # UI styling
+    # -----------------------------
+
+    st.markdown(
+        """
+        <style>
+        .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1280px;
+        }
+        .hero-card {
+            padding: 1.5rem 1.75rem;
+            border-radius: 18px;
+            background: linear-gradient(135deg, #f6f8ff 0%, #eef6ff 50%, #fff7ed 100%);
+            border: 1px solid #e5e7eb;
+            margin-bottom: 1.25rem;
+        }
+        .hero-title {
+            font-size: 2.15rem;
+            line-height: 1.15;
+            font-weight: 800;
+            color: #111827;
+            margin: 0 0 0.35rem 0;
+        }
+        .hero-subtitle {
+            font-size: 1rem;
+            color: #4b5563;
+            margin: 0;
+        }
+        .section-card {
+            padding: 1.25rem 1.35rem;
+            border-radius: 18px;
+            border: 1px solid #e5e7eb;
+            background: #ffffff;
+            margin-bottom: 1.15rem;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            color: #111827 !important;
+        }
+        .section-card h1,
+        .section-card h2,
+        .section-card h3,
+        .section-card h4,
+        .section-card p,
+        .section-card span,
+        .section-card label {
+            color: #111827 !important;
+        }
+        .section-card h3 {
+            font-size: 1.45rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin-bottom: 0.35rem;
+        }
+        .step-badge {
+            display: inline-block;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            background: #eef2ff;
+            color: #3730a3;
+            font-size: 0.8rem;
+            font-weight: 700;
+            margin-bottom: 0.4rem;
+        }
+        .small-note {
+            color: #4b5563 !important;
+            font-size: 0.9rem;
+        }
+        .stFileUploader label, .stNumberInput label, .stSlider label, .stCheckbox label, .stTextInput label {
+            font-weight: 700 !important;
+        }
+        div.stButton > button:first-child {
+            border-radius: 999px;
+            min-height: 3rem;
+            font-weight: 700;
+        }
+        div[data-testid="stDownloadButton"] button {
+            border-radius: 999px;
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # -----------------------------
+    # Helpers
+    # -----------------------------
+
+    def clean_number(x):
+        if pd.isna(x):
+            return 0
+        if isinstance(x, (int, float)):
+            return int(x)
+        s = str(x).strip().replace(',', '').replace('%', '')
+        if s.lower() in ['', 'nan', 'none', 'null', '-']:
+            return 0
+        try:
+            return int(float(s))
+        except Exception:
+            return 0
+
+
+    def parse_date_series(s):
+        # First normal parse, then dayfirst fallback.
+        out = pd.to_datetime(s, errors='coerce', infer_datetime_format=True)
+        if out.isna().mean() > 0.5:
+            out2 = pd.to_datetime(s, errors='coerce', dayfirst=True, infer_datetime_format=True)
+            if out2.notna().sum() > out.notna().sum():
+                out = out2
+        return out
+
+
+    def parse_single_date(x):
+        d = pd.to_datetime(x, errors='coerce')
+        if pd.isna(d):
+            d = pd.to_datetime(x, errors='coerce', dayfirst=True)
+        return d
+
+
+    def detect_col(df, candidates):
+        norm = {str(c).strip().lower(): c for c in df.columns}
+        for cand in candidates:
+            key = cand.strip().lower()
+            if key in norm:
+                return norm[key]
+        # fuzzy-ish contains fallback
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            for cand in candidates:
+                ck = cand.strip().lower()
+                if ck and ck in cl:
+                    return c
+        return None
+
+
+    def normalize_text(s):
+        s = str(s or '')
+        # split CamelCase: ReallyLikeYou -> Really Like You
+        s = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', s)
+        s = s.replace('&', ' and ')
+        s = re.sub(r'[_\-\/\(\)\[\]\{\}\.,:;!\?]+', ' ', s)
+        s = re.sub(r'[^A-Za-z0-9가-힣一-龥ぁ-んァ-ン ]+', ' ', s)
+        s = s.lower()
+        # common cleanup
+        s = s.replace('posts tiktok', ' ')
+        s = s.replace('post tiktok', ' ')
+        s = re.sub(r'\b20\d{2}\b|\b\d{1,2}\b', ' ', s)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+
+
+    def filename_match_text(filename):
+        name = Path(filename).stem
+        name = re.sub(r'^\d{4}[-_]?\d{1,2}[-_]?\d{1,2}[_\- ]*', '', name)
+        name = re.sub(r'[_\- ]*posts?[_\- ]*tiktok.*$', '', name, flags=re.I)
+        return normalize_text(name)
+
+
+    def track_match_text(artist_sound):
+        return normalize_text(artist_sound)
+
+
+    def score_match(file_text, track_text):
+        if not file_text or not track_text:
+            return 0
+        if fuzz:
+            return max(
+                fuzz.token_set_ratio(file_text, track_text),
+                fuzz.token_sort_ratio(file_text, track_text),
+                fuzz.partial_ratio(file_text, track_text),
+            )
+        # fallback token overlap
+        ft = set(file_text.split())
+        tt = set(track_text.split())
+        if not ft or not tt:
+            return 0
+        return int(100 * len(ft & tt) / max(len(ft), len(tt)))
+
+
+    def read_table(uploaded):
+        name = uploaded.name.lower()
+        if name.endswith('.csv'):
+            return pd.read_csv(uploaded)
+        return pd.read_excel(uploaded)
+
+
+    def find_best_track(file_name, track_df, artist_col):
+        ft = filename_match_text(file_name)
+        best_idx, best_score = None, -1
+        for idx, row in track_df.iterrows():
+            score = score_match(ft, track_match_text(row.get(artist_col, '')))
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return best_idx, best_score, ft
+
+
+    def country_alias(x):
+        s = str(x or '').strip().lower()
+        aliases = {
+            'kr': 'KR', 'korea': 'KR', 'south korea': 'KR', 'kor': 'KR',
+            'id': 'Indonesia', 'indonesia': 'Indonesia',
+            'my': 'Malaysia', 'malaysia': 'Malaysia',
+            'ph': 'Philippines', 'philippines': 'Philippines',
+            'sg': 'Singapore', 'singapore': 'Singapore',
+            'th': 'Thailand', 'thailand': 'Thailand',
+            'vn': 'Vietnam', 'vietnam': 'Vietnam', 'viet nam': 'Vietnam',
+        }
+        return aliases.get(s, str(x or '').strip())
+
+
+    def kol_size(country, followers):
+        c = country_alias(country)
+        f = clean_number(followers)
+        if c == 'KR':
+            return ''
+
+        # Thresholds are upper limits, not lower bounds.
+        # Example for Malaysia:
+        #   <= 10,000 = Nano
+        #   <= 100,000 = Micro
+        #   <= 1,000,000 = Macro
+        #   > 1,000,000 = Mega
+        thresholds = {
+            'Indonesia': [
+                (1000, 'Buzzer'), (10000, 'Nano'), (50000, 'Micro'),
+                (200000, 'Medium'), (1000000, 'Macro')
+            ],
+            'Malaysia': [
+                (10000, 'Nano'), (100000, 'Micro'), (1000000, 'Macro')
+            ],
+            'Philippines': [
+                (10000, 'Nano'), (100000, 'Micro'), (2000000, 'Macro')
+            ],
+            'Singapore': [
+                (10000, 'Nano'), (30000, 'Micro'), (100000, 'Medium'),
+                (500000, 'Macro')
+            ],
+            'Thailand': [
+                (1000, 'Buzzer'), (10000, 'Nano'), (100000, 'Micro'),
+                (500000, 'Medium'), (1000000, 'Macro'), (5000000, 'Mega')
+            ],
+            'Vietnam': [
+                (1000, 'Buzzer'), (10000, 'Nano'), (100000, 'Micro'),
+                (500000, 'Medium'), (1000000, 'Macro'), (5000000, 'Mega')
+            ],
+        }
+
+        for cutoff, label in thresholds.get(c, []):
+            if f <= cutoff:
+                return label
+
+        top_labels = {
+            'Indonesia': 'Mega',
+            'Malaysia': 'Mega',
+            'Philippines': 'Mega',
+            'Singapore': 'Mega',
+            'Thailand': 'Super Mega',
+            'Vietnam': 'Super Mega',
+        }
+        return top_labels.get(c, '')
+
+    def extract_video_id(url):
+        s = str(url or '')
+        m = re.search(r'/video/(\d+)', s)
+        if m:
+            return m.group(1)
+        m = re.search(r'(?:item_id|aweme_id|share_item_id|modal_id)[=:](\d+)', s)
+        return m.group(1) if m else ''
+
+
+    def first_number_from_keys(obj, keys):
+        if not isinstance(obj, dict):
+            return 0
+        for key in keys:
+            value = obj.get(key)
+            num = clean_number(value)
+            if num > 0:
+                return num
+        return 0
+
+
+    def extract_tiktok_username_from_url(url):
+        s = str(url or '')
+        m = re.search(r'tiktok\.com/@([^/?#]+)', s)
+        return m.group(1).strip().lower() if m else ''
+
+
+    def extract_author_username(item):
+        if not isinstance(item, dict):
+            return ''
+        author = item.get('authorMeta') if isinstance(item.get('authorMeta'), dict) else {}
+        author2 = item.get('author') if isinstance(item.get('author'), dict) else {}
+        for value in [
+            author.get('name'), author.get('nickName'), author.get('uniqueId'), author.get('username'),
+            author2.get('uniqueId'), author2.get('username'), item.get('author'), item.get('authorName'),
+            extract_tiktok_username_from_url(item.get('webVideoUrl') or item.get('submittedVideoUrl') or item.get('url'))
+        ]:
+            value = str(value or '').strip().lstrip('@')
+            if value:
+                return value.lower()
+        return ''
+
+
+    def extract_author_followers(item):
+        if not isinstance(item, dict):
+            return 0
+        author = item.get('authorMeta') if isinstance(item.get('authorMeta'), dict) else {}
+        author2 = item.get('author') if isinstance(item.get('author'), dict) else {}
+        stats = item.get('stats') if isinstance(item.get('stats'), dict) else {}
+        return max(
+            first_number_from_keys(author, ['fans', 'followers', 'followerCount', 'fansCount']),
+            first_number_from_keys(author2, ['fans', 'followers', 'followerCount', 'fansCount']),
+            first_number_from_keys(stats, ['followerCount', 'followers']),
+            first_number_from_keys(item, ['authorFans', 'authorFollowers', 'followerCount', 'followers'])
+        )
+
+
+    def run_apify_for_saves(links, token):
+        from apify_client import ApifyClient
+        client = ApifyClient(token)
+        run_input = {
+            'postURLs': links,
+            'resultsPerPage': len(links),
+            'shouldDownloadVideos': False,
+            'shouldDownloadCovers': False,
+            'shouldDownloadSlideshowImages': False,
+            'shouldDownloadAvatars': False,
+            'shouldDownloadMusicCovers': False,
+            'commentsPerPost': 0,
+            'topLevelCommentsPerPost': 0,
+            'maxRepliesPerComment': 0,
+            'excludePinnedPosts': False,
+            'scrapeRelatedSearchWords': False,
+            'scrapeRelatedVideos': False,
+            'proxyCountryCode': 'None',
+        }
+        run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
+        dataset_id = run.get('defaultDatasetId') if isinstance(run, dict) else getattr(run, 'default_dataset_id', None)
+        items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
+
+        saves_by_video = {}
+        followers_by_video = {}
+        followers_by_username = {}
+
+        for item in items:
+            vid = str(item.get('id') or extract_video_id(item.get('webVideoUrl') or item.get('submittedVideoUrl') or item.get('url')))
+            saves = clean_number(item.get('collectCount', item.get('stats', {}).get('collectCount', 0) if isinstance(item.get('stats'), dict) else 0))
+            followers = extract_author_followers(item)
+            username = extract_author_username(item)
+
+            if vid:
+                saves_by_video[vid] = saves
+                if followers > 0:
+                    followers_by_video[vid] = followers
+            if username and followers > 0:
+                followers_by_username[username] = followers
+
+        return {
+            'saves_by_video': saves_by_video,
+            'followers_by_video': followers_by_video,
+            'followers_by_username': followers_by_username,
+        }
+
+
+    def pct(num, den):
+        den = clean_number(den)
+        num = clean_number(num)
+        if den <= 0:
+            return ''
+        return f'{num / den:.2%}'
+
+
+    def process_one(melody_df, track_row, cols, top_n=20, window_days=7):
+        country = track_row.get(cols['track_country'], '')
+        label = track_row.get(cols['track_label'], '') if cols['track_label'] else ''
+        artist_sound = track_row.get(cols['track_artist'], '')
+        viral_date_raw = track_row.get(cols['track_viral'], '')
+        repertoire = track_row.get(cols['track_repertoire'], '') if cols['track_repertoire'] else ''
+        viral_date = parse_single_date(viral_date_raw)
+        if pd.isna(viral_date):
+            raise ValueError(f'Could not parse viral date: {viral_date_raw}')
+
+        date_col = cols['date']
+        country_col = cols['country']
+        username_col = cols['username']
+        followers_col = cols['followers']
+        link_col = cols['link']
+        views_col = cols['views']
+        likes_col = cols['likes']
+        comments_col = cols['comments']
+        shares_col = cols['shares']
+
+        df = melody_df.copy()
+        df['_parsed_date'] = parse_date_series(df[date_col])
+        df['_country_norm'] = df[country_col].apply(country_alias)
+        target_country = country_alias(country)
+
+        start = viral_date - timedelta(days=window_days)
+        end = viral_date + timedelta(days=window_days)
+
+        before = len(df)
+        df = df[df['_country_norm'].astype(str).str.lower() == str(target_country).lower()].copy()
+        after_country = len(df)
+        df = df[(df['_parsed_date'] >= start) & (df['_parsed_date'] <= end)].copy()
+        after_date = len(df)
+
+        df['_likes_num'] = df[likes_col].apply(clean_number)
+        df['_comments_num'] = df[comments_col].apply(clean_number)
+        df['_shares_num'] = df[shares_col].apply(clean_number)
+        df['_ranking_score'] = df['_likes_num'] + df['_comments_num'] + df['_shares_num']
+        df = df.sort_values('_ranking_score', ascending=False).head(top_n).copy()
+
+        rows = []
+        for _, r in df.iterrows():
+            views = clean_number(r.get(views_col))
+            likes = clean_number(r.get(likes_col))
+            comments = clean_number(r.get(comments_col))
+            shares = clean_number(r.get(shares_col))
+            saves = 0
+            followers = clean_number(r.get(followers_col))
+            rows.append({
+                'Country': country,
+                'Label': label,
+                'Artist - Sound': artist_sound,
+                '2026 Viral Date': viral_date.strftime('%Y-%m-%d'),
+                'Repertoire': repertoire,
+                'Date': r.get(date_col, ''),
+                'Username': r.get(username_col, ''),
+                'Followers': followers,
+                'KOL Size': kol_size(country, followers),
+                'Link': r.get(link_col, ''),
+                'Views': views,
+                'Likes': likes,
+                'Comments': comments,
+                'Shares': shares,
+                'Saves': saves,
+                'Total Engagement': likes + comments + shares + saves,
+                'Engagement Rate': pct(likes + comments + shares + saves, views),
+                'Likes Rate': pct(likes, views),
+                'Comments Rate': pct(comments, views),
+                'Shares Rate': pct(shares, views),
+                'Saves Rate': pct(saves, views),
+                '_video_id': extract_video_id(r.get(link_col, '')),
+            })
+        out = pd.DataFrame(rows)
+        stats = {'original': before, 'country': after_country, 'date': after_date, 'selected': len(out)}
+        return out, stats
+
+
+    def apply_saves(out_df, token):
+        if out_df.empty:
+            return out_df
+        links = out_df['Link'].dropna().astype(str).tolist()
+        apify_data = run_apify_for_saves(links, token)
+        save_map = apify_data.get('saves_by_video', {}) if isinstance(apify_data, dict) else apify_data
+        followers_by_video = apify_data.get('followers_by_video', {}) if isinstance(apify_data, dict) else {}
+        followers_by_username = apify_data.get('followers_by_username', {}) if isinstance(apify_data, dict) else {}
+
+        out = out_df.copy()
+        for idx, row in out.iterrows():
+            vid = str(row.get('_video_id') or extract_video_id(row.get('Link')))
+            saves = clean_number(save_map.get(vid, 0))
+            out.at[idx, 'Saves'] = saves
+
+            followers = clean_number(row.get('Followers'))
+            if followers <= 0:
+                username = str(row.get('Username') or '').strip().lstrip('@').lower()
+                followers = clean_number(followers_by_video.get(vid, 0))
+                if followers <= 0 and username:
+                    followers = clean_number(followers_by_username.get(username, 0))
+                if followers <= 0:
+                    url_username = extract_tiktok_username_from_url(row.get('Link'))
+                    followers = clean_number(followers_by_username.get(url_username, 0))
+                if followers > 0:
+                    out.at[idx, 'Followers'] = followers
+                    out.at[idx, 'KOL Size'] = kol_size(row.get('Country'), followers)
+
+            total = clean_number(row.get('Likes')) + clean_number(row.get('Comments')) + clean_number(row.get('Shares')) + saves
+            views = clean_number(row.get('Views'))
+            out.at[idx, 'Total Engagement'] = total
+            out.at[idx, 'Engagement Rate'] = pct(total, views)
+            out.at[idx, 'Saves Rate'] = pct(saves, views)
+        return out
+
+
+    def excel_sheet_country_code(country):
+        c = country_alias(country)
+        code_map = {
+            'Indonesia': 'ID',
+            'Malaysia': 'MY',
+            'Philippines': 'PH',
+            'Singapore': 'SG',
+            'Thailand': 'TH',
+            'Vietnam': 'VN',
+            'KR': 'KR',
+        }
+        return code_map.get(c, str(country or '').strip()[:10] or 'Unknown')
+
+
+    def safe_sheet_name(name):
+        # Excel sheet names cannot contain these characters and must be <= 31 chars.
+        name = re.sub(r'[\\/*?:\[\]]+', ' ', str(name or 'Sheet')).strip()
+        return name[:31] or 'Sheet'
+
+
+    def write_output_sheet(writer, df, sheet_name):
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+
+        # Keep the workbook readable without over-wide columns.
+        for col_cells in ws.columns:
+            header = str(col_cells[0].value or '')
+            max_len = len(header)
+            for cell in col_cells[1:]:
+                max_len = max(max_len, len(str(cell.value or '')))
+            width = min(max(max_len + 2, 10), 45)
+            ws.column_dimensions[col_cells[0].column_letter].width = width
+
+
+    def to_excel_bytes(df):
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            # Keep market order consistent everywhere: MY, PH, SG, TH, VN, KR, then ID/others.
+            preferred_order = ['MY', 'PH', 'SG', 'TH', 'VN', 'KR', 'ID']
+            work = df.copy()
+            work['_sheet_code'] = work['Country'].apply(excel_sheet_country_code)
+            work['_market_order'] = work['_sheet_code'].apply(
+                lambda x: preferred_order.index(x) if x in preferred_order else 999
+            )
+            work = work.sort_values(['_market_order', '_sheet_code'], kind='stable')
+
+            # First tab: all rows sorted by market order.
+            write_output_sheet(writer, work.drop(columns=['_sheet_code', '_market_order']), 'All Post Data')
+
+            # Additional tabs: one per country in the same market order.
+            country_codes = list(work['_sheet_code'].dropna().astype(str).unique())
+            country_codes = sorted(country_codes, key=lambda x: (preferred_order.index(x) if x in preferred_order else 999, x))
+
+            used_names = {'All Post Data'}
+            for code in country_codes:
+                country_df = work[work['_sheet_code'] == code].drop(columns=['_sheet_code', '_market_order'])
+                base_name = safe_sheet_name(f'({code}) Post Data')
+                sheet_name = base_name
+                n = 2
+                while sheet_name in used_names:
+                    suffix = f' {n}'
+                    sheet_name = safe_sheet_name(base_name[:31-len(suffix)] + suffix)
+                    n += 1
+                used_names.add(sheet_name)
+                write_output_sheet(writer, country_df, sheet_name)
+        return buf.getvalue()
+
+    FINAL_COLUMNS = [
+        'Country', 'Label', 'Artist - Sound', '2026 Viral Date', 'Repertoire',
+        'Date', 'Username', 'Followers', 'KOL Size', 'Link',
+        'Views', 'Likes', 'Comments', 'Shares', 'Saves', 'Total Engagement',
+        'Engagement Rate', 'Likes Rate', 'Comments Rate', 'Shares Rate', 'Saves Rate'
+    ]
+
+    # -----------------------------
+    # UI
+    # -----------------------------
+
+    st.markdown(
+        '''
+        <div class="hero-card">
+            <div class="hero-title">MelodyIQ Batch Filter</div>
+            <p class="hero-subtitle">Upload a tracklist and MelodyIQ CSVs, then filter by country and viral-date window, rank the top posts, and export clean post-data tabs by market.</p>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+
+    with st.expander('How it works', expanded=False):
+        st.markdown('''
+        **1. Match files:** Each MelodyIQ CSV is matched to the closest tracklist row using the filename.  
+        **2. Filter rows:** Rows are filtered by market and viral date window.  
+        **3. Rank posts:** Posts are ranked by **Likes + Comments + Shares** and limited to Top N.  
+        **4. KOL size:** KOL labels use threshold-as-limit rules, with KR left blank.  
+        **5. Export:** XLSX includes **All Post Data** plus separate market tabs.
+        ''')
+
+    st.markdown('<div class="section-card"><span class="step-badge">Step 1</span><h3 style="margin-top:0;color:#111827!important">Upload files</h3>', unsafe_allow_html=True)
+    file_col1, file_col2 = st.columns(2)
+    with file_col1:
+        track_file = st.file_uploader('Tracklist CSV/XLSX', type=['csv', 'xlsx', 'xls'])
+    with file_col2:
+        melody_files = st.file_uploader('MelodyIQ CSV files', type=['csv'], accept_multiple_files=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card"><span class="step-badge">Step 2</span><h3 style="margin-top:0;color:#111827!important">Processing settings</h3>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        top_n = st.number_input('Top N posts per file', min_value=1, max_value=100, value=20)
+    with c2:
+        window_days = st.number_input('Viral date window, days before/after', min_value=0, max_value=60, value=7)
+    with c3:
+        match_threshold = st.slider('Auto-match threshold', min_value=50, max_value=100, value=75)
+
+    fetch_saves = st.checkbox('Fetch Saves from Apify after Top N selection', value=False)
+    apify_token = ''
+    if fetch_saves:
+        apify_token = st.text_input('Apify Token', type='password')
+    st.markdown('<p class="small-note">Tip: keep the threshold at 75 unless filenames are very different from track names.</p></div>', unsafe_allow_html=True)
+
+    if not track_file or not melody_files:
+        st.info('Upload a tracklist and at least one MelodyIQ CSV to continue.')
+        st.stop()
+
+    try:
+        track_df = read_table(track_file)
+    except Exception as e:
+        st.error(f'Could not read tracklist: {e}')
+        st.stop()
+
+    track_country = detect_col(track_df, ['Country', 'Market'])
+    track_label = detect_col(track_df, ['Label'])
+    track_artist = detect_col(track_df, ['Artist - Sound', 'Artist-Sound', 'Artist Sound', 'Sound', 'Track'])
+    track_viral = detect_col(track_df, ['2026 Viral Date', 'Viral Date', 'viral_date'])
+    track_repertoire = detect_col(track_df, ['Repertoire'])
+
+    missing_track = []
+    for name, col in [('Country', track_country), ('Artist - Sound', track_artist), ('2026 Viral Date', track_viral)]:
+        if not col:
+            missing_track.append(name)
+    if missing_track:
+        st.error('Tracklist missing required columns: ' + ', '.join(missing_track))
+        st.write('Detected columns:', list(track_df.columns))
+        st.stop()
+
+    st.markdown('<div class="section-card"><span class="step-badge">Step 3</span><h3 style="margin-top:0">Match preview</h3>', unsafe_allow_html=True)
+    preview = []
+    file_data = []
+    for f in melody_files:
+        try:
+            df = pd.read_csv(f)
+            f.seek(0)
+            best_idx, best_score, file_text = find_best_track(f.name, track_df, track_artist)
+            matched = best_score >= match_threshold
+            matched_track = track_df.loc[best_idx, track_artist] if best_idx is not None else ''
+            preview.append({
+                'File': f.name,
+                'Filename text': file_text,
+                'Matched Track': matched_track if matched else '',
+                'Score': best_score,
+                'Status': 'Matched' if matched else 'Needs check',
+            })
+            file_data.append({'file': f, 'df': df, 'best_idx': best_idx, 'score': best_score, 'matched': matched})
+        except Exception as e:
+            preview.append({'File': f.name, 'Filename text': '', 'Matched Track': '', 'Score': 0, 'Status': f'Error: {e}'})
+
+    preview_df = pd.DataFrame(preview)
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if any(not x.get('matched') for x in file_data):
+        st.warning('Some files are below the match threshold. Lower the threshold or rename files before processing.')
+
+    if st.button('Process files', type='primary'):
+        all_outputs = []
+        summaries = []
+        progress = st.progress(0)
+        status = st.empty()
+
+        for i, item in enumerate(file_data):
+            if not item['matched']:
+                summaries.append({'File': item['file'].name, 'Track': '', 'Status': 'Skipped - unmatched'})
+                continue
+            f = item['file']
+            df = item['df']
+            track_row = track_df.loc[item['best_idx']]
+            status.write(f'Processing {f.name} → {track_row.get(track_artist)}')
+
+            date_col = detect_col(df, ['Date', 'Post Date', 'Created Date', 'createTimeISO'])
+            country_col = detect_col(df, ['Country', 'Market', 'Region'])
+            username_col = detect_col(df, ['Username', 'User', 'Creator', 'authorMeta.name'])
+            followers_col = detect_col(df, ['Followers', 'Follower Count', 'authorMeta.fans'])
+            link_col = detect_col(df, ['Link', 'URL', 'TikTok Link', 'Video URL', 'webVideoUrl', 'submittedVideoUrl'])
+            views_col = detect_col(df, ['Views', 'Plays', 'playCount'])
+            likes_col = detect_col(df, ['Likes', 'diggCount'])
+            comments_col = detect_col(df, ['Comments', 'commentCount'])
+            shares_col = detect_col(df, ['Shares', 'shareCount'])
+
+            missing = [n for n, c in {
+                'Date': date_col, 'Country': country_col, 'Username': username_col,
+                'Followers': followers_col, 'Link': link_col, 'Views': views_col,
+                'Likes': likes_col, 'Comments': comments_col, 'Shares': shares_col
+            }.items() if not c]
+            if missing:
+                summaries.append({'File': f.name, 'Track': track_row.get(track_artist), 'Status': 'Skipped - missing ' + ', '.join(missing)})
+                continue
+
+            cols = {
+                'track_country': track_country, 'track_label': track_label,
+                'track_artist': track_artist, 'track_viral': track_viral,
+                'track_repertoire': track_repertoire,
+                'date': date_col, 'country': country_col, 'username': username_col,
+                'followers': followers_col, 'link': link_col, 'views': views_col,
+                'likes': likes_col, 'comments': comments_col, 'shares': shares_col,
+            }
+            try:
+                out, stats = process_one(df, track_row, cols, top_n=int(top_n), window_days=int(window_days))
+                summaries.append({
+                    'File': f.name,
+                    'Track': track_row.get(track_artist),
+                    'Original Rows': stats['original'],
+                    'After Country': stats['country'],
+                    'After Date': stats['date'],
+                    'Selected': stats['selected'],
+                    'Status': 'OK'
+                })
+                all_outputs.append(out)
+            except Exception as e:
+                summaries.append({'File': f.name, 'Track': track_row.get(track_artist), 'Status': f'Error: {e}'})
+            progress.progress((i + 1) / len(file_data))
+
+        if not all_outputs:
+            st.error('No outputs generated.')
+            st.dataframe(pd.DataFrame(summaries), use_container_width=True, hide_index=True)
+            st.stop()
+
+        combined = pd.concat(all_outputs, ignore_index=True)
+
+        if fetch_saves:
+            if not apify_token:
+                st.warning('Apify token missing, so Saves were not fetched.')
+            else:
+                try:
+                    status.write('Fetching Saves from Apify for selected Top rows only...')
+                    combined = apply_saves(combined, apify_token)
+                except Exception as e:
+                    st.error(f'Apify Saves enrichment failed: {e}')
+
+        final_df = combined[FINAL_COLUMNS].copy()
+
+        # Make Batch Filter the first step of the full tagging workflow.
+        # The filtered MelodyIQ output becomes the original report used by Upload & Tag.
+        st.session_state.original_df = final_df.copy()
+        st.session_state.original_url_col = 'Link'
+        st.session_state.original_market_map = _build_original_market_map(final_df, 'Link', 'Country')
+        st.session_state.batch_filter_df = final_df.copy()
+
+        status.empty()
+        progress.empty()
+
+        st.success(f'Done. Output rows: {len(final_df)}')
+        st.markdown(
+            "<div class='info-banner'>Filtered MelodyIQ rows are now loaded as the source report for <strong>Upload &amp; Tag</strong>. Continue there to run Apify + AI tagging.</div>",
+            unsafe_allow_html=True
+        )
+        if st.button('Continue to Upload & Tag', type='primary', use_container_width=True, key='batch_continue_upload_tag'):
+            st.session_state.page = 'Upload & Tag'
+            st.rerun()
+        st.markdown('<div class="section-card"><span class="step-badge">Results</span><h3 style="margin-top:0">Processing summary</h3>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(summaries), use_container_width=True, hide_index=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.subheader('Preview')
+        st.dataframe(final_df.head(50), use_container_width=True, hide_index=True)
+
+        csv_bytes = final_df.to_csv(index=False).encode('utf-8-sig')
+        xlsx_bytes = to_excel_bytes(final_df)
+
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button('Download CSV', csv_bytes, file_name='melodyiq_filtered_top20.csv', mime='text/csv', use_container_width=True)
+        with d2:
+            st.download_button('Download XLSX', xlsx_bytes, file_name='melodyiq_filtered_top20.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+
+# ══════════════════════════════════════════════════════════
 # EXPORT
 # ══════════════════════════════════════════════════════════
 elif page == "Export":
@@ -3501,10 +4304,66 @@ elif page == "Export":
             return pd.read_csv(uploaded_file), "csv"
         return pd.read_excel(uploaded_file), "xlsx"
 
+    # Final Excel export must keep the Batch Filter workbook structure.
+    # It should NOT create a single random "Tagged Output" sheet.
+    # It writes All Post Data first, then market tabs in the exact order:
+    # (MY), (PH), (SG), (TH), (VN), (KR).
+    # Row order from the source Batch Filter output is preserved; the only
+    # structural change is adding/updating Narrative, Creative Type and
+    # Content Details.
+    FINAL_MARKET_ORDER = ['MY', 'PH', 'SG', 'TH', 'VN', 'KR']
+
+    def _export_country_code(v):
+        s = str(v or '').strip()
+        sl = s.lower()
+        aliases = {
+            'my': 'MY', 'malaysia': 'MY',
+            'ph': 'PH', 'philippines': 'PH',
+            'sg': 'SG', 'singapore': 'SG',
+            'th': 'TH', 'thailand': 'TH',
+            'vn': 'VN', 'vietnam': 'VN', 'viet nam': 'VN',
+            'kr': 'KR', 'korea': 'KR', 'south korea': 'KR', 'kor': 'KR',
+        }
+        return aliases.get(sl, s)
+
+    def _format_export_sheet(writer, sheet_name):
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+        for col_cells in ws.columns:
+            header = str(col_cells[0].value or '')
+            max_len = len(header)
+            for cell in col_cells[1:]:
+                max_len = max(max_len, len(str(cell.value or '')))
+            ws.column_dimensions[col_cells[0].column_letter].width = min(max(max_len + 2, 10), 45)
+
     def _to_excel_bytes(out_df):
         buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            out_df.to_excel(writer, index=False, sheet_name="Tagged Output")
+
+        work = out_df.copy()
+        if 'Country' in work.columns:
+            work['_export_market_code'] = work['Country'].apply(_export_country_code)
+        elif 'market' in work.columns:
+            work['_export_market_code'] = work['market'].apply(_export_country_code)
+        else:
+            work['_export_market_code'] = ''
+
+        helper_cols = ['_export_market_code']
+        clean_all = work.drop(columns=helper_cols, errors='ignore')
+
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            # Preserve the source row order exactly for All Post Data.
+            clean_all.to_excel(writer, index=False, sheet_name='All Post Data')
+            _format_export_sheet(writer, 'All Post Data')
+
+            # Always create market tabs in this exact order. Empty markets still
+            # get a tab with headers so the workbook layout is stable.
+            for code in FINAL_MARKET_ORDER:
+                tab_df = work[work['_export_market_code'] == code].drop(columns=helper_cols, errors='ignore')
+                sheet_name = f'({code}) Post Data'
+                tab_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                _format_export_sheet(writer, sheet_name)
+
         return buffer.getvalue()
 
     if melody_file or not st.session_state.original_df.empty:
