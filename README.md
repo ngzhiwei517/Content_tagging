@@ -266,30 +266,6 @@ Interactive Dashboard
       ▼
 Export Final Dataset
 ```
-
----
-
-# ⚙ Installation
-
-Clone the repository
-
-```bash
-git clone https://github.com/YOUR_USERNAME/content-tagging-platform.git
-cd content-tagging-platform
-```
-
-Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-Run the application
-
-```bash
-streamlit run app.py
-```
-
 ---
 
 # 🔑 Required API Keys
