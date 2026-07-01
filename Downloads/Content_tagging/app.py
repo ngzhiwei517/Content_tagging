@@ -3523,9 +3523,9 @@ elif page == "Batch Filter":
 
     def parse_date_series(s):
         # First normal parse, then dayfirst fallback.
-        out = pd.to_datetime(s, errors='coerce', infer_datetime_format=True)
+        out = pd.to_datetime(s, errors='coerce')
         if out.isna().mean() > 0.5:
-            out2 = pd.to_datetime(s, errors='coerce', dayfirst=True, infer_datetime_format=True)
+            out2 = pd.to_datetime(s, errors='coerce', dayfirst=True)
             if out2.notna().sum() > out.notna().sum():
                 out = out2
         return out
