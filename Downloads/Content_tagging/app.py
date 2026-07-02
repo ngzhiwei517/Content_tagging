@@ -1303,10 +1303,53 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
         public_url = _clean_text(raw_source.get('webVideoUrl')) or _clean_text(raw_source.get('submittedVideoUrl')) or _clean_text(raw_source.get('url')) or _clean_text(row.get('url'))
         all_metrics_zero = (raw_play == 0 and raw_like == 0 and raw_share == 0 and raw_comment == 0 and raw_save == 0)
 
-        # Only rows with an actual scraper error, or rows with no usable metrics but a URL,
-        # go directly to manual review. Normal rows continue to Gemini.
-        if scraper_error or scraper_error_code or (all_metrics_zero and public_url and not _clean_text(row.get('text'))):
-            reason_text = scraper_error or scraper_error_code or 'Metrics unavailable from scraper'
+        # Auto-skip unavailable/deleted/private posts instead of sending them to Review.
+        # Review should be reserved for rows where a human can actually classify content.
+        def _is_unavailable_scraper_issue(*vals):
+            blob = ' '.join(str(v or '') for v in vals).upper()
+            if not blob.strip():
+                return False
+            unavailable_markers = [
+                'POST_NOT_FOUND', 'NOT_FOUND', 'PRIVATE', 'DELETED', 'UNAVAILABLE',
+                'VIDEO_UNAVAILABLE', 'ITEM_UNAVAILABLE', 'SENSITIVE', 'NO_LONGER_AVAILABLE',
+                'COULD NOT RETRIEVE', 'NOT AVAILABLE'
+            ]
+            return any(m in blob for m in unavailable_markers)
+
+        no_usable_metadata = all_metrics_zero and public_url and not _clean_text(row.get('text'))
+
+        if scraper_error or scraper_error_code or no_usable_metadata:
+            reason_text = scraper_error or scraper_error_code or 'No usable metadata from scraper'
+            if _is_unavailable_scraper_issue(scraper_error, scraper_error_code, reason_text) or no_usable_metadata:
+                log_list.append(f"  → Unavailable/deleted/private post skipped ({scraper_error_code or reason_text})")
+                result = {
+                    'narrative': '',
+                    'creative_type': [],
+                    'content_details': '',
+                    'confidence': 0,
+                    'reasoning': str(reason_text),
+                    'needs_human_review': False,
+                }
+                out = build_out(
+                    row, vid_id, market, track, result,
+                    'auto_removed_unavailable', 'removed', 0,
+                    [str(scraper_error_code or reason_text)],
+                    'Auto-skipped because the post is unavailable, deleted, private, or has no usable scraper metadata.',
+                    raw_source, source_file, i
+                )
+                if not out.get('tiktok_url') and public_url:
+                    out['tiktok_url'] = public_url
+                out['review_action'] = 'REMOVE'
+                out['remove_reason'] = str(scraper_error_code or reason_text)
+                out['needs_human_review'] = False
+                out['manual_metrics_required'] = False
+                results.append(out)
+                if on_row_done:
+                    on_row_done(i + 1, len(df), out, 'auto_removed_unavailable')
+                time.sleep(delay_seconds)
+                continue
+
+            # Keep unusual scraper/metrics issues visible if the post may still be manually usable.
             log_list.append(f"  → Scraper/metrics exception ({scraper_error_code or reason_text}) — manual review with TikTok URL")
             result = {
                 'narrative': '',
@@ -1323,7 +1366,6 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 'Scraper could not retrieve full metadata. Open the TikTok URL, tag manually, and fill metrics if needed.',
                 raw_source, source_file, i
             )
-            # Ensure the public URL is preserved even when the scraper row only has `url`.
             if not out.get('tiktok_url') and public_url:
                 out['tiktok_url'] = public_url
             out['manual_metrics_required'] = (out.get('plays', 0) == 0 and out.get('likes', 0) == 0 and out.get('shares', 0) == 0)
@@ -1835,648 +1877,148 @@ elif page == "Upload & Tag":
     st.markdown("""
     <div class='page-header'>
         <h1>Upload &amp; Tag</h1>
-        <p>Upload Apify JSON exports, name each track, then run the AI tagging pipeline.</p>
+        <p>Run Apify scraping and AI tagging from the filtered MelodyIQ report.</p>
     </div>
     """, unsafe_allow_html=True)
 
     if not st.session_state.gemini_key or not st.session_state.apify_token:
-        st.markdown("<div class='warn-banner'>⚠️ Enter your API keys above before continuing.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='warn-banner'>Enter your Gemini and Apify API keys above before continuing.</div>", unsafe_allow_html=True)
         st.stop()
-
-    # ── Step 0: Source report from Batch Filter or manual upload ─────────────────────
-    st.markdown("""
-    <div class='section-card' style='margin-bottom:16px'>
-        <h3>Step 0 — Source MelodyIQ / Tracking Report</h3>
-        <p style='font-size:13px;color:#64748b;margin:0 0 14px'>
-            If you already completed <strong>Batch Filter</strong>, the filtered output is used automatically here.
-            You can still upload another CSV/XLSX below if you want to replace it manually. The app uses the
-            <strong>Country / Market</strong> column as the source of truth.
-        </p>
-    """, unsafe_allow_html=True)
-
-    if not st.session_state.original_df.empty:
-        source_note = "Batch Filter output" if not st.session_state.get('batch_filter_df', pd.DataFrame()).empty else "Uploaded original report"
-        st.markdown(
-            f"<div class='info-banner'>✅ Using <strong>{source_note}</strong> as the source report · "
-            f"{len(st.session_state.original_df)} rows. Upload another file below only if you want to replace it.</div>",
-            unsafe_allow_html=True
-        )
-
-    original_file = st.file_uploader(
-        "Upload another original CSV / XLSX report (optional)",
-        type=["csv", "xlsx", "xls"],
-        key="original_master_uploader"
-    )
-    if original_file is not None:
-        try:
-            original_df, original_kind = _read_report_global(original_file)
-            original_url_col = _detect_url_col_global(original_df)
-            original_market_col = _detect_market_col_global(original_df)
-            if not original_url_col:
-                st.error("Could not find a Link / URL column in the original report.")
-            elif not original_market_col:
-                st.error("Could not find a Country / Market column in the original report.")
-            else:
-                st.session_state.original_df = original_df.copy()
-                st.session_state.original_url_col = original_url_col
-                st.session_state.original_market_map = _build_original_market_map(original_df, original_url_col, original_market_col)
-                st.success(f"Original report loaded: {len(original_df)} rows · Link column: {original_url_col} · Market column: {original_market_col}")
-        except Exception as e:
-            st.error(f"Could not read original report: {e}")
-    elif not st.session_state.original_df.empty:
-        st.info(f"Original report already loaded: {len(st.session_state.original_df)} rows · Market will come from this file.")
-    else:
-        st.warning("Recommended: upload the original report first. If skipped, market will fall back to JSON locationCreated.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ── Step 1A: Run Apify inside this app ─────────────────
-    st.markdown("""
-    <div class='section-card' style='margin-bottom:16px'>
-        <h3>Step 1A — Run Apify Scraper Inside This App</h3>
-        <p style='font-size:13px;color:#64748b;margin:0 0 14px'>
-            This mode reads the <strong>Link</strong> column from the original MelodyIQ report, groups rows by
-            <strong>Country + Artist - Sound</strong>, runs the existing Apify TikTok Scraper using <code>postURLs</code>,
-            then sends the returned records into the same AI tagging pipeline.
-        </p>
-    """, unsafe_allow_html=True)
 
     if st.session_state.original_df.empty:
-        st.markdown("<div class='warn-banner'>Upload the original report above to enable built-in Apify scraping.</div>", unsafe_allow_html=True)
-    else:
-        orig_df = st.session_state.original_df.copy()
-        url_col_api = st.session_state.get('original_url_col') or _detect_url_col_global(orig_df)
-        market_col_api = _detect_market_col_global(orig_df)
-        track_col_api = _detect_track_col_global(orig_df)
+        st.markdown(
+            "<div class='warn-banner'>No filtered MelodyIQ report is loaded yet. Start with <strong>Batch Filter</strong>, then return here.</div>",
+            unsafe_allow_html=True
+        )
+        st.stop()
 
-        if not url_col_api or not track_col_api:
-            st.error("Could not detect required columns for Apify mode. Need at least Link and Artist - Sound / Track columns.")
-            st.caption(f"Available columns: {', '.join(orig_df.columns.astype(str).tolist())}")
-        else:
-            batches = _build_excel_track_batches(orig_df, market_col_api, track_col_api, url_col_api)
-            total_links_api = sum(b['link_count'] for b in batches)
-            st.markdown(f"""
-            <div class='metric-row' style='margin-bottom:12px'>
-                <div class='metric-card'><div class='val'>{len(orig_df)}</div><div class='lbl'>Original Rows</div></div>
-                <div class='metric-card'><div class='val'>{len(batches)}</div><div class='lbl'>Track Batches</div></div>
-                <div class='metric-card'><div class='val indigo'>{total_links_api}</div><div class='lbl'>TikTok Links</div></div>
-                <div class='metric-card'><div class='val'>{url_col_api}</div><div class='lbl'>Link Column</div></div>
-            </div>
-            """, unsafe_allow_html=True)
+    orig_df = st.session_state.original_df.copy()
+    url_col_api = st.session_state.get('original_url_col') or _detect_url_col_global(orig_df)
+    market_col_api = _detect_market_col_global(orig_df)
+    track_col_api = _detect_track_col_global(orig_df)
 
-            if batches:
-                preview_batches = pd.DataFrame([
-                    {'Country': b['country'], 'Artist - Sound': b['track'], 'Original Rows': b['rows'], 'Links': b['link_count']}
-                    for b in batches
-                ])
-                with st.expander("Detected track batches", expanded=False):
-                    st.dataframe(preview_batches, use_container_width=True, hide_index=True)
+    if not url_col_api or not track_col_api:
+        st.error("Could not detect the required Link and Artist - Sound / Track columns from the filtered report.")
+        st.caption(f"Available columns: {', '.join(orig_df.columns.astype(str).tolist())}")
+        st.stop()
 
-                api_mode_col1, api_mode_col2 = st.columns([2, 1])
-                with api_mode_col1:
-                    selected_batch_labels = [f"{b['country']} · {b['track']} ({b['link_count']} links)" for b in batches]
-                    run_scope_api = st.radio(
-                        "Apify run scope",
-                        ["Run all detected tracks", "Run one selected track"],
-                        horizontal=True,
-                        key="apify_run_scope"
-                    )
-                    if run_scope_api == "Run one selected track":
-                        selected_label_api = st.selectbox("Select track", selected_batch_labels, key="apify_selected_track")
-                        api_run_batches = [batches[selected_batch_labels.index(selected_label_api)]]
-                    else:
-                        api_run_batches = batches
-                with api_mode_col2:
-                    api_delay = st.slider(
-                        "AI delay after scrape",
-                        min_value=0,
-                        max_value=10,
-                        value=1,
-                        key="apify_ai_delay",
-                        help="Delay between Gemini calls after Apify returns records."
-                    )
+    batches = _build_excel_track_batches(orig_df, market_col_api, track_col_api, url_col_api)
+    total_links_api = sum(b['link_count'] for b in batches)
 
-                run_api_disabled = (not st.session_state.apify_token or not st.session_state.gemini_key or not api_run_batches)
-                if run_api_disabled:
-                    st.caption("Enter both Gemini and Apify keys before running Apify mode.")
-
-                if st.button("🚀 Run Apify + AI Tagging", type="primary", disabled=run_api_disabled, use_container_width=True, key="run_apify_inside_app"):
-                    all_results = []
-                    progress_bar = st.progress(0)
-                    status_box = st.empty()
-                    log_box = st.empty()
-                    log_lines = []
-
-                    for batch_i, batch in enumerate(api_run_batches):
-                        status_box.markdown(
-                            f"<div class='info-banner'>Running Apify for <strong>{batch['country']} · {batch['track']}</strong> "
-                            f"({batch['link_count']} links) — batch {batch_i+1} of {len(api_run_batches)}</div>",
-                            unsafe_allow_html=True
-                        )
-                        try:
-                            items = run_apify_tiktok_scraper_api(batch['links'], st.session_state.apify_token)
-                        except Exception as e:
-                            st.error(f"Apify failed for {batch['track']}: {e}")
-                            continue
-
-                        # Cache raw records so Review page can recover URLs, cover images and metrics.
-                        for rec in items:
-                            if isinstance(rec, dict):
-                                rid = str(rec.get('id', ''))
-                                if rid:
-                                    st.session_state.raw_records[rid] = rec
-                        st.session_state.staged_files.append({
-                            'name': f"apify_api_{batch['country']}_{batch['track']}",
-                            'records': items,
-                            'track': batch['track'],
-                            'market': batch['country'],
-                            'has_video': True,
-                            'tagged': True,
-                        })
-
-                        log_lines.append(f"Apify returned {len(items)} item(s) for {batch['track']}.")
-                        log_box.code('\n'.join(log_lines[-8:]))
-
-                        def on_api_row_done(row_num, total, out, tier_used):
-                            overall = (batch_i + (row_num / max(total, 1))) / max(len(api_run_batches), 1)
-                            progress_bar.progress(min(overall, 1.0))
-
-                        result_df = run_pipeline(
-                            items,
-                            batch['track'],
-                            st.session_state.gemini_key,
-                            st.session_state.apify_token,
-                            log_lines,
-                            delay_seconds=api_delay,
-                            on_row_done=on_api_row_done,
-                            source_file=f"apify_api_{batch['country']}_{batch['track']}"
-                        )
-                        if not result_df.empty:
-                            result_df['market'] = batch['country']
-                            all_results.append(result_df)
-
-                    progress_bar.progress(1.0)
-                    status_box.empty()
-
-                    if all_results:
-                        combined = pd.concat(all_results, ignore_index=True)
-                        combined = _apply_original_market_to_results(combined)
-                        if st.session_state.master_df.empty:
-                            st.session_state.master_df = combined.copy()
-                        else:
-                            existing_ids = set(st.session_state.master_df['id'].astype(str))
-                            new_rows = combined[~combined['id'].astype(str).isin(existing_ids)]
-                            st.session_state.master_df = pd.concat([st.session_state.master_df, new_rows], ignore_index=True)
-                        st.session_state.master_df = _apply_original_market_to_results(st.session_state.master_df)
-                        st.session_state.has_tagged_results = True
-                        st.session_state.review_idx = 0
-
-                        passed = int((combined['validation_status'] == 'pass').sum())
-                        flagged = int(combined['needs_human_review'].sum())
-                        st.success(f"Done — Apify + AI completed. {len(combined)} rows · {passed} AI tagged · {flagged} flagged for review.")
-                        st.balloons()
-                    else:
-                        st.warning("No rows were returned/tagged. Check Apify run status or try one track first.")
-            else:
-                st.warning("No TikTok links detected in the original report.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class='info-banner'>
-        Manual JSON upload is still available below as a fallback if Apify API mode fails or you want to test downloaded JSON files.
+    source_note = "Batch Filter output" if not st.session_state.get('batch_filter_df', pd.DataFrame()).empty else "Loaded source report"
+    st.markdown(f"""
+    <div class='section-card'>
+        <h3>Ready to Tag</h3>
+        <div class='info-banner'>Using <strong>{source_note}</strong> as the source report · {len(orig_df)} rows.</div>
+        <div class='metric-row' style='margin-bottom:0'>
+            <div class='metric-card'><div class='val'>{len(orig_df)}</div><div class='lbl'>Filtered Rows</div></div>
+            <div class='metric-card'><div class='val'>{len(batches)}</div><div class='lbl'>Track Batches</div></div>
+            <div class='metric-card'><div class='val indigo'>{total_links_api}</div><div class='lbl'>TikTok Links</div></div>
+            <div class='metric-card'><div class='val'>{url_col_api}</div><div class='lbl'>Link Column</div></div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Step 1: Upload mode toggle + uploader ──────────────
+    if not batches:
+        st.warning("No TikTok links were detected in the filtered report.")
+        st.stop()
+
+    with st.expander("Detected batches", expanded=False):
+        preview_batches = pd.DataFrame([
+            {'Country': b['country'], 'Artist - Sound': b['track'], 'Original Rows': b['rows'], 'Links': b['link_count']}
+            for b in batches
+        ])
+        st.dataframe(preview_batches, use_container_width=True, hide_index=True)
+
     st.markdown("""
-    <div class='section-card' style='margin-bottom:16px'>
-        <h3>Step 1 — Upload JSON Files</h3>
+    <div class='section-card'>
+        <h3>Run AI Tagging</h3>
         <p style='font-size:13px;color:#64748b;margin:0 0 14px'>
-            Use <strong>Apify TikTok Scraper</strong> JSON exports. Each file = one track.
-            Enable the Apify video download add-on before scraping so
-            <code style='background:#f1f5f9;padding:1px 5px;border-radius:4px'>mediaUrls</code> or
-            <code style='background:#f1f5f9;padding:1px 5px;border-radius:4px'>videoMeta.downloadAddr</code> is present.
+            The app will process all detected tracks automatically. Deleted, private, unavailable, or unusable posts will be skipped and excluded from the final export.
         </p>
     """, unsafe_allow_html=True)
 
-    upload_mode = st.radio(
-        "Upload mode",
-        ["Single file (one track)", "Multiple files (batch)"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="upload_mode"
-    )
-    accept_multiple = (upload_mode == "Multiple files (batch)")
+    if st.button("Run Apify + AI Tagging", type="primary", use_container_width=True, key="run_apify_inside_app_simple"):
+        all_results = []
+        progress_bar = st.progress(0)
+        status_box = st.empty()
+        log_box = st.empty()
+        log_lines = []
+        api_delay = 1
+        api_run_batches = batches
 
-    st.markdown("""
-    <style>
-    /* Collapse the gap Streamlit puts between radio and uploader */
-    div[data-testid="stFileUploaderDropzone"] { margin-top: 4px; }
-    </style>
-    """, unsafe_allow_html=True)
+        for batch_i, batch in enumerate(api_run_batches):
+            status_box.markdown(
+                f"<div class='info-banner'>Processing <strong>{batch['country']} · {batch['track']}</strong> "
+                f"({batch['link_count']} links) — batch {batch_i+1} of {len(api_run_batches)}</div>",
+                unsafe_allow_html=True
+            )
+            try:
+                items = run_apify_tiktok_scraper_api(batch['links'], st.session_state.apify_token)
+            except Exception as e:
+                st.error(f"Apify failed for {batch['track']}: {e}")
+                continue
 
-    uploaded_files = st.file_uploader(
-        "upload_zone",
-        type=['json'],
-        accept_multiple_files=accept_multiple,
-        label_visibility="collapsed",
-        key=f"file_uploader_{st.session_state.uploader_version}"
-    )
-    st.markdown("</div>", unsafe_allow_html=True)   # close section-card
-
-    # Normalise to list
-    if uploaded_files is None:
-        uploaded_files = []
-    elif not isinstance(uploaded_files, list):
-        uploaded_files = [uploaded_files]
-
-    # ── Parse newly uploaded files into session state ──────
-    # This runs only when new files are dropped; after a rerun the
-    # staged_files list in session state keeps the data alive even
-    # after the file_uploader widget clears.
-    if uploaded_files:
-        existing_names = {s['name'] for s in st.session_state.staged_files}
-        for f in uploaded_files:
-            if f.name not in existing_names:
-                try:
-                    f.seek(0)
-                    raw = json.load(f)
-                    records = raw if isinstance(raw, list) else raw.get('items', [raw])
-                    df_tmp = pd.json_normalize(records)
-                    market = df_tmp['locationCreated'].iloc[0] if 'locationCreated' in df_tmp.columns else 'UNKNOWN'
-                    has_media    = 'mediaUrls' in df_tmp.columns and df_tmp['mediaUrls'].apply(lambda x: isinstance(x, list) and len(x) > 0).any()
-                    has_download = 'videoMeta.downloadAddr' in df_tmp.columns and df_tmp['videoMeta.downloadAddr'].fillna('').astype(str).ne('').any()
-                    has_video    = bool(has_media or has_download)
-                    st.session_state.staged_files.append({
-                        'name': f.name,
-                        'records': records,
-                        'track': '',
-                        'market': market,
-                        'has_video': has_video,
-                        'tagged': False,
-                    })
-                    # Store raw records keyed by post ID for review page lookups
-                    for rec in records:
-                        rid = str(rec.get('id', ''))
-                        if rid:
-                            st.session_state.raw_records[rid] = rec
-                except Exception as e:
-                    st.error(f"Could not read {f.name}: {e}")
-
-    staged = st.session_state.staged_files
-
-    if not staged:
-        st.markdown("""
-        <div class='workflow-strip'>
-            <div class='workflow-step'><strong>1. Upload</strong>Apify JSON file(s)</div>
-            <div class='workflow-step'><strong>2. Name</strong>One track per file</div>
-            <div class='workflow-step'><strong>3. Check</strong>Video links detected</div>
-            <div class='workflow-step'><strong>4. Run</strong>Cover first, frames if needed</div>
-            <div class='workflow-step'><strong>5. Review</strong>Fix any flagged rows</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
-
-    # ── Step 2: File table (reads from session state) ──────
-    st.markdown("""
-    <div class='section-card'>
-        <h3>Step 2 — Name Each Track</h3>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class='file-row header'>
-        <div>File</div><div>Track Name</div><div>Market</div><div>Posts</div><div>Status</div><div></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    file_configs = []
-    remove_name = None
-    for i, staged_f in enumerate(staged):
-        is_tagged = staged_f.get('tagged', False)
-        if is_tagged:
-            status_label = "✓ Tagged"
-            status_class = "status-ok"
-        elif staged_f['has_video']:
-            status_label = "Ready"
-            status_class = "status-ok"
-        else:
-            status_label = "No video links"
-            status_class = "status-warn"
-
-        cols = st.columns([2.2, 2.3, 1.0, 0.8, 1.2, 0.4])
-        with cols[0]:
-            opacity = "opacity:0.5;" if is_tagged else ""
-            st.markdown(f"<div class='file-name' style='padding:6px 0;{opacity}'>{staged_f['name']}</div>", unsafe_allow_html=True)
-        with cols[1]:
-            if is_tagged:
-                st.markdown(f"<div class='small-muted' style='padding:8px 0;opacity:0.6'>{staged_f['track']}</div>", unsafe_allow_html=True)
-            else:
-                track_name = st.text_input(
-                    f"track_{i}",
-                    value=staged_f['track'],
-                    placeholder="e.g. Bruno Mars - Risk It All",
-                    key=f"track_{i}",
-                    label_visibility="collapsed"
-                )
-                st.session_state.staged_files[i]['track'] = track_name
-        with cols[2]:
-            st.markdown(f"<div class='small-muted' style='padding:8px 0'>{staged_f['market']}</div>", unsafe_allow_html=True)
-        with cols[3]:
-            st.markdown(f"<div class='small-muted' style='padding:8px 0'>{len(staged_f['records'])}</div>", unsafe_allow_html=True)
-        with cols[4]:
-            st.markdown(f"<span class='status-pill {status_class}'>{status_label}</span>", unsafe_allow_html=True)
-        with cols[5]:
-            if not is_tagged:
-                if st.button("✕", key=f"remove_file_{staged_f['name']}", help="Remove this file"):
-                    remove_name = staged_f['name']
-
-        if not is_tagged:
-            track_name = st.session_state.staged_files[i]['track']
-            file_configs.append({
-                'records': staged_f['records'],
-                'track': track_name,
-                'n': len(staged_f['records']),
-                'market': staged_f['market'],
-                'has_video': staged_f['has_video'],
-                'name': staged_f['name'],
-                'staged_idx': i,
+            for rec in items:
+                if isinstance(rec, dict):
+                    rid = str(rec.get('id', ''))
+                    if rid:
+                        st.session_state.raw_records[rid] = rec
+            st.session_state.staged_files.append({
+                'name': f"apify_api_{batch['country']}_{batch['track']}",
+                'records': items,
+                'track': batch['track'],
+                'market': batch['country'],
+                'has_video': True,
+                'tagged': True,
             })
 
-    if remove_name is not None:
-        removed_files = [f for f in st.session_state.staged_files if f['name'] == remove_name]
-        if removed_files:
-            for rec in removed_files[0].get('records', []):
-                rid = str(rec.get('id', ''))
-                if rid:
-                    st.session_state.raw_records.pop(rid, None)
-        st.session_state.staged_files = [
-            f for f in st.session_state.staged_files
-            if f['name'] != remove_name
-        ]
-        st.session_state.uploader_version += 1
-        st.rerun()
+            log_lines.append(f"Apify returned {len(items)} item(s) for {batch['track']}.")
+            log_box.code('\n'.join(log_lines[-10:]))
 
-    already_tagged = sum(1 for s in staged if s.get('tagged', False))
-    untagged_count = len(staged) - already_tagged
-
-    btn_c1, btn_c2 = st.columns([2, 1])
-    with btn_c1:
-        if already_tagged:
-            st.markdown(
-                f"<div style='font-size:12px;color:#059669;padding:6px 0'>"
-                f"✓ {already_tagged} file(s) already tagged — won't be re-run. "
-                f"{untagged_count} new file(s) queued.</div>",
-                unsafe_allow_html=True
-            )
-    with btn_c2:
-        if st.button("✕ Clear all files", key="clear_staged"):
-            st.session_state.staged_files = []
-            st.session_state.uploader_version += 1
-            st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)  # close section-card
-
-    # ── Step 3: Run settings ───────────────────────────────
-    if not file_configs:
-        st.markdown("""
-        <div class='info-banner'>
-            ✓ All uploaded files have already been tagged. Upload a new JSON above to tag more tracks.
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
-
-    st.markdown("<div class='section-card'><h3>Step 3 — Run Settings</h3>", unsafe_allow_html=True)
-
-    # Batch mode selector (only useful for multi-file uploads)
-    if len(file_configs) > 1:
-        mode_options = ["Process all uploaded files", "Process one selected file"]
-        process_mode = st.radio(
-            "Processing scope",
-            mode_options,
-            horizontal=True,
-        )
-        if process_mode == "Process one selected file":
-            selectable = [
-                f"{i+1}. {c['track'] or '(unnamed)'} — {c['market']} — {c['n']} posts"
-                for i, c in enumerate(file_configs)
-            ]
-            selected_label = st.selectbox("Select file to process", selectable)
-            run_configs = [file_configs[selectable.index(selected_label)]]
-        else:
-            run_configs = file_configs
-    else:
-        process_mode = "Process all uploaded files"
-        run_configs  = file_configs
-
-    total_posts  = sum(c['n'] for c in run_configs)
-    video_ready  = sum(1 for c in run_configs if c['has_video'])
-    selected_named    = all(c['track'].strip() for c in run_configs)
-    selected_readable = all(c['market'] != 'ERROR' and c['n'] > 0 for c in run_configs)
-
-    # Recolour the slider thumb/track to indigo so it matches the app theme
-    st.markdown("""
-    <style>
-    [data-testid="stSlider"] > div > div > div > div { background: #4f46e5 !important; }
-    [data-testid="stSlider"] > div > div > div > div > div { background: #4f46e5 !important; border-color: #4f46e5 !important; }
-    [data-testid="stSlider"] [role="slider"] { background: #4f46e5 !important; border-color: #4f46e5 !important; box-shadow: 0 0 0 4px #eef2ff !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    col_delay, col_summary = st.columns([1.3, 2.7], gap="large")
-    with col_delay:
-        st.markdown("<p style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px'>API Delay (seconds)</p>", unsafe_allow_html=True)
-        delay = st.slider(
-            "delay_slider", 0, 10, 1,
-            label_visibility="collapsed",
-            help="Free tier: use 5–10 s · Paid quota: 1–2 s"
-        )
-        tier_hint = "🐢 Free tier — consider 5–10 s" if delay < 3 else "✓ Good for paid quota"
-        st.caption(tier_hint)
-    with col_summary:
-        est_min = max(1, int(total_posts * (delay + 2) / 60))
-        st.markdown(f"""
-        <div class='run-panel'>
-            <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:10px'>
-                <div><div class='big'>{len(run_configs)}</div><div class='label'>Files</div></div>
-                <div><div class='big'>{total_posts}</div><div class='label'>Posts</div></div>
-                <div><div class='big'>{video_ready}/{len(run_configs)}</div><div class='label'>Video Links</div></div>
-                <div><div class='big'>~{est_min}m</div><div class='label'>Est. Time</div></div>
-            </div>
-            <div class='small-muted'>Tier 0V: visual-only for vague captions · Tier 1: cover image · Tier 2A: 3 frames · Tier 2B: adaptive 9-frame refinement</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)  # close section-card
-
-    # Warnings
-    if not selected_named:
-        st.markdown("<div class='warn-banner'>⚠️ Enter a track name for every file before running.</div>", unsafe_allow_html=True)
-    if video_ready < len(run_configs):
-        st.markdown("<div class='warn-banner'>⚠️ One or more files have no video links — frame tagging (Tier 2) won't be available for those rows.</div>", unsafe_allow_html=True)
-
-    run_label = "▶  Run All Files" if len(run_configs) > 1 else "▶  Run"
-    if st.button(run_label, type="primary", disabled=(not selected_named or not selected_readable), use_container_width=True):
-        all_results = []
-
-        # ── Live progress UI ────────────────────────────────
-        st.markdown("""
-        <style>
-        .live-row {
-            display: grid;
-            grid-template-columns: 36px 1fr 90px 90px 80px;
-            gap: 10px;
-            align-items: center;
-            padding: 7px 12px;
-            border-radius: 7px;
-            font-size: 13px;
-            margin-bottom: 3px;
-            background: white;
-            border: 1px solid #e2e8f0;
-        }
-        .live-row .row-num { color: #94a3b8; font-size: 11px; font-weight: 700; text-align: right; }
-        .live-row .row-caption { color: #334155; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .live-row .row-narrative { color: #4f46e5; font-weight: 600; font-size: 12px; }
-        .live-row .row-tier { color: #64748b; font-size: 11px; }
-        .live-row .row-status-pass { color: #059669; font-weight: 700; font-size: 11px; }
-        .live-row .row-status-review { color: #d97706; font-weight: 700; font-size: 11px; }
-        .live-header {
-            display: grid;
-            grid-template-columns: 36px 1fr 90px 90px 80px;
-            gap: 10px;
-            padding: 6px 12px;
-            font-size: 10px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: .06em;
-            color: #94a3b8;
-            border-bottom: 1px solid #e2e8f0;
-            margin-bottom: 4px;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        progress_bar  = st.progress(0)
-        track_label   = st.empty()
-        log_container = st.container()
-
-        completed_rows_html = []
-        log_placeholder     = log_container.empty()
-
-        TIER_LABELS = {
-            'tier0_skipped':        'Skipped',
-            'tier0_visual_frames':  '0V Frames',
-            'tier0_visual_cover':   '0V Cover',
-            'tier1_cover':          'Cover',
-            'tier2_frames':         'Frames',
-            'tier3_human':          'Human',
-        }
-
-        def render_log(rows_html, current_label=""):
-            header = "<div class='live-header'><div>#</div><div>Caption</div><div>Narrative</div><div>Tier</div><div>Status</div></div>"
-            current = f"<div class='live-row' style='background:#eef2ff;border-color:#818cf8'><div class='row-num'>⏳</div><div class='row-caption' style='color:#4f46e5'>{current_label}</div><div></div><div></div><div></div></div>" if current_label else ""
-            log_placeholder.markdown(
-                f"<div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-top:8px'>"
-                f"{header}{''.join(rows_html)}{current}</div>",
-                unsafe_allow_html=True
-            )
-
-        for batch_i, config in enumerate(run_configs):
-            total_in_batch = config['n']
-            track_label.markdown(
-                f"<div class='info-banner' style='margin-top:8px'>Processing <strong>{config['track']}</strong> "
-                f"— {batch_i+1} of {len(run_configs)} file(s) · {total_in_batch} posts</div>",
-                unsafe_allow_html=True
-            )
-            completed_rows_html = []
-            render_log(completed_rows_html, "Starting…")
-
-            records  = config['records']   # already parsed into session state
-            log_list = []
-
-            def on_row_done(row_num, total, out, tier_used):
-                caption   = str(out.get('caption', ''))[:45] + ('…' if len(str(out.get('caption',''))) > 45 else '')
-                narrative = out.get('Narrative') or '—'
-                tier      = TIER_LABELS.get(tier_used, tier_used)
-                status    = out.get('validation_status', 'review')
-                conf      = out.get('confidence', 0)
-                status_cls = 'row-status-pass' if status == 'pass' else 'row-status-review'
-                status_txt = f"✓ {conf:.0%}" if status == 'pass' else f"⚠ Review"
-                completed_rows_html.append(
-                    f"<div class='live-row'>"
-                    f"<div class='row-num'>{row_num}</div>"
-                    f"<div class='row-caption'>{caption or '(no caption)'}</div>"
-                    f"<div class='row-narrative'>{narrative}</div>"
-                    f"<div class='row-tier'>{tier}</div>"
-                    f"<div class='{status_cls}'>{status_txt}</div>"
-                    f"</div>"
-                )
-                next_label = f"Processing {row_num + 1} of {total}…" if row_num < total else ""
-                render_log(completed_rows_html, next_label)
-                # Update overall progress bar
-                overall = (batch_i + (row_num / total)) / len(run_configs)
+            def on_api_row_done(row_num, total, out, tier_used):
+                overall = (batch_i + (row_num / max(total, 1))) / max(len(api_run_batches), 1)
                 progress_bar.progress(min(overall, 1.0))
 
             result_df = run_pipeline(
-                records, config['track'],
+                items,
+                batch['track'],
                 st.session_state.gemini_key,
                 st.session_state.apify_token,
-                log_list,
-                delay_seconds=delay,
-                on_row_done=on_row_done,
-                source_file=config.get('name', '')
+                log_lines,
+                delay_seconds=api_delay,
+                on_row_done=on_api_row_done,
+                source_file=f"apify_api_{batch['country']}_{batch['track']}"
             )
-            all_results.append(result_df)
+            if not result_df.empty:
+                result_df['market'] = batch['country']
+                all_results.append(result_df)
 
         progress_bar.progress(1.0)
-        track_label.empty()
-        log_placeholder.empty()
-        combined = pd.concat(all_results, ignore_index=True)
-        combined = _apply_original_market_to_results(combined)
+        status_box.empty()
 
-        # Mark processed staged files as tagged so they won't re-run
-        processed_names = {c['name'] for c in run_configs}
-        for i, sf in enumerate(st.session_state.staged_files):
-            if sf['name'] in processed_names:
-                st.session_state.staged_files[i]['tagged'] = True
+        if all_results:
+            combined = pd.concat(all_results, ignore_index=True)
+            combined = _apply_original_market_to_results(combined)
+            if st.session_state.master_df.empty:
+                st.session_state.master_df = combined.copy()
+            else:
+                existing_ids = set(st.session_state.master_df['id'].astype(str))
+                new_rows = combined[~combined['id'].astype(str).isin(existing_ids)]
+                st.session_state.master_df = pd.concat([st.session_state.master_df, new_rows], ignore_index=True)
+            st.session_state.master_df = _apply_original_market_to_results(st.session_state.master_df)
+            st.session_state.has_tagged_results = True
+            st.session_state.review_idx = 0
 
-        if st.session_state.master_df.empty:
-            st.session_state.master_df = combined.copy()
+            passed = int((combined['validation_status'] == 'pass').sum())
+            flagged = int(combined['needs_human_review'].sum())
+            skipped = int((combined.get('review_action', pd.Series([''] * len(combined))).fillna('') == 'REMOVE').sum())
+            st.success(f"Done — {len(combined)} rows processed · {passed} AI tagged · {flagged} need review · {skipped} unavailable/skipped.")
+            st.balloons()
         else:
-            existing_ids = set(st.session_state.master_df['id'].astype(str))
-            new_rows = combined[~combined['id'].astype(str).isin(existing_ids)]
-            st.session_state.master_df = pd.concat(
-                [st.session_state.master_df, new_rows], ignore_index=True
-            )
+            st.warning("No rows were returned/tagged. Check the Apify run or the source links.")
 
-        # Persist tagged results explicitly. Streamlit reruns when switching pages,
-        # so Review Flagged must read from session_state, not upload-page locals.
-        st.session_state.master_df = _apply_original_market_to_results(st.session_state.master_df)
-        st.session_state.has_tagged_results = True
-        st.session_state.review_idx = 0
-
-        passed  = (combined['validation_status'] == 'pass').sum()
-        flagged = int(combined['needs_human_review'].sum())
-        st.success(f"Done — {passed} AI tagged · {flagged} flagged for review across {len(run_configs)} track(s).")
-        st.balloons()
-
-        st.markdown("<div class='section-card'><h3>Results by Track</h3>", unsafe_allow_html=True)
-        summary = combined.groupby('track').agg(
-            Posts=('id','count'),
-            AI_Tagged=('validation_status', lambda x: (x=='pass').sum()),
-            Flagged=('needs_human_review','sum'),
-            Avg_Conf=('confidence','mean')
-        ).reset_index()
-        summary['Automation %'] = (summary['AI_Tagged']/summary['Posts']*100).round(1).astype(str)+'%'
-        summary['Avg_Conf']     = summary['Avg_Conf'].apply(lambda x: f'{x:.0%}')
-        st.dataframe(summary, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='section-card'><h3>Full Results</h3>", unsafe_allow_html=True)
-        show = [c for c in ['market','track','creator','caption','tiktok_url','plays','likes','shares','saves','comments',
-                            'Narrative','Creative Type','Content Details','confidence',
-                            'tier_used','needs_human_review'] if c in combined.columns]
-        st.dataframe(combined[show], use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
 # REVIEW FLAGGED
@@ -4168,13 +3710,9 @@ elif page == "Batch Filter":
         progress.empty()
 
         st.success(f'Done. Output rows: {len(final_df)}')
-        st.markdown(
-            "<div class='info-banner'>Filtered MelodyIQ rows are now loaded as the source report for <strong>Upload &amp; Tag</strong>. Continue there to run Apify + AI tagging.</div>",
-            unsafe_allow_html=True
-        )
-        if st.button('Continue to Upload & Tag', type='primary', use_container_width=True, key='batch_continue_upload_tag'):
-            st.session_state.page = 'Upload & Tag'
-            st.rerun()
+        st.session_state.page = 'Upload & Tag'
+        st.rerun()
+
         st.markdown('<div class="section-card"><span class="step-badge">Results</span><h3 style="margin-top:0">Processing summary</h3>', unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(summaries), use_container_width=True, hide_index=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -4198,7 +3736,7 @@ elif page == "Export":
     st.markdown("""
     <div class='page-header'>
         <h1>Export</h1>
-        <p>Upload your MelodyIQ report to append AI tags and download the final CSV</p>
+        <p>Download the final MelodyIQ workbook with AI tagging columns appended.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -4235,20 +3773,19 @@ elif page == "Export":
     # ── MelodyIQ / Original Spreadsheet merge ─────────────────────────────
     st.markdown("""
     <div class='section-card'>
-        <h3>Merge Back to Original Spreadsheet</h3>
+        <h3>Final MelodyIQ Export</h3>
         <p style='font-size:13px;color:#64748b;margin:0 0 16px'>
-            Upload the original MelodyIQ / tracking report. The app will match rows by TikTok <strong>video ID</strong>
-            extracted from <strong>Link</strong>, with normalized URL fallback, and append the AI-generated
-            <strong>Narrative</strong>, <strong>Creative Type</strong>, and
-            <strong>Content Details</strong> columns while preserving the original file structure.
+            The app uses the Batch Filter output automatically, matches rows by TikTok <strong>video ID</strong>
+            with normalized URL fallback, and appends only <strong>Narrative</strong>,
+            <strong>Creative Type</strong>, and <strong>Content Details</strong> while preserving the workbook structure.
         </p>
     """, unsafe_allow_html=True)
 
-    melody_file = st.file_uploader(
-        "Upload original CSV / XLSX report (optional if already uploaded on Upload & Tag)",
-        type=["csv", "xlsx", "xls"],
-        key="melody_uploader"
-    )
+    if st.session_state.original_df.empty:
+        st.markdown("<div class='warn-banner'>No Batch Filter source report is loaded. Start again from Batch Filter before exporting.</div>", unsafe_allow_html=True)
+        st.stop()
+
+    melody_file = None
 
     def _norm_url_for_merge(v):
         """Normalize TikTok URLs enough for fallback matching without changing display values."""
@@ -4378,12 +3915,9 @@ elif page == "Export":
 
         return buffer.getvalue()
 
-    if melody_file or not st.session_state.original_df.empty:
+    if not st.session_state.original_df.empty:
         try:
-            if melody_file:
-                melody_df, file_kind = _read_original_report(melody_file)
-            else:
-                melody_df, file_kind = st.session_state.original_df.copy(), 'session_original'
+            melody_df, file_kind = st.session_state.original_df.copy(), 'session_original'
 
             # Auto-detect URL column. The team's file normally uses "Link".
             url_col = None
