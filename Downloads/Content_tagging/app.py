@@ -4308,7 +4308,8 @@ elif page == "Export":
     # It should NOT create a single random "Tagged Output" sheet.
     # It writes All Post Data first, then market tabs in the exact order:
     # (MY), (PH), (SG), (TH), (VN), (KR).
-    # Row order from the source Batch Filter output is preserved; the only
+    # All Post Data rows are sorted by market in the same order, while
+    # preserving the original row order inside each market. The only
     # structural change is adding/updating Narrative, Creative Type and
     # Content Details.
     FINAL_MARKET_ORDER = ['MY', 'PH', 'SG', 'TH', 'VN', 'KR']
@@ -4348,11 +4349,22 @@ elif page == "Export":
         else:
             work['_export_market_code'] = ''
 
-        helper_cols = ['_export_market_code']
-        clean_all = work.drop(columns=helper_cols, errors='ignore')
+        work['_export_market_order'] = work['_export_market_code'].apply(
+            lambda x: FINAL_MARKET_ORDER.index(x) if x in FINAL_MARKET_ORDER else 999
+        )
+        work['_export_original_order'] = range(len(work))
+
+        helper_cols = ['_export_market_code', '_export_market_order', '_export_original_order']
+
+        # All Post Data must follow the Batch Filter market order:
+        # MY -> PH -> SG -> TH -> VN -> KR, keeping original row order within each market.
+        all_sheet = work.sort_values(
+            ['_export_market_order', '_export_original_order'],
+            kind='stable'
+        )
+        clean_all = all_sheet.drop(columns=helper_cols, errors='ignore')
 
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            # Preserve the source row order exactly for All Post Data.
             clean_all.to_excel(writer, index=False, sheet_name='All Post Data')
             _format_export_sheet(writer, 'All Post Data')
 
