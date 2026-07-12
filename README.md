@@ -1,124 +1,193 @@
-# TikTok UGC Post Tagging Tool — v68.8
+# TikTok UGC Content Tagging Platform
 
-An AI-assisted Streamlit tool for marketing teams to select, tag, review and export TikTok UGC posts. It accepts generic CSV/XLSX exports or pasted TikTok links, collects post metadata with Apify, analyses visual content with Gemini, applies reusable guardrails and an optional Creative Knowledge Base, then routes uncertain rows to human review.
+An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok user-generated content for music marketing workflows.
 
-v68.8 is the final track-row and replacement-policy cleanup of v68.7. It keeps the accepted UI, complete v67 audit contract, the same tagging backend and the per-track viral-date feature.
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.59.1-red)
+![Google Gemini](https://img.shields.io/badge/Google-Gemini_AI-blue)
+![Apify](https://img.shields.io/badge/Apify-TikTok_Scraper-green)
+![Release](https://img.shields.io/badge/Release-v68.8-purple)
 
-## What changed in v68.8
+## Overview
 
-- Places every track/date control in its own bordered row.
-- Removes the unavailable/sensitive replacement checkbox.
-- Always replaces unavailable and sensitive posts for Top N selections.
+Marketing teams often need to review hundreds of TikTok posts across tracks and markets. This tool brings the full workflow into one place:
 
-## What changed in v68.7
+- upload generic post CSV/XLSX files or paste TikTok links;
+- select every post or rank the Top N posts;
+- collect current TikTok metadata through Apify;
+- classify creative content with Gemini multimodal analysis;
+- apply global, semantic, market and Knowledge Base guardrails;
+- route uncertain posts to human review;
+- explore marketing performance in an interactive dashboard;
+- export clean campaign files and an internal QA report.
 
-- Shortened the date-window labels and instructions.
-- Simplified each track row to Track, Include and Date.
-- Replaced the long technical date warning with a concise active-filter status.
-- Shortened the unavailable/sensitive replacement option.
+The product is designed for marketing users rather than technical analysts, with a guided six-step interface and concise controls.
 
-## What changed in v68.6
+## Key features
 
-- Replaced the unreliable Date setup segmented control with two stateful buttons.
-- The active date mode now stays purple after every click on older and newer Streamlit versions.
-- The QA Summary now records the actual selection ranking metric rather than the Summary table sort.
+### Flexible post input
 
-## What changed in v68.5
+- Upload one or more CSV/XLSX post files.
+- Paste TikTok links directly into the same batch.
+- Process files from different sources as long as a TikTok link is available.
+- Detect common Link, Market, Track and metric columns automatically.
+- Deduplicate posts by TikTok video ID or normalized URL.
+- Keep Market and Track optional.
 
-- Highlights the selected Date setup choice in purple with white text.
-- Supports newer and older Streamlit selected-state markup.
+### Top-post selection
 
-## What changed in v68.4
+- Tag every link in source order or select Top N posts.
+- Rank by Views, Total Engagement or original file order.
+- Group Top N selections by Market, Track, Source or a combined group.
+- Apply one shared viral date or a separate date for each track.
+- Leave individual non-viral tracks unfiltered.
+- Replace unavailable or sensitive Top N posts with the next eligible ranked post automatically.
+- Return the available count when a date window contains fewer than N eligible posts.
 
-- Removed redundant helper lines from the Summary cards.
-- Kept the engagement formulas and the Best Reach Type view total.
+### TikTok metadata collection
 
-## What changed in v68.3
+The built-in Apify integration can retrieve:
 
-- Removed duplicate source-file worksheets from the grouped XLSX export.
-- Kept `Source` as a normal column in `All Posts`, market worksheets and `Links Only`.
+- post availability and media previews;
+- Views, Likes, Comments, Shares and Saves;
+- creator name, followers and market context;
+- captions, hashtags, post dates and music information.
 
-## What changed in v68.2
+Country-specific follower thresholds are used to derive KOL Size when the required market and follower data are available.
 
-- Keeps both **Date setup** choices white with readable dark text on newer and older Streamlit versions.
-- Keeps the selected choice visibly highlighted without changing date-filter behaviour.
+### Progressive AI tagging
 
-## What changed in v68.1
+The application uses evidence progressively instead of relying on a single cover image:
 
-- Removed new-only `segmented_control` arguments so the date setup works on the user's existing Mac Streamlit installation.
-- Kept the v68 date-selection logic and all outputs unchanged.
+1. Cover image, caption, hashtags and metadata.
+2. Three sampled video frames when the first result is unresolved.
+3. Nine sampled frames for additional temporal evidence.
+4. Full-video analysis only when earlier evidence remains insufficient.
+5. Human review for unresolved, ambiguous or quality-audit cases.
 
-## What changed in v68
+After Gemini analysis, the result passes through reusable global guardrails, semantic consistency checks, the optional Creative Knowledge Base, market rules and final validation.
 
-- Keeps the existing shared date window as the default.
-- Adds **Different date by track** when a filtered batch contains more than one track.
-- Lets users enable or disable the date window independently for each track.
-- Prefills a track date when the uploaded file contains one consistent `Viral Date`, `2026 Viral Date`, `First Viral Date` or `Track Viral Date` value.
-- Applies each track's date window before Top N ranking and replacement-candidate selection.
-- Keeps the verified `Days before / after = 7` meaning: seven days before through seven days after, inclusive.
+### Creative output
 
-## v67 audit foundation retained
+Each tagged post can include:
 
-- Preserves `Original AI Labels` separately from `Final Labels`.
-- Records `Human Reviewed`, `Human Edited` and JSON `Label History` in the internal QA report.
-- Keeps the marketing CSV/XLSX clean; audit fields appear only in the Review / QA Report.
-- Prevents speech, dialogue subtitles and personal reflection from being labelled as Lyrics when song-lyric evidence is absent.
-- Preserves genuine lyric videos, karaoke, displayed song lyrics and bilingual/translated lyrics.
-- Removes unsupported secondary Dance labels when no choreography is described.
-- Keeps Dance when explicit choreography, synchronized movement or a dance routine is present.
-- Routes unresolved Comedy-versus-Reflection tone conflicts to human review.
-- Uses current Streamlit `width="stretch"` parameters instead of deprecated `use_container_width`.
-- Adds a clean Windows runner, GitHub Actions checks and release documentation.
+- Narrative;
+- up to two Creative Types;
+- Content Details;
+- confidence and validation details for internal QA;
+- a human-review reason when intervention is required.
 
-See [CHANGELOG.md](CHANGELOG.md) for the earlier guardrail and UI history.
+Supported Creative Types include Dance, Lip Sync, Carousel, Relationship, Beauty, Fashion, POV, Comedy, Travel, Gaming, Fitness, Celebrity Edits, Movie/TV/Drama Edits, Reflection, Quotes, Lyrics, Lyrics Translation, Media/Infotainment, Cover, Remix and Others.
+
+Blank AI labels are converted to `Others` rather than exported as empty values.
+
+### Human review
+
+The Review page allows a user to:
+
+- inspect the post preview, caption, creator, market, track and metrics;
+- open the original TikTok post;
+- keep, edit or remove a flagged result;
+- edit Narrative, Creative Type and Content Details;
+- request an additional AI suggestion;
+- preserve the original automated labels separately from final approved labels.
+
+Unavailable, private, deleted and sensitive posts are removed automatically rather than sent to normal human review.
+
+### Marketing dashboard
+
+The Summary page focuses on actionable campaign information:
+
+- total Posts, Views, Engagements and Engagement Rate;
+- Creative Type mix and Views by Creative Type;
+- Market Summary;
+- Track Summary;
+- KOL Size performance;
+- top-performing posts;
+- filters for the current reporting view.
+
+User-facing reports consistently use **Views**, not Plays.
 
 ## Workflow
 
-1. **Setup / API Keys** — enter Gemini and Apify credentials for the current browser session.
-2. **Add Posts** — upload one or more CSV/XLSX files and/or paste TikTok links.
-3. **Select Posts** — choose Top posts or Tag every link, with optional grouping and date filters.
-4. **Run Tagging** — scrape metadata, analyse visual evidence and apply guardrails.
-5. **Review** — keep, edit or remove uncertain posts.
-6. **Summary & Export** — review marketing performance and download results.
+```text
+Add post files or TikTok links
+              |
+              v
+Select Top posts or Tag every link
+              |
+              v
+Apify metadata and availability checks
+              |
+              v
+Gemini multimodal tagging
+              |
+              v
+Guardrails + Knowledge Base + validation
+              |
+              v
+Human review when required
+              |
+              v
+Marketing dashboard and exports
+```
 
-## Input requirements
+The interface presents this as six steps:
 
-The only required field is a TikTok link. Column detection accepts common link-column names.
+1. API Keys
+2. Add Posts
+3. Select Posts
+4. Run Tagging
+5. Review
+6. Summary & Export
 
-- `Market` is optional. Missing values remain blank in working data and display as **Other** where grouping is needed.
-- `Track` is optional. Missing values display as **Not specified** in summaries.
-- A viral-date column is optional. When available and consistent per track, it prefills the editable per-track date control.
-- Uploaded files and pasted links are additive.
-- Duplicate TikTok posts are deduplicated by video ID or normalized URL.
-- Multiple CSV and XLSX files are supported.
+## Exports
 
-## Selection and removal rules
+### Final CSV
 
-- **Top posts** ranks by the selected metric and can take Top N per market, track, source or combined group.
-- **Tag every link** processes the current batch in order without ranking.
-- Unavailable, private and deleted posts are excluded automatically.
-- Sensitive posts are excluded automatically.
-- In Top posts mode, an excluded post is replaced by the next eligible ranked candidate when replacement is enabled.
-- In Tag every link mode, excluded rows remain in internal QA without replacement.
-- Blank AI output becomes `Others` and is routed appropriately.
-- Date filtering can use one shared centre date or a different centre date for every detected track.
-- A track whose date option is unchecked remains unfiltered, supporting non-viral campaign tracks.
-- Date windows are applied before ranking. If fewer than N eligible posts exist inside a track's window, the app returns the available count rather than taking rows from outside the window.
+A flat marketing table containing post context, engagement metrics, Narrative, final Creative Type and Content Details.
 
-## API keys
+### Grouped XLSX
 
-You need:
+Contains `All Posts` plus one worksheet per market when market values are available. Source remains a normal column rather than creating separate source tabs.
 
-- a Gemini API key;
-- an Apify API token.
+### Review / QA Report
 
-Keys entered in the UI are kept only in Streamlit session state. They are not written to project files. Never commit `.env`, `.streamlit/secrets.toml`, tokens, downloaded media or raw Apify datasets.
+An internal audit workbook containing attempted rows, confidence, analysis tier, validation status, review reason and label history. Important audit fields include:
+
+- `Original AI Labels` - the automated recommendation after guardrails;
+- `Final Labels` - the operational result after review;
+- `Human Reviewed` - whether a reviewer completed an action;
+- `Human Edited` - whether the approved labels differ from the automated labels;
+- `Label History` - ordered automated and human-review events.
+
+These fields support separate reporting of automated performance and final human-assisted workflow performance.
+
+## Validation
+
+On the locked blind Core-100 test, 100 posts were processed and 93 were available for evaluation:
+
+| Metric | Result |
+|---|---:|
+| Correctly excluded posts | 7 |
+| Exact top-two agreement with the legacy single-label benchmark | 73.1% |
+| Conservative adjudicated semantic acceptance | 95.7% |
+| Clear-error rate | 2.2% |
+| Human-review rate | 9.7% |
+
+The 95.7% figure describes the **final human-assisted workflow**, not pure AI-only accuracy. See [docs/VALIDATION.md](docs/VALIDATION.md) for the methodology, interpretation and approved reporting language.
+
+## Requirements
+
+- Python 3.11 recommended
+- Google Gemini API key
+- Apify API token
+
+Keys entered in the interface are kept in Streamlit session state and are not written to project files.
 
 ## Run on Windows
 
-Recommended: Python 3.11.
-
-From Command Prompt inside the extracted folder:
+Open Command Prompt in the repository folder and run:
 
 ```bat
 py -3.11 -m venv .venv
@@ -127,11 +196,11 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Or double-click `run_windows.bat`.
+Alternatively, double-click `run_windows.bat` after Python is installed.
 
 ## Run on macOS
 
-From Terminal inside the extracted folder:
+Open Terminal in the repository folder and run:
 
 ```bash
 python3 -m venv .venv
@@ -140,107 +209,55 @@ python3 -m venv .venv
 .venv/bin/python -m streamlit run app.py
 ```
 
-The commands do not require activation, so they avoid common shell permission and activation problems.
+These commands do not require activating the virtual environment.
 
-## Outputs
+## Technology stack
 
-### Final CSV
+- Python and Streamlit
+- Pandas and OpenPyXL
+- Plotly
+- Google Gemini API
+- Apify TikTok Scraper
+- OpenCV, NumPy and Pillow
 
-A flat marketing table containing post context, metrics, narrative, final Creative Type and Content Details.
+## Project structure
 
-### Grouped XLSX
-
-Contains All Posts plus market worksheets when market values are available. Source remains a column.
-
-### Review / QA Report
-
-Internal audit workbook containing all attempted rows, review status, confidence, tier, validation details and label history:
-
-- `Original AI Labels` — the final automated recommendation after guardrails;
-- `Final Labels` — the operational labels after review;
-- `Human Reviewed` — whether a reviewer completed an action;
-- `Human Edited` — whether final labels differ from the original automated labels;
-- `Label History` — ordered automated and human-review events.
-
-These fields make future AI-only accuracy and human-assisted workflow accuracy measurable separately.
-
-## Validation status
-
-The locked Core-100 validation was run on the v66.6 baseline that directly preceded v67:
-
-- 100 posts tested;
-- 93 available/evaluable posts;
-- 7 correctly excluded;
-- 73.1% exact top-two agreement with the legacy single-label benchmark;
-- 95.7% conservative adjudicated semantic acceptance for the **final human-assisted workflow**;
-- 2 clear remaining errors, both Lyrics contradictions targeted by v67.
-
-The 95.7% result must not be described as pure AI-only accuracy because the old QA export overwrote original labels on reviewed rows. v67 fixes that measurement gap. v67 has focused automated regression coverage, but its post-change blind accuracy should be reported only after a fresh holdout run.
-
-See [docs/VALIDATION.md](docs/VALIDATION.md) for definitions and reporting language.
+- `app.py` - Streamlit workflow, selection, review, dashboard and exports
+- `final_update2_adapter.py` - schema normalization and label-audit fields
+- `final_update2_backend.py` - import-safe backend loader
+- `final_update2_backend_source.py` - scraping, Gemini and guardrail pipeline
+- `review_routing.py` - evidence-based escalation and review routing
+- `accuracy_metrics.py` - validation scoring helpers
+- `creative_knowledge/` - approved reusable tagging patterns
+- `tests/` - unit and product-contract tests
+- `docs/` - product context, validation and integration notes
 
 ## Tests
 
 ```bash
-python -m py_compile app.py final_update2_adapter.py final_update2_backend.py final_update2_backend_source.py review_routing.py
+python -m py_compile app.py
 python -m unittest discover -s tests -v
 ```
 
-The v68.8 package contains 105 unit and contract tests.
+The v68.8 release contains 105 automated unit and product-contract tests.
 
-## Per-track date selection test
+## Knowledge Base and data privacy
 
-The release is supplied with a separate local-only Mastering-derived test file and answer key; they are intentionally excluded from the GitHub-ready ZIP.
+The Creative Knowledge Base is intended to learn only from reviewed or approved patterns. Raw AI output must not update it automatically, and exact TikTok URL-to-label memory is not used for prediction.
 
-1. Upload `v68_per_track_viral_date_test_40.csv`.
-2. Choose **Top posts**, **10** posts per group, rank by **Views**, and group by **Track**.
-3. Enable the date window and choose **Different date by track**.
-4. Use **04 Jan 2026** for `Nuca - Masa ini, Nanti, dan Masa Indah Lainnya`.
-5. Use **08 Mar 2026** for `Bruno Mars - Risk It All`.
-6. Keep **Days before / after = 7**.
-7. Expect **20 selected posts: 10 per track**. Compare them with `v68_per_track_viral_date_expected_top20.csv` or the supplied test guide workbook.
-
-This is a Step 3 selection test and does not require running Apify or Gemini.
-
-## Architecture
-
-```text
-Input posts
-  → Apify scraping
-  → Gemini multimodal analysis
-  → global and semantic guardrails
-  → optional Creative Knowledge Base
-  → market guardrails
-  → temporal validation (cover → 3 frames → 9 frames → full video when unresolved)
-  → human review when needed
-  → marketing exports + internal QA
-```
-
-Main modules:
-
-- `app.py` — accepted Streamlit workflow and exports;
-- `final_update2_adapter.py` — schema adaptation and label-audit fields;
-- `final_update2_backend.py` — import-safe backend loader;
-- `final_update2_backend_source.py` — scraper, Gemini and guardrail pipeline;
-- `review_routing.py` — evidence-based escalation and review routing;
-- `accuracy_metrics.py` — benchmark scoring helpers;
-- `creative_knowledge/` — optional reusable approved patterns.
-
-## Creative Knowledge Base and GitHub privacy
-
-The internal runtime package may contain `creative_knowledge/creator_rules.json`, `track_rules.json` and `metadata.json` learned from reviewed campaign data. The supplied `.gitignore` prevents these three files from being committed accidentally.
-
-The app runs without them, but classification can differ because creator/track priors are unavailable. Do not publish learned creator or campaign patterns to a public repository without confirming data rights. Sanitized examples are included for documentation.
+The repository excludes API secrets, raw campaign data, exports, downloaded media and learned creator/track files through `.gitignore`. Do not commit real user data, tokens or confidential campaign patterns.
 
 ## Known limitations
 
-- TikTok availability, private posts and platform changes can prevent scraping.
-- Gemini and Apify calls use external quota and may incur cost.
-- Some creative types are genuinely ambiguous; human review remains part of the product design.
-- Session state is temporary and is not a production database.
-- The detailed Drama / Creator Core mode is not part of v68.
-- Approved KB updates are still a controlled/manual process; raw AI output must never update the KB automatically.
+- TikTok availability and platform changes can affect scraping.
+- Gemini and Apify use external quotas and may incur cost.
+- Some creative types are genuinely ambiguous, so human review remains part of the design.
+- Streamlit session state is temporary and is not a production database.
+- The detailed Drama / Creator Core mode is not included in this release.
+- Knowledge Base updates remain a controlled manual process.
 
-## Repository guidance
+## Release information
 
-Use this extracted `marketing_tagger_v68_8_per_track_viral_dates` folder as the GitHub repository root. Do not push the parent `codex_tag` workspace because it contains internal outputs, old versions and temporary tooling.
+Current release: **v68.8**. See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) for the accepted product direction.
+
+This project is intended for research, workflow automation and marketing analytics using publicly available TikTok content. It is not affiliated with TikTok, Google or Apify.
