@@ -3,18 +3,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from accuracy_metrics import contains_match, contains_reason, primary_match
 from review_routing import review_risk_reasons, visual_escalation_reasons
 
 
 VIDEO_ROW = {"url": "https://www.tiktok.com/@tester/video/123"}
-
-
-class AccuracyScoringTests(unittest.TestCase):
-    def test_matching_second_label_passes_product_rule(self):
-        self.assertTrue(contains_match("Dance", "Fashion, Dance"))
-        self.assertFalse(primary_match("Dance", "Fashion, Dance"))
-        self.assertTrue(contains_reason("Dance", "Fashion, Dance").startswith("PASS"))
 
 
 class VisualEscalationTests(unittest.TestCase):

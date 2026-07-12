@@ -6,6 +6,7 @@
 - Prevented multiselect labels from being covered by Streamlit's hidden search input.
 - Switched to headless OpenCV so tagging can run on Linux without `libGL.so.1`.
 - Compacted page headings and added deployment contract regression tests.
+- Removed the retired standalone accuracy-checker app and unused local helper scripts from the public repository.
 
 ## v68.9 — Flexible CSV import compatibility
 
