@@ -1,5 +1,12 @@
 # Changelog
 
+## v68.10 — Streamlit Cloud UI and deployment fixes
+
+- Added a fixed light theme and scoped contrast rules for buttons, uploads, dropdowns, expanders and password controls.
+- Prevented multiselect labels from being covered by Streamlit's hidden search input.
+- Switched to headless OpenCV so tagging can run on Linux without `libGL.so.1`.
+- Compacted page headings and added deployment contract regression tests.
+
 ## v68.9 — Flexible CSV import compatibility
 
 - Added automatic comma, semicolon, tab and pipe delimiter detection.

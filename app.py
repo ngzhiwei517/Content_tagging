@@ -55,7 +55,6 @@ st.markdown(
 }
 [data-testid="stSidebar"], [data-testid="stToolbar"], header { display:none !important; }
 .block-container { padding-top: 1.2rem !important; padding-bottom: 2.4rem !important; max-width: 1180px; }
-html, body, p, span, label, div { color:#0f172a; }
 [data-testid="stWidgetLabel"] p,
 [data-testid="stWidgetLabel"] label,
 div[class*="stRadio"] label,
@@ -74,13 +73,16 @@ input, textarea, [data-baseweb="select"] > div {
     border-color:#cbd5e1 !important;
 }
 [data-baseweb="select"] * { color:#111827 !important; }
-div[data-baseweb="popover"] {
+[data-baseweb="popover"] {
     background:#ffffff !important;
     color:#111827 !important;
 }
-div[data-baseweb="popover"] * { color:#111827 !important; }
-div[data-baseweb="popover"] [role="option"] { background:#fff !important; color:#111827 !important; }
-div[data-baseweb="popover"] [role="option"]:hover { background:#eef2ff !important; }
+[data-baseweb="popover"] * { color:#111827 !important; }
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="popover"] ul { background:#ffffff !important; }
+[data-baseweb="popover"] [role="option"] { background:#fff !important; color:#111827 !important; }
+[data-baseweb="popover"] [role="option"] * { color:#111827 !important; }
+[data-baseweb="popover"] [role="option"]:hover { background:#eef2ff !important; }
 [data-baseweb="popover"] > div,
 [data-baseweb="popover"] > div > div,
 [data-baseweb="popover"] > div > div > div,
@@ -110,7 +112,7 @@ div[data-baseweb="popover"] [role="option"]:hover { background:#eef2ff !importan
 [data-baseweb="calendar"] [aria-selected="true"] * { color:#ffffff !important; }
 [data-baseweb="calendar"] [aria-disabled="true"],
 [data-baseweb="calendar"] [aria-disabled="true"] * { color:#94a3b8 !important; }
-[data-baseweb="tag"] { background:#eef2ff !important; color:#111827 !important; border:1px solid #c7d2fe !important; }
+[data-baseweb="tag"] { background:#eef2ff !important; color:#111827 !important; border:1px solid #c7d2fe !important; position:relative !important; z-index:2 !important; }
 [data-baseweb="tag"] span { color:#111827 !important; }
 .selection-filter-card { background:#ffffff; border:1px solid #d8e0ec; border-radius:16px; padding:16px 18px; margin:12px 0 16px; box-shadow:0 8px 18px rgba(15,23,42,.04); }
 .selection-filter-card h3 { margin:0 0 10px; font-size:16px; color:#111827; font-weight:950; }
@@ -166,6 +168,9 @@ pre code {
 .step-desc { font-size:12px; color:#64748b !important; margin-top:6px; }
 
 .card { background:rgba(255,255,255,.82); border:1px solid #d7e0ee; border-radius:18px; padding:22px; margin-bottom:18px; box-shadow:0 8px 24px rgba(15,23,42,.055); }
+.page-heading { padding:17px 22px !important; margin-bottom:14px !important; }
+.page-heading h2 { margin:0 !important; }
+.page-heading p.sub { margin-top:6px !important; }
 .card.compact { padding:16px 18px; }
 .card h2 { margin:0 0 8px; font-size:22px; font-weight:950; color:#111827; }
 .card h3 { margin:0 0 10px; font-size:17px; font-weight:900; color:#111827; }
@@ -180,10 +185,31 @@ pre code {
 .stButton button, .stDownloadButton button { border-radius:12px !important; min-height:44px !important; font-weight:850 !important; }
 .stButton button[kind="primary"], .stDownloadButton button[kind="primary"] { background:#5145e5 !important; border-color:#5145e5 !important; color:white !important; }
 .stButton button[kind="secondary"], .stDownloadButton button[kind="secondary"] { background:#ffffff !important; color:#111827 !important; border:1px solid #cfd8e6 !important; }
-.stButton button p, .stDownloadButton button p { color:inherit !important; }
+.stButton button[kind="primary"] *, .stDownloadButton button[kind="primary"] * { color:#ffffff !important; }
+.stButton button[kind="secondary"] *, .stDownloadButton button[kind="secondary"] * { color:#111827 !important; }
 
 [data-testid="stFileUploaderDropzone"] { background:rgba(255,255,255,.72) !important; border:1.5px dashed #94a3b8 !important; border-radius:15px !important; }
 [data-testid="stFileUploaderDropzone"] *, [data-testid="stFileUploaderFile"] * { color:#111827 !important; }
+[data-testid="stFileUploaderDropzone"] button {
+    background:#ffffff !important;
+    color:#111827 !important;
+    border:1px solid #cbd5e1 !important;
+}
+[data-testid="stFileUploaderDropzone"] button * { color:#111827 !important; }
+[data-testid="stFileUploaderFile"] {
+    background:#f8fafc !important;
+    color:#111827 !important;
+    border:1px solid #d8e0ec !important;
+}
+[data-testid="stExpander"] details,
+[data-testid="stExpander"] summary {
+    background:#ffffff !important;
+    color:#111827 !important;
+}
+[data-testid="stExpander"] summary * { color:#111827 !important; }
+[data-baseweb="input"], [data-baseweb="textarea"] { background:#ffffff !important; color:#111827 !important; }
+[data-baseweb="input"] button { background:#ffffff !important; color:#475569 !important; }
+[data-baseweb="input"] button * { color:#475569 !important; }
 
 .table-wrap { overflow-x:auto; border:1px solid #d7dfed; border-radius:14px; background:#fff; margin-top:10px; }
 table.clean-table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -3080,7 +3106,7 @@ step_strip(st.session_state.step)
 # STEP 1
 # -----------------------------
 if st.session_state.step == 1:
-    st.markdown("<div class='card'><h2>API Keys</h2></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>API Keys</h2></div>", unsafe_allow_html=True)
 
     # Keep the visible input fields separate from the saved runtime keys.
     # This prevents Streamlit reruns/navigation from accidentally using stale or blank values.
@@ -3108,7 +3134,7 @@ if st.session_state.step == 1:
 # STEP 2
 # -----------------------------
 elif st.session_state.step == 2:
-    st.markdown("<div class='card'><h2>Add posts</h2><p class='sub'>Upload post files and add pasted TikTok links into one combined batch.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste TikTok links into one batch.</p></div>", unsafe_allow_html=True)
 
     # Current prototype runs General UGC creative type tagging by default.
     # General-only prototype. Drama / Creator Core mode can be added later as a separate backend route.
@@ -3235,7 +3261,7 @@ elif st.session_state.step == 2:
 # -----------------------------
 elif st.session_state.step == 3:
     batch = st.session_state.batch_df
-    st.markdown("<div class='card'><h2>Select posts</h2><p class='sub'>Choose which rows to include first, then pick top posts or tag every link.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Select posts</h2><p class='sub'>Choose top posts or tag every link.</p></div>", unsafe_allow_html=True)
     if batch.empty:
         st.markdown("<div class='warn-note'>No posts in batch yet.</div>", unsafe_allow_html=True)
         if st.button("Go back to Add Posts", type="primary"):
@@ -3517,7 +3543,7 @@ elif st.session_state.step == 3:
 # -----------------------------
 elif st.session_state.step == 4:
     selected = st.session_state.selected_df if not st.session_state.selected_df.empty else selected_posts_preview(st.session_state.batch_df)
-    st.markdown("<div class='card'><h2>Run tagging</h2></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Run tagging</h2></div>", unsafe_allow_html=True)
     if selected.empty:
         st.markdown("<div class='warn-note'>No selected posts yet.</div>", unsafe_allow_html=True)
         if st.button("Go to Select Posts", type="primary"):
@@ -3551,7 +3577,7 @@ elif st.session_state.step == 4:
 # -----------------------------
 elif st.session_state.step == 5:
     tagged = st.session_state.tagged_df
-    st.markdown("<div class='card'><h2>Review</h2><p class='sub'>Check the posts that still need a human decision.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Review</h2><p class='sub'>Check posts that need a human decision.</p></div>", unsafe_allow_html=True)
 
     if tagged.empty:
         st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)
@@ -3840,7 +3866,7 @@ elif st.session_state.step == 5:
 # -----------------------------
 elif st.session_state.step == 6:
     tagged = st.session_state.tagged_df
-    st.markdown("<div class='card'><h2>Summary & Export</h2></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Summary & Export</h2></div>", unsafe_allow_html=True)
     if tagged.empty:
         st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)
         if st.button("Go to Run Tagging", type="primary"):
@@ -4122,7 +4148,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.9",
+            "App Version": "v68.10",
             "Posts": len(filtered),
             "Views": total_views,
             "Engagements": total_eng,

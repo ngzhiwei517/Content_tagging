@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.9 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.8 behavior, and adds flexible CSV delimiter, encoding and header detection for generic post exports.
+v68.10 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.9 behavior, and fixes Streamlit Cloud contrast and Linux OpenCV compatibility.
 
 ## Goal and users
 
