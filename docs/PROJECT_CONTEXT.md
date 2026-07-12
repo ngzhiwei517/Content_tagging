@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.8 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains per-track viral-date windows, uses bordered track rows, records the correct selection rank metric, and always replaces unavailable or sensitive Top N posts.
+v68.9 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.8 behavior, and adds flexible CSV delimiter, encoding and header detection for generic post exports.
 
 ## Goal and users
 

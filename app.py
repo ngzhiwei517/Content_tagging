@@ -1,4 +1,5 @@
 import io
+import csv
 import re
 import html
 import hashlib
@@ -1148,7 +1149,7 @@ def unique_columns(cols: List[str]) -> List[str]:
     seen: Dict[str, int] = {}
     out: List[str] = []
     for c in cols:
-        base = str(c).replace("\n", " ").strip() or "Column"
+        base = str(c).replace("\ufeff", "").replace("\n", " ").strip() or "Column"
         if base not in seen:
             seen[base] = 0
             out.append(base)
@@ -1158,6 +1159,17 @@ def unique_columns(cols: List[str]) -> List[str]:
     return out
 
 
+def detect_csv_delimiter(text: str) -> str:
+    """Detect common export delimiters without treating URL characters as separators."""
+    sample = "\n".join((text or "").splitlines()[:20])[:65536]
+    if not sample:
+        return ","
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        return ","
+
+
 def read_any_table(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.getvalue()
     name = uploaded_file.name.lower()
@@ -1165,9 +1177,11 @@ def read_any_table(uploaded_file) -> pd.DataFrame:
         df = pd.read_excel(io.BytesIO(raw), engine="openpyxl")
     else:
         last_err = None
-        for enc in ["utf-8-sig", "utf-8", "cp1252", "latin1"]:
+        for enc in ["utf-8-sig", "utf-8", "utf-16", "cp1252", "latin1"]:
             try:
-                df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+                text = raw.decode(enc).lstrip("\ufeff")
+                delimiter = detect_csv_delimiter(text)
+                df = pd.read_csv(io.StringIO(text), sep=delimiter)
                 break
             except Exception as e:
                 last_err = e
@@ -1201,19 +1215,28 @@ def detect_col(df: pd.DataFrame, candidates: List[str], contains: Optional[List[
 
 def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {
-        "link": detect_col(df, ["Link", "URL", "TikTok Link", "Tiktok URL", "Post URL", "Video URL", "webVideoUrl", "submittedVideoUrl", "tiktok_url"]),
-        "market": detect_col(df, ["Country", "Market", "Region", "Locale"]),
-        "track": detect_col(df, ["Artist - Sound", "Artist-Sound", "Track", "Sound", "Song", "Music", "Track Name", "Song Name"]),
+        "link": detect_col(df, [
+            "Link", "URL", "TikTok Link", "TikTok URL", "TikTok Post URL",
+            "Post URL", "Post Link", "Video URL", "Video Link", "Permalink",
+            "Share URL", "webVideoUrl", "submittedVideoUrl", "itemWebUrl",
+            "item_web_url", "tiktok_url",
+        ]),
+        "market": detect_col(df, ["Country", "Country Code", "Market", "Market Code", "Region", "Locale"]),
+        "track": detect_col(df, [
+            "Artist - Sound", "Artist-Sound", "Artist / Sound", "Track", "Sound",
+            "Song", "Music", "Track Name", "Track Title", "Song Name",
+            "Song Title", "Music Name", "Sound Name", "Audio Name",
+        ]),
         "viral_date": detect_col(df, ["Viral Date", "2026 Viral Date", "First Viral Date", "Track Viral Date"]),
-        "date": detect_col(df, ["Date", "Post Date", "Created Date", "Create Time", "Published Date"]),
-        "creator": detect_col(df, ["Username", "Creator", "Author", "Handle", "User"]),
-        "followers": detect_col(df, ["Followers", "Follower Count", "Fans", "Fans Count", "authorMeta.fans", "authorMeta.fansCount", "fansCount"]),
+        "date": detect_col(df, ["Date", "Post Date", "Created Date", "Create Time", "Created At", "Published Date", "createTimeISO"]),
+        "creator": detect_col(df, ["Username", "Creator", "Creator Username", "Author", "Author Username", "Handle", "Account", "User"]),
+        "followers": detect_col(df, ["Followers", "Follower Count", "Followers Count", "Fans", "Fans Count", "authorMeta.fans", "authorMeta.fansCount", "fansCount"]),
         "kol_size": detect_col(df, ["KOL Size", "KOL", "Creator Size", "Influencer Size"]),
-        "views": detect_col(df, ["Views", "View Count", "Plays", "Play Count", "playCount"]),
-        "likes": detect_col(df, ["Likes", "Like Count", "diggCount"]),
-        "comments": detect_col(df, ["Comments", "Comment Count", "commentCount"]),
-        "shares": detect_col(df, ["Shares", "Share Count", "shareCount"]),
-        "saves": detect_col(df, ["Saves", "Save Count", "Download Count", "Collect Count", "collectCount"]),
+        "views": detect_col(df, ["Views", "Post Views", "Video Views", "View Count", "Plays", "Play Count", "playCount"]),
+        "likes": detect_col(df, ["Likes", "Post Likes", "Video Likes", "Like Count", "diggCount"]),
+        "comments": detect_col(df, ["Comments", "Post Comments", "Video Comments", "Comment Count", "commentCount"]),
+        "shares": detect_col(df, ["Shares", "Post Shares", "Video Shares", "Share Count", "shareCount"]),
+        "saves": detect_col(df, ["Saves", "Post Saves", "Video Saves", "Save Count", "Bookmarks", "Favorites", "Download Count", "Collect Count", "collectCount"]),
         "total_engagement": detect_col(df, ["Total Engagement", "Engagement", "Total Likes, Comments & Shares", "Likes Comments Shares"]),
     }
 
@@ -4099,7 +4122,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.8",
+            "App Version": "v68.9",
             "Posts": len(filtered),
             "Views": total_views,
             "Engagements": total_eng,

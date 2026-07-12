@@ -3,10 +3,10 @@
 ## Project summary
 This repository contains a Streamlit prototype for an AI-assisted TikTok UGC creative-type tagging tool for music marketing workflows. The tool should accept generic post CSV/XLSX files or pasted TikTok links, scrape TikTok metadata using Apify, classify posts using Gemini, apply guardrails and a Creative Knowledge Base, support human review, and export clean marketing reports.
 
-v68.8 is the current test release and is integrated end to end.
+v68.9 is the current test release and is integrated end to end.
 
 ## Current product direction
-- Use the v68.8 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
+- Use the v68.9 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
 - The app is now general UGC tagging by default. Do not show a General vs Drama selector in the current UI.
 - Drama / Creator Core detailed mode is a possible future route, but do not integrate it unless explicitly requested.
 - User-facing wording should say Post, TikTok post, or UGC post. Avoid MelodyIQ-specific wording unless working on legacy compatibility.
@@ -55,7 +55,7 @@ Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic g
 - Use Views, not Plays, in user-facing UI/export labels.
 
 ## UI rules
-- Keep the v68.8 UI and v41-style flow unless told otherwise.
+- Keep the v68.9 UI and v41-style flow unless told otherwise.
 - Prefer clean, mature, marketing-friendly UI.
 - Avoid too many emojis, playful icons, or overly textbook/corporate styling.
 - Avoid long explanations in the UI. Use short labels and short helper text only when necessary.

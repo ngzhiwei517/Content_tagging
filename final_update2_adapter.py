@@ -245,7 +245,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     )
 
     output.update({
-        "App Version": "v68.8",
+        "App Version": "v68.9",
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to
         # TikTok/Apify locationCreated, which describes post or creator origin.

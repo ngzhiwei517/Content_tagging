@@ -1,5 +1,12 @@
 # Changelog
 
+## v68.9 — Flexible CSV import compatibility
+
+- Added automatic comma, semicolon, tab and pipe delimiter detection.
+- Added UTF-8 BOM and UTF-16 CSV support.
+- Added common generic, Creator-style and Apify link/metric header aliases.
+- Added six CSV compatibility regression tests and a local cross-format test kit.
+
 ## v68.8 — Bordered track rows and automatic replacement
 
 - Added a bordered container around every per-track date row.
