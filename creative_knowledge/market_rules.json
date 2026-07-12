@@ -1,0 +1,140 @@
+{
+  "KR": {
+    "preferred_creative_type": [
+      "Dance"
+    ],
+    "preferred_narrative": "Dance",
+    "confidence": 0.62,
+    "count": 124,
+    "total": 200,
+    "distribution": {
+      "Dance": 124,
+      "Celebrity Edits": 20,
+      "Carousel": 12,
+      "Gaming": 7,
+      "Fashion": 5,
+      "Beauty": 5,
+      "Fitness": 5,
+      "Slice of Life": 4,
+      "Relationship": 4,
+      "Movie/Tv/Drama Edits": 4,
+      "POV": 3,
+      "Media/Infotainment": 3
+    }
+  },
+  "TH": {
+    "preferred_creative_type": [
+      "Slice of Life"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.275,
+    "count": 55,
+    "total": 200,
+    "distribution": {
+      "Slice of Life": 55,
+      "Lip Sync": 35,
+      "Dance": 25,
+      "POV": 14,
+      "Celebrity Edits": 12,
+      "Movie/Tv/Drama Edits": 9,
+      "Travel": 7,
+      "Comedy": 7,
+      "Carousel": 7,
+      "Relationship": 6,
+      "Lyrics": 5,
+      "Beauty": 5
+    }
+  },
+  "VN": {
+    "preferred_creative_type": [
+      "Slice of Life"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.21,
+    "count": 42,
+    "total": 200,
+    "distribution": {
+      "Slice of Life": 42,
+      "Lip Sync": 30,
+      "Carousel": 18,
+      "Comedy": 15,
+      "Quotes": 13,
+      "POV": 11,
+      "Relationship": 11,
+      "Dance": 10,
+      "Reflection": 8,
+      "Movie/Tv/Drama Edits": 8,
+      "Lyrics Translation": 8,
+      "Celebrity Edits": 7
+    }
+  },
+  "PH": {
+    "preferred_creative_type": [
+      "Lip Sync"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.205,
+    "count": 41,
+    "total": 200,
+    "distribution": {
+      "Lip Sync": 41,
+      "Celebrity Edits": 22,
+      "Quotes": 18,
+      "Relationship": 18,
+      "Slice of Life": 17,
+      "Lyrics": 15,
+      "Comedy": 14,
+      "Reflection": 11,
+      "POV": 10,
+      "Dance": 8,
+      "Gaming": 5,
+      "Travel": 4
+    }
+  },
+  "MY": {
+    "preferred_creative_type": [
+      "Relationship"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.185,
+    "count": 37,
+    "total": 200,
+    "distribution": {
+      "Relationship": 37,
+      "Carousel": 37,
+      "Slice of Life": 31,
+      "Lip Sync": 21,
+      "Reflection": 13,
+      "Quotes": 12,
+      "Dance": 12,
+      "Comedy": 10,
+      "Beauty": 7,
+      "Travel": 6,
+      "POV": 4,
+      "Media/Infotainment": 3
+    }
+  },
+  "SG": {
+    "preferred_creative_type": [
+      "Dance"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.17,
+    "count": 34,
+    "total": 200,
+    "distribution": {
+      "Dance": 34,
+      "Slice of Life": 29,
+      "Fashion": 24,
+      "Celebrity Edits": 23,
+      "Gaming": 14,
+      "Relationship": 13,
+      "Comedy": 12,
+      "Lip Sync": 12,
+      "Reflection": 6,
+      "Quotes": 6,
+      "Beauty": 6,
+      "Carousel": 4
+    }
+  }
+}

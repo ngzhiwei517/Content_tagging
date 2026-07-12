@@ -1,0 +1,14 @@
+{
+  "example-artist-example-track": {
+    "preferred_creative_type": ["Dance"],
+    "preferred_narrative": "Dance performance",
+    "confidence": 0.85,
+    "count": 17,
+    "total": 20,
+    "distribution": {
+      "Dance": 17,
+      "Fashion": 3
+    }
+  }
+}
+

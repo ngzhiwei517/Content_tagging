@@ -1,0 +1,68 @@
+# Secrets
+.env
+.env.*
+*.key
+secrets.toml
+.streamlit/secrets.toml
+
+# Generated data, exports and media
+*.csv
+*.xlsx
+*.xls
+exports/
+data/
+raw_data/
+raw_apify/
+downloads/
+outputs/
+.tmp/
+*.mp4
+*.mov
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.zip
+*.ndjson
+*.log
+
+# JSON is ignored by default; only approved reusable project rules are committed.
+*.json
+!package.json
+!tsconfig.json
+!creative_knowledge/hashtag_rules.json
+!creative_knowledge/keyword_rules.json
+!creative_knowledge/market_rules.json
+!creative_knowledge/url_type_rules.json
+!creative_knowledge/creator_rules.example.json
+!creative_knowledge/track_rules.example.json
+!creative_knowledge/metadata.example.json
+
+# Learned creator/track patterns remain local even when present in the runtime ZIP.
+creative_knowledge/creator_rules.json
+creative_knowledge/track_rules.json
+creative_knowledge/metadata.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling and archived workspaces
+node_modules/
+_archive_old_versions/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

@@ -1,0 +1,37 @@
+{
+  "unknown": {
+    "preferred_creative_type": [
+      "Relationship"
+    ],
+    "preferred_narrative": "Relationship",
+    "confidence": 1.0,
+    "count": 1,
+    "total": 1,
+    "distribution": {
+      "Relationship": 1
+    }
+  },
+  "video": {
+    "preferred_creative_type": [
+      "Dance"
+    ],
+    "preferred_narrative": "NA",
+    "confidence": 0.1776,
+    "count": 213,
+    "total": 1199,
+    "distribution": {
+      "Dance": 213,
+      "Slice of Life": 178,
+      "Lip Sync": 140,
+      "Relationship": 88,
+      "Celebrity Edits": 87,
+      "Carousel": 81,
+      "Comedy": 60,
+      "Quotes": 52,
+      "POV": 43,
+      "Fashion": 41,
+      "Reflection": 39,
+      "Beauty": 31
+    }
+  }
+}

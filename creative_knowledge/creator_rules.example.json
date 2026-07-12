@@ -1,0 +1,13 @@
+{
+  "example_creator": {
+    "preferred_creative_type": ["Fashion"],
+    "preferred_narrative": "Outfit showcase",
+    "confidence": 0.9,
+    "count": 5,
+    "total": 5,
+    "distribution": {
+      "Fashion": 5
+    }
+  }
+}
+
