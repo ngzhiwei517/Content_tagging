@@ -1,12 +1,12 @@
-streamlit==1.59.2
+streamlit==1.56.0
 pandas==2.3.3
-pyarrow==21.0.0
+pyarrow==24.0.0
 openpyxl==3.1.5
 requests==2.32.5
 opencv-python-headless==4.13.0.92
 apify-client==2.4.1
 google-genai==1.61.0
-numpy==2.2.6
+numpy==2.3.5
 Pillow==11.3.0
 plotly==6.3.1
 protobuf==5.29.6

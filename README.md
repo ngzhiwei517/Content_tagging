@@ -2,6 +2,8 @@
 
 An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok user-generated content for music marketing.
 
+[Open the live Streamlit app](https://umgcontenttag.streamlit.app/)
+
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
 ![Google Gemini](https://img.shields.io/badge/Google-Gemini_AI-blue)

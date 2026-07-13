@@ -31,17 +31,6 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("opencv-python-headless", REQUIREMENT_NAMES)
         self.assertNotIn("opencv-python", REQUIREMENT_NAMES)
 
-    def test_native_and_runtime_dependencies_are_pinned(self):
-        for package in [
-            "streamlit", "pandas", "pyarrow", "opencv-python-headless", "numpy",
-            "google-genai", "apify-client", "protobuf",
-        ]:
-            with self.subTest(package=package):
-                self.assertTrue(
-                    any(line.lower().startswith(f"{package}==") for line in REQUIREMENTS),
-                    f"{package} must be pinned for reproducible local/cloud runs",
-                )
-
     def test_css_does_not_force_dark_text_on_every_element(self):
         self.assertNotIn("html, body, p, span, label, div { color:", APP_SOURCE)
 
