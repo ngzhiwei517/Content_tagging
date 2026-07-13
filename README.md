@@ -35,7 +35,7 @@ It can:
 
 ### AI tagging pipeline
 
-Gemini analyses the cover image, caption, hashtags and post metadata first. When the result remains unclear, the app progressively checks three frames, nine frames and then the full video before sending unresolved cases to human review.
+Gemini analyses the cover image, caption, hashtags and post metadata first. When the result remains unclear, the app progressively checks three frames, nine frames and then the full video. A selective evidence verifier cross-checks only suspicious label conflicts; uncertain cases still go to human review.
 
 Each post receives:
 
@@ -45,6 +45,8 @@ Each post receives:
 - an internal review flag when needed.
 
 Supported Creative Types include Dance, Lip Sync, Carousel, Relationship, Beauty, Fashion, POV, Comedy, Travel, Gaming, Fitness, Celebrity Edits, Movie/TV/Drama Edits, Reflection, Quotes, Lyrics, Lyrics Translation, Media/Infotainment, Cover, Remix and Others.
+
+Dance is determined by visible action, not subject type. People, animals and animated subjects may be tagged Dance when clear rhythmic or choreographed movement is shown; ordinary movement or posing does not qualify.
 
 ### Human review
 

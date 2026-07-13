@@ -3,6 +3,7 @@ import csv
 import re
 import html
 import hashlib
+import inspect
 import zipfile
 import os
 import json
@@ -2936,6 +2937,22 @@ def grouped_excel_bytes(final_df: pd.DataFrame) -> bytes:
 
 
 
+def render_plotly_chart(fig) -> None:
+    """Render Plotly without warnings on both older and current Streamlit.
+
+    Older Streamlit releases interpret the newer ``width`` argument as a
+    deprecated Plotly keyword and display a yellow warning in the app. Current
+    releases support ``width`` directly and deprecate ``use_container_width``.
+    Select the supported API at runtime so neither version warns.
+    """
+    parameters = inspect.signature(st.plotly_chart).parameters
+    chart_config = {"displayModeBar": False}
+    if "width" in parameters:
+        st.plotly_chart(fig, width="stretch", config=chart_config)
+    else:
+        st.plotly_chart(fig, use_container_width=True, config=chart_config)
+
+
 def chart_bar(df: pd.DataFrame, x: str, y: str, title: str = "", orientation: str = "v", value_format: str = ""):
     """Plotly fallback, with readable labels and hidden toolbar.
 
@@ -2971,7 +2988,7 @@ def chart_bar(df: pd.DataFrame, x: str, y: str, title: str = "", orientation: st
             elif value_format == "integer":
                 fig.update_traces(texttemplate="%{x:,.0f}", hovertemplate="%{y}: %{x:,.0f}<extra></extra>")
             fig.update_traces(textposition="outside", cliponaxis=False, textfont=dict(color="#111827", size=12))
-            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            render_plotly_chart(fig)
         else:
             fig = px.bar(df, x=x, y=y, color=x, text=y, title=title, color_discrete_sequence=palette)
             fig.update_layout(
@@ -2996,7 +3013,7 @@ def chart_bar(df: pd.DataFrame, x: str, y: str, title: str = "", orientation: st
             elif value_format == "integer":
                 fig.update_traces(texttemplate="%{y:,.0f}", hovertemplate="%{x}: %{y:,.0f}<extra></extra>")
             fig.update_traces(textposition="outside", cliponaxis=False, textfont=dict(color="#111827", size=12))
-            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            render_plotly_chart(fig)
     else:
         st.bar_chart(df.set_index(x)[y])
 
@@ -4148,7 +4165,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.11",
+            "App Version": "v68.14",
             "Posts": len(filtered),
             "Views": total_views,
             "Engagements": total_eng,

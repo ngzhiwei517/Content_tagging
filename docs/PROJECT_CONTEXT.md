@@ -2,7 +2,9 @@
 
 ## Current release
 
-v68.11 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.10 behavior, and adds narrow evidence-first corrections from the blind-100 adjudication.
+v68.14 is the current test release. It preserves the accepted v41-style UI and v68.13 subject-neutral Dance behavior, recognizes explicit rhythmic animal movement during temporal review routing, and renders Plotly charts without compatibility warnings on older Streamlit installs.
+
+The verifier checks consistency between existing Narrative, Content Details and labels; it is not an independent second view of the original media and must not be presented as a proven accuracy lift until a fresh locked holdout is scored.
 
 ## Goal and users
 
@@ -44,6 +46,7 @@ General UGC is the default. Do not add a General-versus-Drama selector unless ex
 - Review shows preview/link, creator, market, track, caption, metrics, suggested labels and Content Details.
 - Users can keep, edit or remove.
 - QA must preserve `Original AI Labels`, `Final Labels`, `Human Reviewed`, `Human Edited` and ordered `Label History`.
+- When the targeted verifier runs, QA also preserves its input labels, output labels, status, confidence, reason, evidence and trigger.
 - `Creative Type` remains the operational final-label alias for Summary/export compatibility.
 - Human review must never destroy the original automated recommendation.
 
@@ -55,7 +58,8 @@ Marketing-facing Summary includes KPIs, Creative Type Mix, performance by type, 
 
 ```text
 Input → Apify → Gemini → global/semantic guardrails → optional Creative KB
-      → market guardrails → temporal validation → human review → export
+      → market guardrails → temporal validation → targeted evidence verifier when needed
+      → human review → export
 ```
 
 Normal videos start at temporal Tier 1 and escalate through 3 frames, 9 frames and full video only while unresolved. Review is the final fallback.

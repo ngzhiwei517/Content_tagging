@@ -25,7 +25,9 @@ MARKETING_EXPORT_COLUMNS = [
 
 QA_AUDIT_COLUMNS = [
     "Original AI Labels", "Final Labels", "Human Reviewed", "Human Edited",
-    "Label History",
+    "Label History", "Verifier Status", "Verifier Input Labels",
+    "Verifier Output Labels", "Verifier Confidence", "Verifier Reason",
+    "Verifier Evidence", "Verifier Triggers",
 ]
 
 
@@ -51,6 +53,18 @@ def _number(value) -> int:
         return int(float(str(value).replace(",", "").strip() or 0))
     except Exception:
         return 0
+
+
+def _float(value) -> float:
+    try:
+        if pd.isna(value):
+            return 0.0
+    except Exception:
+        pass
+    try:
+        return float(str(value).replace(",", "").strip() or 0)
+    except Exception:
+        return 0.0
 
 
 def _truthy(value) -> bool:
@@ -121,22 +135,63 @@ def append_label_history(
     return json.dumps(entries, ensure_ascii=False)
 
 
-def initial_label_audit(labels, *, tier: str = "", validation_status: str = "") -> Dict:
+def initial_label_audit(
+    labels,
+    *,
+    tier: str = "",
+    validation_status: str = "",
+    pre_verifier_labels="",
+    verifier_status: str = "",
+    verifier_note: str = "",
+    verifier_confidence=0,
+) -> Dict:
     automated = normalize_label_list(labels) or ["Others"]
     automated_text = ", ".join(automated)
-    return {
-        "Original AI Labels": automated_text,
-        "Final Labels": automated_text,
-        "Human Reviewed": False,
-        "Human Edited": False,
-        "Label History": append_label_history(
-            "",
+    pre_verifier = normalize_label_list(pre_verifier_labels)
+    status = _text(verifier_status).lower()
+    history = ""
+    if pre_verifier and status and status != "not_run":
+        history = append_label_history(
+            history,
+            stage="automated_pre_verifier",
+            labels=pre_verifier,
+            action="AUTO",
+            tier=tier,
+            validation_status=validation_status,
+        )
+        note_parts = []
+        try:
+            confidence = float(verifier_confidence or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+        if confidence:
+            note_parts.append(f"confidence={confidence:.0%}")
+        if _text(verifier_note):
+            note_parts.append(_text(verifier_note))
+        history = append_label_history(
+            history,
+            stage="targeted_evidence_verifier",
+            labels=automated,
+            action=status,
+            note="; ".join(note_parts),
+            tier=tier,
+            validation_status=validation_status,
+        )
+    else:
+        history = append_label_history(
+            history,
             stage="automated",
             labels=automated,
             action="AUTO",
             tier=tier,
             validation_status=validation_status,
-        ),
+        )
+    return {
+        "Original AI Labels": automated_text,
+        "Final Labels": automated_text,
+        "Human Reviewed": False,
+        "Human Edited": False,
+        "Label History": history,
     }
 
 
@@ -245,7 +300,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     )
 
     output.update({
-        "App Version": "v68.11",
+        "App Version": "v68.14",
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to
         # TikTok/Apify locationCreated, which describes post or creator origin.
@@ -270,7 +325,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Narrative": _text(tagged_dict.get("Narrative")),
         "Creative Type": creative_type,
         "Content Details": _text(tagged_dict.get("Content Details")),
-        "Confidence": float(tagged_dict.get("confidence") or 0),
+        "Confidence": _float(tagged_dict.get("confidence")),
         "Reasoning": _text(tagged_dict.get("reasoning")),
         "Needs Review": needs_review,
         "Review Note": qa_reason,
@@ -281,6 +336,13 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Tier Used": _text(tagged_dict.get("tier_used")),
         "Validation Status": validation_status,
         "Validation Score": tagged_dict.get("validation_score", 0),
+        "Verifier Status": _text(tagged_dict.get("verifier_status")) or "not_run",
+        "Verifier Input Labels": _text(tagged_dict.get("verifier_input_labels")),
+        "Verifier Output Labels": _text(tagged_dict.get("verifier_output_labels")),
+        "Verifier Confidence": _float(tagged_dict.get("verifier_confidence")),
+        "Verifier Reason": _text(tagged_dict.get("verifier_reason")),
+        "Verifier Evidence": _text(tagged_dict.get("verifier_evidence")),
+        "Verifier Triggers": _text(tagged_dict.get("verifier_triggers")),
         "Manual Metrics Required": _truthy(tagged_dict.get("manual_metrics_required")),
         "Raw Apify Status": _text(raw_record.get("error")) or _text(raw_record.get("errorCode")) or "OK",
         "_raw_row_json": _text(tagged_dict.get("_raw_row_json")),
@@ -289,6 +351,10 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         creative_type,
         tier=_text(tagged_dict.get("tier_used")),
         validation_status=validation_status,
+        pre_verifier_labels=tagged_dict.get("verifier_input_labels", ""),
+        verifier_status=tagged_dict.get("verifier_status", ""),
+        verifier_note=tagged_dict.get("verifier_reason", ""),
+        verifier_confidence=tagged_dict.get("verifier_confidence", 0),
     ))
     output["Total Engagement"] = sum(output.get(key, 0) for key in ["Likes", "Comments", "Shares", "Saves"])
     return output

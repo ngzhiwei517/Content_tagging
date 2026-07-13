@@ -1,5 +1,28 @@
 # Changelog
 
+## v68.14 — Chart compatibility and animal-Dance review fix
+
+- Removed Plotly warning banners on older Streamlit installs through version-compatible chart sizing.
+- Recognized explicit rhythmic animal movement during temporal review routing so a supported animal Dance label is not needlessly flagged.
+- Added regression coverage for both compatibility paths and the puppy Dance evidence phrase.
+
+## v68.13 — Subject-neutral Dance evidence
+
+- Changed Dance from a human-only assumption to an action-based label.
+- Allowed people, animals and animated subjects to receive Dance when explicit rhythmic or choreographed movement is visible.
+- Kept ordinary animal movement, posing, walking and rolling from triggering Dance.
+- Updated the Gemini prompt, semantic guardrails, targeted verifier and review routing to use the same rule.
+- Added regression coverage for a dancing puppy while preserving the existing non-dancing hamster and Fashion safeguards.
+
+## v68.12 — Targeted evidence verifier
+
+- Added one selective second-pass Gemini check after the best temporal result is chosen.
+- Limited the check to suspicious cross-field conflicts, high-confusion label pairs and strong missing-label evidence.
+- Applied automated changes only with explicit evidence and at least 86% verifier confidence; otherwise labels remain unchanged and the post is routed to review.
+- Added verifier input/output labels, status, confidence, evidence and triggers to the internal QA audit trail.
+- Added regression coverage for safe confirmation, conservative changes, review routing and structural Carousel protection.
+- Documented that this is a same-model consistency check, not an independent media judgement or an accuracy claim.
+
 ## v68.11 — Blind-100 semantic adjudication fixes
 
 - Adjudicated all 24 strict blind-100 disagreements instead of treating every human-label mismatch as a model error.

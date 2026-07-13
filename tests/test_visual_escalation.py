@@ -94,6 +94,19 @@ class VisualEscalationTests(unittest.TestCase):
         reasons = visual_escalation_reasons(result, VIDEO_ROW, stage="frames")
         self.assertFalse(any("explicit translation" in reason for reason in reasons))
 
+    def test_explicit_animal_dance_resolves_motion_evidence(self):
+        result = {
+            "creative_type": ["Dance"],
+            "narrative": "Cute puppy dance",
+            "content_details": (
+                "A small dog moves its paws in a rhythmic, dance-like motion "
+                "to the music."
+            ),
+            "confidence": 0.95,
+        }
+        reasons = visual_escalation_reasons(result, VIDEO_ROW, stage="frames")
+        self.assertFalse(any("Motion label still lacks" in reason for reason in reasons))
+
     def test_caption_idea_is_not_automatically_infotainment(self):
         result = {
             "creative_type": ["Media/Infotainment"],
@@ -127,6 +140,7 @@ class BackendPromptTests(unittest.TestCase):
         self.assertIn("Ordinary captions, quotes and dialogue subtitles are not Lyrics", prompt)
         self.assertIn("question, viewer prompt or challenge is not POV", prompt)
         self.assertIn("supportive personal message is Reflection", prompt)
+        self.assertIn("Animals or animated subjects can be Dance", prompt)
 
     def test_gym_caption_cannot_turn_visual_fitness_into_dance(self):
         result = {
@@ -507,6 +521,31 @@ class BackendPromptTests(unittest.TestCase):
         }
         routed = self.backend.apply_v66_semantic_consistency_guardrail(result, {})
         self.assertEqual(routed["creative_type"], ["Slice of Life", "Comedy"])
+
+    def test_v6813_explicit_animal_dance_is_dance(self):
+        result = {
+            "creative_type": ["Slice of Life"],
+            "narrative": "Cute puppy dance",
+            "content_details": (
+                "A small white dog moves its paws in a rhythmic, dance-like "
+                "motion to the music."
+            ),
+            "reasoning": "",
+            "confidence": 0.92,
+        }
+        row = {
+            "_campaign_market": "KR",
+            "url": "https://www.tiktok.com/@tester/video/321",
+        }
+        routed = self.backend.apply_post_guardrails(result, row)
+        self.assertEqual(routed["creative_type"][0], "Dance")
+        reasons = review_risk_reasons(
+            routed,
+            row,
+            include_audit=False,
+            include_guardrail_changes=False,
+        )
+        self.assertFalse(any("Animal Dance" in reason for reason in reasons))
 
     def test_v66_funny_hamster_adds_comedy_without_false_motion(self):
         result = {

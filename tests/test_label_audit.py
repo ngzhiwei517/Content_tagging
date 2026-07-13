@@ -21,7 +21,7 @@ class LabelAuditTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(row["App Version"], "v68.11")
+        self.assertEqual(row["App Version"], "v68.14")
         self.assertEqual(row["Original AI Labels"], "Fashion, Dance")
         self.assertEqual(row["Final Labels"], "Fashion, Dance")
         self.assertFalse(row["Human Reviewed"])
@@ -29,6 +29,78 @@ class LabelAuditTests(unittest.TestCase):
         history = json.loads(row["Label History"])
         self.assertEqual(history[0]["stage"], "automated")
         self.assertEqual(history[0]["labels"], ["Fashion", "Dance"])
+
+    def test_verifier_change_preserves_pre_verifier_labels_in_qa_history(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/456"},
+            {
+                "Creative Type": "Fashion",
+                "tier_used": "tier2a_3frames",
+                "validation_status": "pass",
+                "verifier_status": "changed",
+                "verifier_input_labels": "Fashion, Dance",
+                "verifier_output_labels": "Fashion",
+                "verifier_confidence": 0.96,
+                "verifier_reason": "No choreography is described.",
+                "verifier_evidence": "The creator only poses in an outfit.",
+                "verifier_triggers": "Secondary Dance lacks evidence",
+            },
+            {},
+        )
+        self.assertEqual(row["Original AI Labels"], "Fashion")
+        self.assertEqual(row["Final Labels"], "Fashion")
+        self.assertEqual(row["Verifier Input Labels"], "Fashion, Dance")
+        self.assertEqual(row["Verifier Status"], "changed")
+        self.assertFalse(row["Human Reviewed"])
+        history = json.loads(row["Label History"])
+        self.assertEqual(history[0]["stage"], "automated_pre_verifier")
+        self.assertEqual(history[0]["labels"], ["Fashion", "Dance"])
+        self.assertEqual(history[1]["stage"], "targeted_evidence_verifier")
+        self.assertEqual(history[1]["labels"], ["Fashion"])
+        self.assertEqual(history[1]["action"], "CHANGED")
+
+    def test_human_edit_after_verifier_keeps_three_stage_history(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/789"},
+            {
+                "Creative Type": "Fashion",
+                "tier_used": "tier2a_3frames",
+                "validation_status": "review",
+                "verifier_status": "changed",
+                "verifier_input_labels": "Fashion, Dance",
+                "verifier_output_labels": "Fashion",
+                "verifier_confidence": 0.92,
+                "verifier_reason": "No choreography is described.",
+            },
+            {},
+        )
+        update = review_audit_update(
+            row["Original AI Labels"],
+            "Beauty",
+            row["Label History"],
+            action="KEEP",
+            note="Reviewer selected Beauty",
+            recorded_at="2026-07-13T00:00:00+00:00",
+        )
+        self.assertEqual(update["Original AI Labels"], "Fashion")
+        self.assertEqual(update["Final Labels"], "Beauty")
+        history = json.loads(update["Label History"])
+        self.assertEqual(
+            [entry["stage"] for entry in history],
+            ["automated_pre_verifier", "targeted_evidence_verifier", "human_review"],
+        )
+
+    def test_malformed_verifier_confidence_is_safely_coerced(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/999"},
+            {
+                "Creative Type": "Comedy",
+                "verifier_status": "error",
+                "verifier_confidence": "N/A",
+            },
+            {},
+        )
+        self.assertEqual(row["Verifier Confidence"], 0.0)
 
     def test_human_edit_preserves_original_and_updates_final(self):
         update = review_audit_update(
