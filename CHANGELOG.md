@@ -1,5 +1,11 @@
 # Changelog
 
+## v68.15 — Reproducible cloud runtime and Dance/Lip Sync review
+
+- Pinned deployment dependencies and moved to Streamlit 1.59.2 to prevent local/cloud package drift and avoid the untested OpenCV 5 native runtime.
+- Routes Lip Sync results with sustained hand/body performance cues to human review when Dance versus Lip Sync remains visually ambiguous.
+- Keeps the v68.13 subject-neutral Dance safeguard: explicit rhythmic animal movement can be Dance.
+
 ## v68.14 — Chart compatibility and animal-Dance review fix
 
 - Removed Plotly warning banners on older Streamlit installs through version-compatible chart sizing.
