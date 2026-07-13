@@ -450,7 +450,18 @@ def review_risk_reasons(
         evidence_blob,
         flags=re.I,
     ))
-    fictional = synthetic_subject or _has(evidence_blob, ["anime character", "fictional character", "manga", "webtoon", "deltarune", "haikyuu", "saiki"])
+    animated_fictional_character = bool(re.search(
+        r"(?:animated|illustration[- ]style|cartoon|anthropomorphic|fictional).{0,60}"
+        r"(?:characters?|figures?|creatures?)|"
+        r"(?:characters?|figures?|creatures?).{0,60}"
+        r"(?:animated|cartoon|anthropomorphic|fictional)",
+        visual_blob,
+        flags=re.I,
+    ))
+    fictional = synthetic_subject or animated_fictional_character or _has(
+        evidence_blob,
+        ["anime character", "fictional character", "manga", "webtoon", "deltarune", "haikyuu", "saiki"],
+    )
     explicit_pov = bool(re.search(
         r"\bpov\s*[:\-]|\bpoint of view\b|\bfirst[- ]person (?:perspective|view|camera|shot|footage|journey|experience)|"
         r"(?:from|through) (?:the )?(?:viewer|creator|camera)(?:'s)? perspective",
@@ -498,6 +509,13 @@ def review_risk_reasons(
     ])
     if fictional_edit and "Movie/Tv/Drama Edits" not in labels and not tutorial:
         reasons.append("Anime/fictional scene montage is missing Movie/Tv/Drama Edits")
+    if (
+        animated_fictional_character
+        and "Movie/Tv/Drama Edits" not in labels
+        and set(labels) & {"Slice of Life", "Comedy", "Relationship", "Others"}
+        and not tutorial
+    ):
+        reasons.append("Animated/fictional character source needs Movie/Tv/Drama Edits verification")
     if abstract_template and "Media/Infotainment" in labels and not tutorial:
         reasons.append("Abstract template content is not informative by itself")
 

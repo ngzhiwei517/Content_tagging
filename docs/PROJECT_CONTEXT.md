@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.10 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.9 behavior, and fixes Streamlit Cloud contrast and Linux OpenCV compatibility.
+v68.11 is the current test release. It preserves the accepted v41-style UI and v67 backend/audit contract, retains all v68.10 behavior, and adds narrow evidence-first corrections from the blind-100 adjudication.
 
 ## Goal and users
 

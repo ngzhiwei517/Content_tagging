@@ -333,6 +333,34 @@ class BackendPromptTests(unittest.TestCase):
         routed = self.backend.apply_content_details_consistency_guardrail(result, {})
         self.assertEqual(routed["creative_type"], ["Lip Sync", "Lyrics Translation"])
 
+    def test_explicit_beach_dance_steps_restore_dance_and_keep_travel(self):
+        result = {
+            "creative_type": ["Travel"],
+            "narrative": "Beach vacation",
+            "content_details": (
+                "A creator performs rhythmic body movements and dance steps on "
+                "a beach at sunset while wearing a patterned swimsuit."
+            ),
+            "reasoning": "",
+            "confidence": 0.94,
+        }
+        routed = self.backend.apply_content_details_consistency_guardrail(result, {})
+        self.assertEqual(routed["creative_type"], ["Dance", "Travel"])
+
+    def test_static_beach_pose_does_not_create_dance(self):
+        result = {
+            "creative_type": ["Travel"],
+            "narrative": "Beach vacation",
+            "content_details": (
+                "A creator poses on a tropical beach at sunset without dancing "
+                "or performing choreography."
+            ),
+            "reasoning": "",
+            "confidence": 0.94,
+        }
+        routed = self.backend.apply_content_details_consistency_guardrail(result, {})
+        self.assertEqual(routed["creative_type"], ["Travel"])
+
     def test_confirmed_single_image_removes_carousel(self):
         result = {
             "creative_type": ["Carousel", "Comedy"],
@@ -756,6 +784,29 @@ class BackendPromptTests(unittest.TestCase):
         }
         reasons = review_risk_reasons(result, VIDEO_ROW)
         self.assertTrue(any("Movie/Tv/Drama Edits" in reason for reason in reasons))
+
+    def test_review_routing_catches_animated_characters_as_generic_lifestyle(self):
+        result = {
+            "creative_type": ["Slice of Life"],
+            "narrative": "Cute winter snow play",
+            "content_details": (
+                "An animated illustration-style image shows three colorful "
+                "fire-like characters building an igloo in a fantasy setting."
+            ),
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertTrue(any("Movie/Tv/Drama Edits verification" in reason for reason in reasons))
+
+    def test_review_routing_does_not_treat_real_pet_as_fictional_edit(self):
+        result = {
+            "creative_type": ["Comedy"],
+            "narrative": "Funny hamster reaction",
+            "content_details": "A real pet hamster rolls in soil inside a plastic container.",
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertFalse(any("Movie/Tv/Drama Edits verification" in reason for reason in reasons))
 
     def test_review_routing_catches_prompt_only_pov(self):
         result = {

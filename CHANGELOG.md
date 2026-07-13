@@ -1,5 +1,13 @@
 # Changelog
 
+## v68.11 — Blind-100 semantic adjudication fixes
+
+- Adjudicated all 24 strict blind-100 disagreements instead of treating every human-label mismatch as a model error.
+- Restored Dance when direct visual details explicitly describe a human performing dance steps or rhythmic body movement, while preserving a supported secondary label such as Travel.
+- Routed ambiguous animated/fictional-character posts to human review when a generic Slice of Life, Comedy, Relationship or Others label may be hiding Movie/Tv/Drama Edits.
+- Added negative controls so static beach poses and real pet comedy do not trigger the new rules.
+- Kept the unresolved real-person-versus-show-source case unchanged pending direct video review; no exact-link memory was added.
+
 ## v68.10 — Streamlit Cloud UI and deployment fixes
 
 - Added a fixed light theme and scoped contrast rules for buttons, uploads, dropdowns, expanders and password controls.

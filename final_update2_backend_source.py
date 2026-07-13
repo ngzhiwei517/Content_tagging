@@ -2587,9 +2587,59 @@ def apply_content_details_consistency_guardrail(result, row=None):
     ])
     choreography_evidence = any(re.search(pattern, details, flags=re.I) for pattern in [
         r'choreograph', r'dance performance', r'\bdancing\b', r'dance routine',
-        r'dance challenge', r'synchronized (?:dance|movement)', r'coordinated dance',
-        r'repeated body movement',
+        r'dance challenge', r'dance steps?', r'synchronized (?:dance|movement)',
+        r'coordinated dance', r'repeated (?:rhythmic )?body movement',
+        r'rhythmic body movements?',
     ])
+    choreography_negated = any(re.search(pattern, details, flags=re.I) for pattern in [
+        r'(?:no|without|lacks?|does not|doesn.t).{0,24}(?:dance|dancing|choreograph)',
+        r'not (?:a |the )?(?:dance|dance performance|choreographed routine)',
+    ])
+    choreography_evidence = choreography_evidence and not choreography_negated
+
+    # Direct visual descriptions such as "performs dance steps" are stronger
+    # than a generic destination or lifestyle guess. Restore Dance only for a
+    # clearly human performance and preserve one supported secondary semantic
+    # label. This intentionally excludes fictional/edit and lyric-led content.
+    human_dance_subject = any(re.search(pattern, details, flags=re.I) for pattern in [
+        r'\bcreator\b', r'\bperson\b', r'young (?:woman|man)', r'\bwoman\b',
+        r'\bman\b', r'\bgirl\b', r'\bboy\b', r'\bpeople\b',
+    ])
+    fictional_content = any(re.search(pattern, details, flags=re.I) for pattern in [
+        r'\banime\b', r'\bmanga\b', r'\bwebtoon\b', r'fictional character',
+        r'animated character', r'cartoon character', r'anthropomorphic',
+    ])
+    non_human_subject = not human_dance_subject and any(
+        re.search(pattern, details, flags=re.I) for pattern in [
+            r'\bhamster\b', r'\bcat\b', r'\bdog\b', r'\bpet\b', r'\banimal\b',
+        ]
+    )
+    fictional_or_non_human = fictional_content or non_human_subject
+    dance_recoverable_labels = {
+        'Travel', 'Lip Sync', 'Relationship', 'Fitness', 'Fashion', 'Comedy',
+        'Slice of Life', 'POV', 'Others',
+    }
+    if (
+        choreography_evidence
+        and human_dance_subject
+        and not fictional_or_non_human
+        and 'Dance' not in labels
+        and labels
+        and labels[0] in dance_recoverable_labels
+    ):
+        keep = next(
+            (label for label in labels if label in dance_recoverable_labels and label != 'Others'),
+            None,
+        )
+        result['creative_type'] = ['Dance'] + ([keep] if keep else [])
+        old_reason = str(result.get('reasoning', '') or '')
+        reason = (
+            'Content-details safeguard: explicit human dance steps or rhythmic '
+            'body movement detected, so Dance was restored.'
+        )
+        if reason not in old_reason:
+            result['reasoning'] = (old_reason + ' | ' + reason).strip(' |')
+        labels = list(result['creative_type'])
     if lip_sync_evidence and not choreography_evidence and (not labels or labels[0] != 'Lip Sync'):
         keep = next((label for label in ['Beauty', 'Lyrics Translation', 'Lyrics', 'POV', 'Relationship', 'Comedy'] if label in labels), None)
         result['creative_type'] = ['Lip Sync'] + ([keep] if keep else [])
