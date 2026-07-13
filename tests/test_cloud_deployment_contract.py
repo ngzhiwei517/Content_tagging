@@ -10,6 +10,10 @@ REQUIREMENTS = {
     for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     if line.strip() and not line.lstrip().startswith("#")
 }
+REQUIREMENT_NAMES = {
+    line.split("==", 1)[0].split(">=", 1)[0].split("<=", 1)[0].split("<", 1)[0].strip().lower()
+    for line in REQUIREMENTS
+}
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
@@ -24,8 +28,8 @@ class CloudDeploymentContractTests(unittest.TestCase):
                 self.assertIn(setting, THEME_CONFIG)
 
     def test_cloud_uses_headless_opencv_only(self):
-        self.assertIn("opencv-python-headless", REQUIREMENTS)
-        self.assertNotIn("opencv-python", REQUIREMENTS)
+        self.assertIn("opencv-python-headless", REQUIREMENT_NAMES)
+        self.assertNotIn("opencv-python", REQUIREMENT_NAMES)
 
     def test_css_does_not_force_dark_text_on_every_element(self):
         self.assertNotIn("html, body, p, span, label, div { color:", APP_SOURCE)
