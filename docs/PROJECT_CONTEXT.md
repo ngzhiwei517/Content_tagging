@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.15 is the current test release. It preserves the accepted v41-style UI and v68.13 subject-neutral Dance behavior, adds a conservative Dance-versus-Lip-Sync review check, pins the cloud dependency environment, and renders Plotly charts without compatibility warnings.
+v68.14 is the current test release. It preserves the accepted v41-style UI and v68.13 subject-neutral Dance behavior, recognizes explicit rhythmic animal movement during temporal review routing, and renders Plotly charts without compatibility warnings on older Streamlit installs.
 
 The verifier checks consistency between existing Narrative, Content Details and labels; it is not an independent second view of the original media and must not be presented as a proven accuracy lift until a fresh locked holdout is scored.
 
