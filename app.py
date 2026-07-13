@@ -4165,7 +4165,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.14",
+            "App Version": "v68.15",
             "Posts": len(filtered),
             "Views": total_views,
             "Engagements": total_eng,

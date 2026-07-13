@@ -341,6 +341,13 @@ def review_risk_reasons(
         flags=re.I,
     )) and "dancing slightly" not in visual_blob
     lip_sync = _has(visual_blob, ["lip sync", "lip-sync", "mouthing", "mouths the lyrics", "sings along"])
+    sustained_gesture_performance = bool(re.search(
+        r"(?:perform(?:s|ing)?|repeated|rhythmic|coordinated|synchroni[sz]ed|various).{0,24}"
+        r"(?:hand|arm|body) gestures?|"
+        r"(?:hand|arm|body) gestures?.{0,30}(?:music|beat|rhythm|song|performance)",
+        visual_blob,
+        flags=re.I,
+    ))
     fitness = _has(visual_blob, [
         "fitness", "workout", "exercise", "gym", "muscular", "physique",
         "flexing", "flexes", "stretching", "sports training", "training drill",
@@ -407,6 +414,8 @@ def review_risk_reasons(
         reasons.append("Dance label conflicts with the AI's own visual description")
     if primary == "Lip Sync" and dance and not lip_sync:
         reasons.append("Lip Sync label conflicts with visible choreography cues")
+    if primary == "Lip Sync" and lip_sync and sustained_gesture_performance and not dance:
+        reasons.append("Lip Sync includes sustained hand/body movement; confirm whether it is Dance choreography")
     if "Dance" in labels and primary != "Dance" and not dance:
         reasons.append("Secondary Dance label lacks explicit choreography evidence")
     direct_speech = _has(visual_blob, [

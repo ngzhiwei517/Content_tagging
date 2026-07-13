@@ -984,6 +984,38 @@ class BackendPromptTests(unittest.TestCase):
         reasons = review_risk_reasons(result, VIDEO_ROW)
         self.assertIn("Secondary Dance label lacks explicit choreography evidence", reasons)
 
+    def test_v68_15_lip_sync_with_sustained_gestures_is_reviewed(self):
+        result = {
+            "creative_type": ["Lip Sync"],
+            "narrative": "Girl lip syncing",
+            "content_details": (
+                "A young woman mouths the lyrics while performing various hand "
+                "gestures to the song."
+            ),
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertIn(
+            "Lip Sync includes sustained hand/body movement; confirm whether it is Dance choreography",
+            reasons,
+        )
+
+    def test_v68_15_plain_lip_sync_is_not_forced_to_review(self):
+        result = {
+            "creative_type": ["Lip Sync"],
+            "narrative": "Casual lip sync",
+            "content_details": (
+                "A young woman mouths the lyrics while seated and uses facial expressions; "
+                "her hands remain still."
+            ),
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertNotIn(
+            "Lip Sync includes sustained hand/body movement; confirm whether it is Dance choreography",
+            reasons,
+        )
+
     def test_v67_review_routes_comedy_reflection_tone_conflict(self):
         result = {
             "creative_type": ["Reflection"],
