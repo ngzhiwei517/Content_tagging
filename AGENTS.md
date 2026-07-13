@@ -3,10 +3,10 @@
 ## Project summary
 This repository contains a Streamlit prototype for an AI-assisted TikTok UGC creative-type tagging tool for music marketing workflows. The tool should accept generic post CSV/XLSX files or pasted TikTok links, scrape TikTok metadata using Apify, classify posts using Gemini, apply guardrails and a Creative Knowledge Base, support human review, and export clean marketing reports.
 
-v68.11 is the current test release and is integrated end to end.
+v68.14 is the current test release and is integrated end to end.
 
 ## Current product direction
-- Use the v68.11 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
+- Use the v68.14 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
 - The app is now general UGC tagging by default. Do not show a General vs Drama selector in the current UI.
 - Drama / Creator Core detailed mode is a possible future route, but do not integrate it unless explicitly requested.
 - User-facing wording should say Post, TikTok post, or UGC post. Avoid MelodyIQ-specific wording unless working on legacy compatibility.
@@ -27,7 +27,7 @@ v68.11 is the current test release and is integrated end to end.
 6. Summary & Export
 
 ## Core tagging pipeline
-Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic guardrails -> optional Creative Knowledge Base -> market guardrails -> temporal validation -> human review if needed -> export.
+Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic guardrails -> optional Creative Knowledge Base -> market guardrails -> temporal validation -> targeted evidence verification for suspicious conflicts -> human review if needed -> export.
 
 ## Important behavior rules
 - The only required input is a TikTok link column or pasted TikTok links.
@@ -41,9 +41,11 @@ Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic g
 - Do not expose technical tier/confidence/guardrail details in marketing-facing Summary. Keep those only in QA/report exports.
 - Preserve Original AI Labels separately from Final Labels. Human review must never overwrite the automated recommendation.
 - Record Human Reviewed, Human Edited, and ordered Label History fields in internal QA.
+- Record verifier status, input/output labels, confidence, evidence and triggers in internal QA when the targeted verifier runs.
 - Creative Type remains the operational alias of Final Labels for Summary/export compatibility.
 - Speech, dialogue subtitles, and personal reflection are not Lyrics without explicit song-lyric evidence.
 - Secondary Dance requires explicit choreography or coordinated dance evidence.
+- Dance is action-based rather than species-based: people, animals, or animated subjects may be Dance when explicit rhythmic or choreographed movement is visible. Ordinary animal movement, posing, or rolling is not Dance.
 - Preserve the shared date-window default and the optional per-track date mode.
 - Apply each enabled track's inclusive ±N-day window before Top N ranking and backfill candidate selection.
 
@@ -55,7 +57,7 @@ Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic g
 - Use Views, not Plays, in user-facing UI/export labels.
 
 ## UI rules
-- Keep the v68.11 UI and v41-style flow unless told otherwise.
+- Keep the v68.14 UI and v41-style flow unless told otherwise.
 - Prefer clean, mature, marketing-friendly UI.
 - Avoid too many emojis, playful icons, or overly textbook/corporate styling.
 - Avoid long explanations in the UI. Use short labels and short helper text only when necessary.

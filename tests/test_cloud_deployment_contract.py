@@ -45,6 +45,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
     def test_page_headings_use_the_compact_style(self):
         self.assertGreaterEqual(APP_SOURCE.count("card page-heading"), 6)
 
+    def test_plotly_width_is_compatible_across_streamlit_versions(self):
+        self.assertIn("def render_plotly_chart(fig)", APP_SOURCE)
+        self.assertIn('if "width" in parameters:', APP_SOURCE)
+        self.assertNotIn('st.plotly_chart(fig, width="stretch"', APP_SOURCE.split("def chart_bar", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

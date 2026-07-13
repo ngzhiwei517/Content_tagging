@@ -71,6 +71,9 @@ def _has_positive_motion_evidence(blob: str) -> bool:
     patterns = [
         r"choreograph(?:y|ed|ic)", r"dance routine", r"dance challenge",
         r"synchroni[sz]ed", r"\bdancing\b", r"body movement",
+        r"dance[- ]like (?:motion|movement)",
+        r"rhythmic (?:paw|paws|leg|legs|limb|limbs|body|movement).{0,45}(?:music|beat|rhythm)",
+        r"moves? (?:its |their )?(?:paw|paws|leg|legs|limb|limbs|body).{0,45}(?:rhythmic|music|beat)",
         r"\bmouthing\b", r"mouths? the lyrics", r"lip[ -]?sync",
         r"sings? along", r"singing live", r"vocal performance",
         r"plays? guitar", r"plays? piano", r"instrument cover",
@@ -330,7 +333,10 @@ def review_risk_reasons(
     dance = bool(re.search(
         r"choreograph|dance (?:routine|challenge|performance|moves?)|"
         r"synchroni[sz]ed (?:dance|movement)|coordinated dance|"
-        r"perform(?:s|ing)? (?:a |the )?(?:rhythmic )?dance|hand[- ]gesture dance",
+        r"perform(?:s|ing)? (?:a |the )?(?:rhythmic )?dance|hand[- ]gesture dance|"
+        r"dance[- ]like (?:motion|movement)|"
+        r"rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)|"
+        r"moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))",
         visual_blob,
         flags=re.I,
     )) and "dancing slightly" not in visual_blob
@@ -486,8 +492,10 @@ def review_risk_reasons(
         reasons.append("Outfit showcase evidence is stronger than Dance")
     if tutorial and "Media/Infotainment" not in labels:
         reasons.append("Explicit tutorial/review evidence is missing Media/Infotainment")
-    if non_human and set(labels) & {"Dance", "Lip Sync", "Cover"}:
-        reasons.append("Human performance label conflicts with a non-human subject")
+    if non_human and "Dance" in labels and not dance:
+        reasons.append("Animal Dance label lacks explicit rhythmic or choreographed movement")
+    if non_human and set(labels) & {"Lip Sync", "Cover"}:
+        reasons.append("Animal vocal-performance label lacks explicit supporting evidence")
     if fictional and "Celebrity Edits" in labels:
         reasons.append("Celebrity Edits conflicts with a fictional/anime/game subject")
     if explicit_pov and "POV" not in labels:

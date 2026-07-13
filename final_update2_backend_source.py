@@ -10,7 +10,13 @@ import cv2
 import tempfile
 import io
 
-from review_routing import apply_review_policy, visual_escalation_reasons
+from review_routing import apply_review_policy, review_risk_reasons, visual_escalation_reasons
+from evidence_verifier import (
+    apply_verifier_response,
+    build_verifier_prompt,
+    resolvable_review_reasons,
+    targeted_verifier_reasons,
+)
 
 st.set_page_config(
     page_title="TikTok Content Tagging",
@@ -653,6 +659,7 @@ GEMINI_MODEL = 'gemini-3.1-flash-lite'
 # Keep this off by default; frame-based Tier 2A/2B still runs.
 ENABLE_TIER2C_FULL_VIDEO_FALLBACK = True
 ENABLE_LEGACY_TIER0_VAGUE_SHORTCUT = False
+ENABLE_TARGETED_EVIDENCE_VERIFIER = True
 
 # Avoid silent multi-minute sleep loops on transient Gemini quota/server errors.
 # Rows that still fail after short retry are flagged for review instead of blocking the batch.
@@ -1202,6 +1209,7 @@ DANCE_VISUAL_CUES = [
     'hand gesture', 'hand gestures', 'dance move', 'dance formation', 'group dance',
     'dance practice', 'dance routine', 'dance tutorial', 'dance performance', 'performs a dance',
     'performing a dance', 'performs rhythmic', 'perform rhythmic', 'repeated body movement',
+    'dance-like motion', 'dance-like movement', 'rhythmic paw movement',
 ]
 
 NON_DANCE_LIPSYNC_CUES = [
@@ -1277,6 +1285,7 @@ def _has_strong_dance_phrase(blob):
     # Accept exact word "dance" only when it appears in an action phrase, not inside song titles.
     action_patterns = [
         r"\b(creator|person|people|group|girl|boy|woman|man|idol|dancer)s?\s+(is\s+|are\s+)?(doing|performing|dancing|dance)",
+        r"\b(animal|pet|dog|cat|puppy|kitten|hamster|rabbit|bird|character)s?\b.{0,60}\b(dances?|dancing|choreograph\w*|dance[- ]like (?:motion|movement)|rhythmic (?:body|paw|limb) movement)",
         r"\bperforms?\s+(a\s+)?(rhythmic\s+)?dance\b",
         r"\b(dance|dancing)\s+(challenge|routine|practice|tutorial|moves|performance)",
         r"\bfull[- ]body\s+(movement|choreography|dance)",
@@ -1386,8 +1395,8 @@ def apply_kr_track_dance_guardrails(result, row=None):
     """KR-only Dance support when track history *and* visual evidence agree.
 
     Track history is never sufficient by itself. The 100-post holdout showed it
-    adding Dance to a hamster and to outfit showcases, even though Gemini's own
-    Narrative and Content Details correctly described the real subject.
+    adding Dance to ordinary animal movement and outfit showcases without
+    explicit rhythmic/choreographed motion.
     """
     if row is None or not isinstance(result, dict) or result.get('parse_error'):
         return result
@@ -1409,9 +1418,6 @@ def apply_kr_track_dance_guardrails(result, row=None):
 
     observation = _result_observation_blob(result)
     visual_dance = _result_has_dance_visual_cues(result)
-    non_human = any(term in observation for term in [
-        'hamster', 'cat ', ' cats', 'dog ', ' dogs', 'pet ', 'animal', 'rabbit', 'bird '
-    ])
     fashion_focus = any(term in observation for term in [
         'outfit showcase', 'showcases an outfit', 'showcases a casual', 'trying on layers',
         'clothing look', 'outfit combination', 'fit check', 'ootd', 'fashion showcase'
@@ -1420,7 +1426,7 @@ def apply_kr_track_dance_guardrails(result, row=None):
         'dancing slightly', 'moves slightly', 'steps forward and backward',
         'poses for the camera', 'turns to show the outfit'
     ])
-    if not visual_dance or non_human or fashion_focus or weak_movement_only:
+    if not visual_dance or fashion_focus or weak_movement_only:
         return result
 
     # Never add Dance to obvious lyric/text, quote, gaming, tutorial/news, drama,
@@ -2589,7 +2595,9 @@ def apply_content_details_consistency_guardrail(result, row=None):
         r'choreograph', r'dance performance', r'\bdancing\b', r'dance routine',
         r'dance challenge', r'dance steps?', r'synchronized (?:dance|movement)',
         r'coordinated dance', r'repeated (?:rhythmic )?body movement',
-        r'rhythmic body movements?',
+        r'rhythmic body movements?', r'dance[- ]like (?:motion|movement)',
+        r'rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)',
+        r'moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))',
     ])
     choreography_negated = any(re.search(pattern, details, flags=re.I) for pattern in [
         r'(?:no|without|lacks?|does not|doesn.t).{0,24}(?:dance|dancing|choreograph)',
@@ -2597,32 +2605,16 @@ def apply_content_details_consistency_guardrail(result, row=None):
     ])
     choreography_evidence = choreography_evidence and not choreography_negated
 
-    # Direct visual descriptions such as "performs dance steps" are stronger
-    # than a generic destination or lifestyle guess. Restore Dance only for a
-    # clearly human performance and preserve one supported secondary semantic
-    # label. This intentionally excludes fictional/edit and lyric-led content.
-    human_dance_subject = any(re.search(pattern, details, flags=re.I) for pattern in [
-        r'\bcreator\b', r'\bperson\b', r'young (?:woman|man)', r'\bwoman\b',
-        r'\bman\b', r'\bgirl\b', r'\bboy\b', r'\bpeople\b',
-    ])
-    fictional_content = any(re.search(pattern, details, flags=re.I) for pattern in [
-        r'\banime\b', r'\bmanga\b', r'\bwebtoon\b', r'fictional character',
-        r'animated character', r'cartoon character', r'anthropomorphic',
-    ])
-    non_human_subject = not human_dance_subject and any(
-        re.search(pattern, details, flags=re.I) for pattern in [
-            r'\bhamster\b', r'\bcat\b', r'\bdog\b', r'\bpet\b', r'\banimal\b',
-        ]
-    )
-    fictional_or_non_human = fictional_content or non_human_subject
+    # Dance describes the visible action, not the species. Direct descriptions
+    # of choreography or repeated rhythmic movement can therefore support Dance
+    # for people, real animals, animated characters or game characters.
     dance_recoverable_labels = {
         'Travel', 'Lip Sync', 'Relationship', 'Fitness', 'Fashion', 'Comedy',
-        'Slice of Life', 'POV', 'Others',
+        'Slice of Life', 'POV', 'Movie/Tv/Drama Edits', 'Celebrity Edits',
+        'Gaming', 'Others',
     }
     if (
         choreography_evidence
-        and human_dance_subject
-        and not fictional_or_non_human
         and 'Dance' not in labels
         and labels
         and labels[0] in dance_recoverable_labels
@@ -2634,7 +2626,7 @@ def apply_content_details_consistency_guardrail(result, row=None):
         result['creative_type'] = ['Dance'] + ([keep] if keep else [])
         old_reason = str(result.get('reasoning', '') or '')
         reason = (
-            'Content-details safeguard: explicit human dance steps or rhythmic '
+            'Content-details safeguard: explicit dance steps or rhythmic '
             'body movement detected, so Dance was restored.'
         )
         if reason not in old_reason:
@@ -2761,6 +2753,9 @@ def apply_v66_semantic_consistency_guardrail(result, row=None):
         r'synchroni[sz]ed (?:dance|movement)', r'coordinated dance',
         r'repeated rhythmic (?:body|hand) movement', r'hand[- ]gesture dance',
         r'performs? (?:a |the )?(?:rhythmic )?dance', r'dance moves?',
+        r'dance[- ]like (?:motion|movement)',
+        r'rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)',
+        r'moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))',
     ]) and not has([r'dancing slightly', r'moves slightly', r'dance-like pose'])
     lip_sync = has([
         r'lip[- ]?sync', r'mouths? (?:along|the lyrics|song lyrics)',
@@ -2781,16 +2776,31 @@ def apply_v66_semantic_consistency_guardrail(result, row=None):
         r'\banimal\b', r'\brabbit\b', r'\bbird\b',
     ]) and not human_subject and not has([r'(?:cat|dog)[- ]themed (?:ar )?filter'])
     humorous = has([r'\bfunny\b', r'humorous', r'comedic', r'joke', r'meme', r'prank'])
-    if non_human and (set(labels) & {'Dance', 'Lip Sync', 'Cover'} or (humorous and 'Comedy' not in labels)):
+    if non_human and strong_dance and 'Dance' not in labels:
+        keep = next(
+            (label for label in labels if label not in {'Dance', 'Others'}),
+            None,
+        )
+        desired = ['Dance'] + ([keep] if keep else [])
+        commit(
+            desired,
+            'V68.13 action safeguard: explicit rhythmic/choreographed animal movement supports Dance.',
+        )
+        labels = list(result.get('creative_type', []))
+
+    unsupported_non_human = {'Lip Sync', 'Cover'}
+    if not strong_dance:
+        unsupported_non_human.add('Dance')
+    if non_human and (set(labels) & unsupported_non_human or (humorous and 'Comedy' not in labels)):
         semantic = 'Comedy' if humorous else 'Slice of Life'
         if structural_carousel:
             desired = ['Carousel', semantic]
         else:
-            keep = next((label for label in labels if label not in {'Dance', 'Lip Sync', 'Cover', 'Carousel'}), None)
+            keep = next((label for label in labels if label not in unsupported_non_human | {'Carousel'}), None)
             desired = [keep or semantic]
             if humorous and desired[0] != 'Comedy':
                 desired.append('Comedy')
-        commit(desired, 'V66 non-human safeguard: animal movement is not a human Dance/Lip Sync performance.')
+        commit(desired, 'V68.13 non-human safeguard: unsupported vocal or non-rhythmic motion labels were removed.')
 
     fitness = has([
         r'fitness flex', r'flex(?:es|ing)? (?:their |his |her )?(?:arm )?muscles?',
@@ -3929,7 +3939,8 @@ Best practice: use Carousel + content label, e.g. Carousel + Beauty, Carousel + 
 === COMMON CONFUSIONS TO AVOID ===
 - Dance vs Lip Sync: Dance = choreography/body movement. Lip Sync = mouth/face performance to lyrics.
 - Ordinary walking, posing, turning, stepping forward/backward or changing outfits is not Dance. When clothing is the visual purpose, use Fashion.
-- Animal movement is not Dance or Lip Sync; use Slice of Life and/or Comedy when appropriate.
+- Animals or animated subjects can be Dance when explicit choreography, repeated rhythmic movement or movement to the beat is visible. Ordinary pet movement, posing or rolling is not Dance.
+- Do not use Lip Sync for an animal unless explicit animated mouthing-to-lyrics evidence is visible.
 - Dance vs Slice of Life: if dancing is visible, do not call it Slice of Life just because setting is casual.
 - Beauty vs Fashion: Beauty = makeup/skincare/hair/nails/cosmetics. Fashion = clothes/outfit/styling.
 - Relationship vs Slice of Life: Relationship = romance/partner/love/longing. Slice of Life = ordinary daily life.
@@ -3981,6 +3992,69 @@ def call_gemini(contents, gemini_key, max_retries=2):
             else:
                 return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
     return {'parse_error': True, 'raw_response': 'Max retries exceeded', 'needs_human_review': True}
+
+
+def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
+    """Return raw verifier JSON without coercing it into the tagging schema."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=gemini_key)
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[prompt],
+                config=types.GenerateContentConfig(response_mime_type='application/json'),
+            )
+            text = response.text.strip()
+            text = re.sub(r'^```json\s*', '', text)
+            text = re.sub(r'```$', '', text).strip()
+            return json.loads(text)
+        except Exception as e:
+            err = str(e)
+            if '429' in err or 'RESOURCE_EXHAUSTED' in err:
+                time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
+            elif '503' in err or 'UNAVAILABLE' in err:
+                time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
+            else:
+                return {'parse_error': True, 'reason': err}
+    return {'parse_error': True, 'reason': 'Targeted verifier retries exhausted'}
+
+
+def maybe_run_targeted_evidence_verifier(
+    result,
+    row,
+    gemini_key,
+    review_reasons=None,
+    verifier_call=None,
+):
+    """Run a cheap second pass only when cross-field evidence is questionable."""
+    if not ENABLE_TARGETED_EVIDENCE_VERIFIER:
+        return result
+    reasons = targeted_verifier_reasons(
+        result,
+        row,
+        ALLOWED_CREATIVE_TYPES,
+        review_reasons=review_reasons,
+    )
+    if not reasons:
+        return result
+
+    prompt = build_verifier_prompt(result, row, ALLOWED_CREATIVE_TYPES, reasons)
+    call = verifier_call or call_targeted_evidence_verifier
+    try:
+        response = call(prompt, gemini_key)
+    except Exception as exc:
+        response = {'parse_error': True, 'reason': str(exc)}
+    return apply_verifier_response(
+        result,
+        response,
+        row,
+        ALLOWED_CREATIVE_TYPES,
+        reasons,
+        route_errors_to_review=bool(resolvable_review_reasons(review_reasons)),
+    )
 
 def call_gemini_video_file(video_path, prompt, gemini_key, max_retries=3):
     """Send the full video file to Gemini as a final AI fallback.
@@ -4182,6 +4256,13 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
         'needs_human_review':   needs_human,
         'review_risk_reasons':  str(result.get('review_risk_reasons', '') or ''),
         'tier3_reason':         tier3_reason,
+        'verifier_status':      str(result.get('_verifier_status', '') or 'not_run'),
+        'verifier_input_labels': ', '.join(result.get('_verifier_input_labels', []) or []),
+        'verifier_output_labels': ', '.join(result.get('_verifier_output_labels', []) or []),
+        'verifier_confidence':  result.get('_verifier_confidence', 0) or 0,
+        'verifier_reason':      str(result.get('_verifier_reason', '') or ''),
+        'verifier_evidence':    ' | '.join(result.get('_verifier_evidence', []) or []),
+        'verifier_triggers':    ' | '.join(result.get('_verifier_trigger_reasons', []) or []),
         # Keep a lightweight copy of the normalized source row so the Review page
         # can still recover metrics/link/cover for every pending item after reruns.
         '_raw_row_json':        json.dumps(raw_record if raw_record else (row.to_dict() if hasattr(row, 'to_dict') else dict(row)), default=str),
@@ -4564,6 +4645,52 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 except Exception as e:
                     log_list.append(f"  → Tier 2 failed: {e}")
 
+        # One conservative second opinion after the best temporal result has
+        # been selected. It is intentionally not called at every tier. The
+        # verifier may confirm, make a high-evidence correction, or preserve
+        # the labels and route the row to human review.
+        pre_verifier_reasons = review_risk_reasons(
+            result,
+            row,
+            include_audit=False,
+            include_guardrail_changes=False,
+        )
+        result = maybe_run_targeted_evidence_verifier(
+            result,
+            row,
+            gemini_key,
+            review_reasons=pre_verifier_reasons,
+        )
+        verifier_status = str(result.get('_verifier_status', '') or '')
+        if verifier_status == 'changed':
+            # A verifier change is still subject to every established market,
+            # semantic and structural guardrail. Preserve the verifier audit
+            # fields while normalizing the accepted final label set.
+            verifier_audit = {
+                key: value for key, value in result.items()
+                if key.startswith('_verifier_')
+            }
+            result = apply_post_guardrails(result, row)
+            result.update(verifier_audit)
+            result['_verifier_output_labels'] = list(result.get('creative_type', []) or [])
+            verifier_status = str(result.get('_verifier_status', '') or '')
+        if verifier_status:
+            triggers = result.get('_verifier_trigger_reasons', []) or []
+            log_list.append(
+                f"  → Evidence verifier {verifier_status}: "
+                + (' | '.join(triggers) if triggers else 'targeted cross-check')
+            )
+            status, score, issues = validate(result)
+            if verifier_status in {'review', 'error'}:
+                status = 'review'
+                verifier_issue = str(
+                    result.get('review_risk_reasons', '')
+                    or 'Targeted evidence remains unresolved'
+                )
+                issue = f'Targeted verifier: {verifier_issue}'
+                if issue not in issues:
+                    issues.append(issue)
+
         if result.get('tier_used') == 'tier1_cover' and cover_escalation_reasons:
             # A cover-only result cannot safely resolve a motion/text/source
             # ambiguity when no usable video was available for the fallbacks.
@@ -4574,7 +4701,16 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
             )
         if unresolved_visual_reasons:
             result['needs_human_review'] = True
-            result['review_risk_reasons'] = ' | '.join(unresolved_visual_reasons)
+            existing_review_reasons = [
+                part.strip()
+                for part in str(result.get('review_risk_reasons', '') or '').split('|')
+                if part.strip()
+            ]
+            combined_review_reasons = existing_review_reasons + [
+                reason for reason in unresolved_visual_reasons
+                if reason not in existing_review_reasons
+            ]
+            result['review_risk_reasons'] = ' | '.join(combined_review_reasons)
             status = 'review'
             for reason in unresolved_visual_reasons:
                 issue = f'Review risk after automated fallbacks: {reason}'
