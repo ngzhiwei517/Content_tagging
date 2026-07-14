@@ -3269,9 +3269,29 @@ def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[s
     """Build consistent group summaries using per-post average engagement metrics."""
     if df is None or df.empty:
         return pd.DataFrame()
-    return df.groupby(group_columns, dropna=False).agg(
+    working = df.copy()
+    if "Engagement Rate" not in working.columns:
+        working["Engagement Rate"] = working.apply(
+            lambda row: (clean_num(row.get("Total Engagement")) / clean_num(row.get("Views")) * 100)
+            if clean_num(row.get("Views")) else 0,
+            axis=1,
+        )
+    if "Shares Rate" not in working.columns:
+        working["Shares Rate"] = working.apply(
+            lambda row: (clean_num(row.get("Shares")) / clean_num(row.get("Views")) * 100)
+            if clean_num(row.get("Views")) else 0,
+            axis=1,
+        )
+    if "Saves Rate" not in working.columns:
+        working["Saves Rate"] = working.apply(
+            lambda row: (clean_num(row.get("Saves")) / clean_num(row.get("Views")) * 100)
+            if clean_num(row.get("Views")) else 0,
+            axis=1,
+        )
+    return working.groupby(group_columns, dropna=False).agg(
         Posts=("Link", "count"),
         Views=("Views", "sum"),
+        Average_Views=("Views", "mean"),
         Likes=("Likes", "sum"),
         Comments=("Comments", "sum"),
         Shares=("Shares", "sum"),
@@ -3279,16 +3299,21 @@ def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[s
         Total_Engagement=("Total Engagement", "sum"),
         Average_Engagements=("Total Engagement", "mean"),
         Average_Engagement_Rate=("Engagement Rate", "mean"),
+        Average_Shares_Rate=("Shares Rate", "mean"),
+        Average_Saves_Rate=("Saves Rate", "mean"),
     ).reset_index()
 
 
 def summary_sort_column_v68_15(metric: str, available_columns) -> str:
     """Map post-level filter metrics to the matching summary metric."""
     preferred = {
+        "Views": "Average Views",
         "Total Engagement": "Average Engagements",
         "Engagement Rate": "Average Engagement Rate",
+        "Shares Rate": "Shares Rate",
+        "Saves Rate": "Saves Rate",
     }.get(metric, metric)
-    return preferred if preferred in available_columns else "Views"
+    return preferred if preferred in available_columns else "Average Views"
 
 
 def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
@@ -3349,20 +3374,20 @@ def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: st
         kol_table = kol_table.rename(columns={"Market Display": "Market", "KOL Size Display": "KOL Size"})
         kol_cols = [
             "Market", "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Average Shares Rate", "Average Saves Rate",
+            "Average Engagement Rate", "Shares Rate", "Saves Rate",
         ]
     else:
         kol_table = kol_table.rename(columns={"KOL Size Display": "KOL Size"})
         kol_cols = [
             "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Average Shares Rate", "Average Saves Rate",
+            "Average Engagement Rate", "Shares Rate", "Saves Rate",
         ]
     kol_table = kol_table.rename(columns={
         "Average_Views": "Average Views",
         "Average_Engagements": "Average Engagements",
         "Average_Engagement_Rate": "Average Engagement Rate",
-        "Average_Shares_Rate": "Average Shares Rate",
-        "Average_Saves_Rate": "Average Saves Rate",
+        "Average_Shares_Rate": "Shares Rate",
+        "Average_Saves_Rate": "Saves Rate",
     })
     st.markdown(render_table(kol_table, max_rows=40, cols=kol_cols), unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -4303,12 +4328,19 @@ elif st.session_state.step == 6:
     if market_count:
         market_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display"]).rename(columns={
             "Market Display": "Market",
+            "Average_Views": "Average Views",
             "Average_Engagements": "Average Engagements",
             "Average_Engagement_Rate": "Average Engagement Rate",
+            "Average_Shares_Rate": "Shares Rate",
+            "Average_Saves_Rate": "Saves Rate",
         })
         market_sort_col = summary_sort_column_v68_15(focus_metric, market_summary.columns)
         market_summary = market_summary.sort_values([market_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
-        st.markdown(render_table(market_summary, max_rows=12, cols=["Market", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+        st.markdown(render_table(
+            market_summary,
+            max_rows=12,
+            cols=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        ), unsafe_allow_html=True)
     else:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -4317,12 +4349,19 @@ elif st.session_state.step == 6:
     track_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display", "Track Display"]).rename(columns={
         "Market Display": "Market",
         "Track Display": "Track",
+        "Average_Views": "Average Views",
         "Average_Engagements": "Average Engagements",
         "Average_Engagement_Rate": "Average Engagement Rate",
+        "Average_Shares_Rate": "Shares Rate",
+        "Average_Saves_Rate": "Saves Rate",
     })
     track_sort_col = summary_sort_column_v68_15(focus_metric, track_summary.columns)
     track_summary = track_summary.sort_values([track_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
-    st.markdown(render_table(track_summary, max_rows=12, cols=["Market", "Track", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+    st.markdown(render_table(
+        track_summary,
+        max_rows=12,
+        cols=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+    ), unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
@@ -4349,12 +4388,19 @@ elif st.session_state.step == 6:
         st.markdown("<div class='card'>" + section_title("Source Summary", "#8b5cf6"), unsafe_allow_html=True)
         source_summary = aggregate_summary_performance_v68_15(filtered, ["Source Display"]).rename(columns={
             "Source Display": "Source",
+            "Average_Views": "Average Views",
             "Average_Engagements": "Average Engagements",
             "Average_Engagement_Rate": "Average Engagement Rate",
+            "Average_Shares_Rate": "Shares Rate",
+            "Average_Saves_Rate": "Saves Rate",
         })
         source_sort_col = summary_sort_column_v68_15(focus_metric, source_summary.columns)
         source_summary = source_summary.sort_values(source_sort_col, ascending=(sort_order == "Lowest first"))
-        st.markdown(render_table(source_summary, max_rows=12, cols=["Source", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+        st.markdown(render_table(
+            source_summary,
+            max_rows=12,
+            cols=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        ), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     if has_metrics:

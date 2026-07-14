@@ -57,6 +57,7 @@ class SummaryV6815Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         namespace = {"pd": pd, "List": List}
+        namespace["clean_num"] = load_function("clean_num", namespace)
         cls.aggregate = staticmethod(load_function("aggregate_summary_performance_v68_15", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
@@ -65,8 +66,21 @@ class SummaryV6815Tests(unittest.TestCase):
             {"Market": "MY", "Link": "b", "Views": 1000, "Likes": 300, "Comments": 0, "Shares": 0, "Saves": 0, "Total Engagement": 300, "Engagement Rate": 30.0},
         ])
         summary = self.aggregate(rows, ["Market"])
+        self.assertEqual(float(summary.loc[0, "Average_Views"]), 1000.0)
         self.assertEqual(float(summary.loc[0, "Average_Engagements"]), 200.0)
         self.assertEqual(float(summary.loc[0, "Average_Engagement_Rate"]), 20.0)
+        self.assertEqual(float(summary.loc[0, "Average_Shares_Rate"]), 0.0)
+        self.assertEqual(float(summary.loc[0, "Average_Saves_Rate"]), 0.0)
+
+    def test_group_tables_keep_full_average_performance_columns(self):
+        for column in [
+            '"Average Views"',
+            '"Average Engagements"',
+            '"Average Engagement Rate"',
+            '"Shares Rate"',
+            '"Saves Rate"',
+        ]:
+            self.assertIn(column, APP_SOURCE)
 
     def test_summary_has_requested_order_and_no_median_metric(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]

@@ -7,6 +7,7 @@
 - Reordered the Summary flow to Market Summary, Track Summary, Creative Type Mix, Source Summary, Top Posts, KOL Size Performance and Downloads.
 - Moved KOL Size Performance to the end of the analytical flow and replaced median engagement rate with average engagement rate.
 - Made TikTok links in displayed tables open as safe clickable links.
+- Kept Average Views, Average Engagements, Average Engagement Rate, Shares Rate and Saves Rate in grouped Summary tables; removed only the median engagement metric.
 - Kept the established General UGC tagging pipeline unchanged; detailed drama tagging remains outside this demo release.
 
 ## v68.14 — Chart compatibility and animal-Dance review fix
