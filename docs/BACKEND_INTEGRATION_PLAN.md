@@ -1,6 +1,6 @@
 # Backend Architecture and Current Status
 
-The original phased integration remains complete in v68.14. This document describes the live path and the safest extension points.
+The original phased integration remains complete in v68.15. This document describes the live path and the safest extension points. The v68.15 demo does not change the General UGC tagging backend.
 
 ## Live path
 

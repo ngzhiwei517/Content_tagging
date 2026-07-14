@@ -1,5 +1,14 @@
 # Changelog
 
+## v68.15 — Session resume and clearer marketing Summary
+
+- Added non-secret workflow checkpoints and URL-based batch IDs so an inactive reconnect can restore the current step and data instead of returning to API Keys.
+- Changed Summary KPIs and grouped tables to Average Engagements and Average Engagement Rate per post.
+- Reordered the Summary flow to Market Summary, Track Summary, Creative Type Mix, Source Summary, Top Posts, KOL Size Performance and Downloads.
+- Moved KOL Size Performance to the end of the analytical flow and replaced median engagement rate with average engagement rate.
+- Made TikTok links in displayed tables open as safe clickable links.
+- Kept the established General UGC tagging pipeline unchanged; detailed drama tagging remains outside this demo release.
+
 ## v68.14 — Chart compatibility and animal-Dance review fix
 
 - Removed Plotly warning banners on older Streamlit installs through version-compatible chart sizing.

@@ -10,9 +10,12 @@ import json
 import tempfile
 import time
 import random
+import uuid
 import requests
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
@@ -789,6 +792,8 @@ table.clean-table th{background:#111827 !important; color:#f8fafc !important;}
 table.clean-table td{background:#fff !important;}
 table.clean-table tr:nth-child(even) td{background:#f8fafc !important;}
 table.clean-table tr:hover td{background:#eef4ff !important;}
+.table-link{color:#5145cd !important;font-weight:850;text-decoration:none;border-bottom:1px solid rgba(81,69,205,.35);white-space:nowrap;}
+.table-link:hover{color:#3730a3 !important;border-bottom-color:#3730a3;}
 .bar-track{background:#edf2f7 !important;}
 .bar-fill{background:linear-gradient(90deg,#5b50e8,#0ea5e9) !important;}
 
@@ -825,6 +830,7 @@ for k, v in DEFAULT_STATE.items():
 # -----------------------------
 def go(step: int):
     st.session_state.step = step
+    _persist_runtime_checkpoint_v68_15()
     st.rerun()
 
 
@@ -835,6 +841,176 @@ def safe_str(v) -> str:
     except Exception:
         pass
     return str(v).strip()
+
+
+RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
+RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
+    "step",
+    "mode",
+    "batch_df",
+    "selected_df",
+    "tagged_df",
+    "last_message",
+    "review_pointer",
+    "enable_full_video_fallback_v46",
+    "date_filter_scope_v68",
+    "track_date_settings_v68",
+    "selection_mode",
+    "top_n",
+    "rank_metrics",
+    "group_by",
+    "use_date_filter",
+    "date_window",
+    "viral_date",
+    "replace_unavailable_posts",
+)
+RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
+
+
+def _valid_runtime_id_v68_15(value) -> str:
+    """Return a safe checkpoint id or an empty string."""
+    candidate = safe_str(value)
+    return candidate if re.fullmatch(r"[a-f0-9]{32}", candidate) else ""
+
+
+def _checkpoint_dataframe_to_payload_v68_15(df: pd.DataFrame) -> Dict:
+    """Convert a DataFrame to a JSON-safe payload without using pickle."""
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame()
+    return json.loads(
+        df.to_json(
+            orient="split",
+            date_format="iso",
+            date_unit="ms",
+            default_handler=str,
+        )
+    )
+
+
+def _checkpoint_dataframe_from_payload_v68_15(payload) -> pd.DataFrame:
+    """Restore a DataFrame payload while keeping its row index when possible."""
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    columns = payload.get("columns", [])
+    data = payload.get("data", [])
+    if not isinstance(columns, list) or not isinstance(data, list):
+        return pd.DataFrame()
+    restored = pd.DataFrame(data, columns=columns)
+    index = payload.get("index", [])
+    if isinstance(index, list) and len(index) == len(restored):
+        restored.index = index
+    return restored
+
+
+def _runtime_checkpoint_path_v68_15(run_id: str) -> Path:
+    return RUNTIME_CHECKPOINT_DIR_V68_15 / f"{run_id}.json"
+
+
+def _runtime_query_value_v68_15(name: str) -> str:
+    try:
+        value = st.query_params.get(name, "")
+    except Exception:
+        return ""
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return safe_str(value)
+
+
+def _sync_runtime_query_v68_15() -> None:
+    """Keep the active batch id and workflow step in the browser URL."""
+    run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
+    if not run_id:
+        return
+    try:
+        st.query_params["run"] = run_id
+        st.query_params["step"] = str(max(1, min(6, int(st.session_state.get("step", 1)))))
+    except Exception:
+        pass
+
+
+def _persist_runtime_checkpoint_v68_15() -> None:
+    """Autosave non-secret workflow data so a reconnect can resume safely."""
+    run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
+    if not run_id:
+        return
+    state_payload = {}
+    for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
+        if key not in st.session_state:
+            continue
+        value = st.session_state.get(key)
+        if key in RUNTIME_DATAFRAME_KEYS_V68_15:
+            state_payload[key] = _checkpoint_dataframe_to_payload_v68_15(value)
+        else:
+            state_payload[key] = value
+    payload = {
+        "version": "v68.15",
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "state": state_payload,
+    }
+    try:
+        RUNTIME_CHECKPOINT_DIR_V68_15.mkdir(parents=True, exist_ok=True)
+        destination = _runtime_checkpoint_path_v68_15(run_id)
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        os.replace(temporary, destination)
+        _sync_runtime_query_v68_15()
+    except Exception:
+        # A checkpoint must never block the tagging workflow.
+        pass
+
+
+def _restore_runtime_checkpoint_v68_15() -> None:
+    """Restore the current batch once when Streamlit creates a replacement session."""
+    if st.session_state.get("runtime_restore_checked_v68_15"):
+        _sync_runtime_query_v68_15()
+        return
+
+    requested_id = _valid_runtime_id_v68_15(_runtime_query_value_v68_15("run"))
+    run_id = requested_id or uuid.uuid4().hex
+    st.session_state.runtime_run_id_v68_15 = run_id
+    restored = False
+    path = _runtime_checkpoint_path_v68_15(run_id)
+    if requested_id and path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            saved_state = payload.get("state", {}) if isinstance(payload, dict) else {}
+            if isinstance(saved_state, dict):
+                for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
+                    if key not in saved_state:
+                        continue
+                    value = saved_state[key]
+                    if key in RUNTIME_DATAFRAME_KEYS_V68_15:
+                        value = _checkpoint_dataframe_from_payload_v68_15(value)
+                    elif key == "viral_date" and safe_str(value):
+                        parsed = pd.to_datetime(value, errors="coerce")
+                        value = parsed.date() if not pd.isna(parsed) else date.today()
+                    elif key == "track_date_settings_v68" and isinstance(value, dict):
+                        for setting in value.values():
+                            if isinstance(setting, dict) and safe_str(setting.get("date")):
+                                parsed = pd.to_datetime(setting.get("date"), errors="coerce")
+                                if not pd.isna(parsed):
+                                    setting["date"] = parsed.date()
+                    st.session_state[key] = value
+                restored = any(
+                    isinstance(st.session_state.get(key), pd.DataFrame)
+                    and not st.session_state.get(key).empty
+                    for key in RUNTIME_DATAFRAME_KEYS_V68_15
+                )
+        except Exception:
+            restored = False
+
+    if not restored:
+        requested_step = _runtime_query_value_v68_15("step")
+        try:
+            st.session_state.step = max(1, min(6, int(requested_step)))
+        except (TypeError, ValueError):
+            pass
+    else:
+        st.session_state.runtime_resume_notice_v68_15 = True
+
+    st.session_state.runtime_restore_checked_v68_15 = True
+    _sync_runtime_query_v68_15()
+    _persist_runtime_checkpoint_v68_15()
 
 
 def clean_api_secret(v) -> str:
@@ -957,12 +1133,18 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def format_display_value(col: str, val) -> str:
-    if col in {"Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate"}:
+    if col in {
+        "Engagement Rate", "Average Engagement Rate", "Likes Rate", "Comments Rate",
+        "Shares Rate", "Average Shares Rate", "Saves Rate", "Average Saves Rate",
+    }:
         try:
             return f"{float(val):.2f}%"
         except Exception:
             return safe_str(val)
-    if col in {"Posts", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Engagements", "Followers"}:
+    if col in {
+        "Posts", "Views", "Average Views", "Likes", "Comments", "Shares", "Saves",
+        "Total Engagement", "Engagements", "Average Engagements", "Followers",
+    }:
         return f"{clean_num(val):,}" if clean_num(val) else "0"
     return safe_str(val)
 
@@ -1338,7 +1520,30 @@ def render_table(df: pd.DataFrame, max_rows: int = 10, cols: Optional[List[str]]
             show[col] = show[col].map(display_market)
         else:
             show[col] = show[col].map(lambda x, col=col: format_display_value(col, x))
-    return "<div class='table-wrap'>" + show.to_html(index=False, escape=True, classes="clean-table") + "</div>"
+
+    safe_show = show.copy()
+    for col in safe_show.columns:
+        if col == "Link":
+            def clickable_tiktok_link(value):
+                url = safe_str(value)
+                try:
+                    parsed = urlparse(url)
+                    host = parsed.netloc.lower().split(":", 1)[0]
+                    valid = parsed.scheme in {"http", "https"} and (host == "tiktok.com" or host.endswith(".tiktok.com"))
+                except Exception:
+                    valid = False
+                if not valid:
+                    return html.escape(url)
+                safe_url = html.escape(url, quote=True)
+                return (
+                    f'<a class="table-link" href="{safe_url}" target="_blank" '
+                    'rel="noopener noreferrer">Open TikTok</a>'
+                )
+
+            safe_show[col] = safe_show[col].map(clickable_tiktok_link)
+        else:
+            safe_show[col] = safe_show[col].map(lambda value: html.escape(safe_str(value)))
+    return "<div class='table-wrap'>" + safe_show.to_html(index=False, escape=False, classes="clean-table") + "</div>"
 
 
 def metric_row(items: List[Tuple[str, str, str]]) -> str:
@@ -3060,6 +3265,109 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
     )
 
 
+def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
+    """Build consistent group summaries using per-post average engagement metrics."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return df.groupby(group_columns, dropna=False).agg(
+        Posts=("Link", "count"),
+        Views=("Views", "sum"),
+        Likes=("Likes", "sum"),
+        Comments=("Comments", "sum"),
+        Shares=("Shares", "sum"),
+        Saves=("Saves", "sum"),
+        Total_Engagement=("Total Engagement", "sum"),
+        Average_Engagements=("Total Engagement", "mean"),
+        Average_Engagement_Rate=("Engagement Rate", "mean"),
+    ).reset_index()
+
+
+def summary_sort_column_v68_15(metric: str, available_columns) -> str:
+    """Map post-level filter metrics to the matching summary metric."""
+    preferred = {
+        "Total Engagement": "Average Engagements",
+        "Engagement Rate": "Average Engagement Rate",
+    }.get(metric, metric)
+    return preferred if preferred in available_columns else "Views"
+
+
+def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
+    """Render KOL reach and average engagement as the final analysis section."""
+    st.markdown("<div class='card'>" + section_title("KOL Size Performance", "#14b8a6"), unsafe_allow_html=True)
+    if filtered is None or filtered.empty:
+        st.markdown("<div class='empty-panel'>No posts are available in the current view.</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    kol_group_cols = ["KOL Size Display"]
+    if market_filter == "All":
+        kol_group_cols = ["Market Display", "KOL Size Display"]
+    kol_summary = filtered.groupby(kol_group_cols, dropna=False).agg(
+        Posts=("Link", "count"),
+        Average_Views=("Views", "mean"),
+        Average_Engagements=("Total Engagement", "mean"),
+        Average_Engagement_Rate=("Engagement Rate", "mean"),
+        Average_Shares_Rate=("Shares Rate", "mean"),
+        Average_Saves_Rate=("Saves Rate", "mean"),
+    ).reset_index()
+    if market_filter == "All":
+        kol_summary["Performance Group"] = kol_summary.apply(
+            lambda row: f"{display_empty(row.get('Market Display'), 'Other')} · {display_empty(row.get('KOL Size Display'), 'Unknown')}",
+            axis=1,
+        )
+    else:
+        kol_summary["Performance Group"] = kol_summary["KOL Size Display"].map(
+            lambda value: display_empty(value, "Unknown")
+        )
+
+    k1, k2 = st.columns(2)
+    with k1:
+        kol_views_chart = kol_summary[["Performance Group", "Average_Views"]].copy()
+        kol_views_chart["Average Views"] = kol_views_chart["Average_Views"].round().astype(int)
+        chart_bar(
+            kol_views_chart.sort_values("Average Views", ascending=False).head(12),
+            "Performance Group",
+            "Average Views",
+            "Average Views by KOL Size",
+            orientation="h",
+            value_format="integer",
+        )
+    with k2:
+        kol_rate_chart = kol_summary[["Performance Group", "Average_Engagement_Rate"]].copy()
+        kol_rate_chart["Average Engagement Rate"] = kol_rate_chart["Average_Engagement_Rate"].round(2)
+        chart_bar(
+            kol_rate_chart.sort_values("Average Engagement Rate", ascending=False).head(12),
+            "Performance Group",
+            "Average Engagement Rate",
+            "Average Engagement Rate by KOL Size",
+            orientation="h",
+            value_format="percent",
+        )
+
+    kol_table = kol_summary.copy()
+    if market_filter == "All":
+        kol_table = kol_table.rename(columns={"Market Display": "Market", "KOL Size Display": "KOL Size"})
+        kol_cols = [
+            "Market", "KOL Size", "Posts", "Average Views", "Average Engagements",
+            "Average Engagement Rate", "Average Shares Rate", "Average Saves Rate",
+        ]
+    else:
+        kol_table = kol_table.rename(columns={"KOL Size Display": "KOL Size"})
+        kol_cols = [
+            "KOL Size", "Posts", "Average Views", "Average Engagements",
+            "Average Engagement Rate", "Average Shares Rate", "Average Saves Rate",
+        ]
+    kol_table = kol_table.rename(columns={
+        "Average_Views": "Average Views",
+        "Average_Engagements": "Average Engagements",
+        "Average_Engagement_Rate": "Average Engagement Rate",
+        "Average_Shares_Rate": "Average Shares Rate",
+        "Average_Saves_Rate": "Average Saves Rate",
+    })
+    st.markdown(render_table(kol_table, max_rows=40, cols=kol_cols), unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def bar_list(df: pd.DataFrame, label_col: str, value_col: str, max_rows: int = 10, value_suffix: str = "", show_share: bool = False) -> str:
     if df is None or df.empty or label_col not in df.columns or value_col not in df.columns:
         return "<div class='empty-panel'>No data available yet.</div>"
@@ -3107,6 +3415,9 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
 # -----------------------------
 # Header
 # -----------------------------
+_restore_runtime_checkpoint_v68_15()
+_persist_runtime_checkpoint_v68_15()
+
 st.markdown(
     """
 <div class='app-title hero-v37 hero-title-only'>
@@ -3118,6 +3429,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 step_strip(st.session_state.step)
+if st.session_state.pop("runtime_resume_notice_v68_15", False):
+    st.markdown(
+        "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",
+        unsafe_allow_html=True,
+    )
 
 # -----------------------------
 # STEP 1
@@ -3153,8 +3469,8 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste TikTok links into one batch.</p></div>", unsafe_allow_html=True)
 
-    # Current prototype runs General UGC creative type tagging by default.
-    # General-only prototype. Drama / Creator Core mode can be added later as a separate backend route.
+    # The demo keeps the established General UGC pipeline. Drama detail remains
+    # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
 
     add_tab, paste_tab = st.tabs(["Upload post files", "Paste extra TikTok links"])
@@ -3568,7 +3884,7 @@ elif st.session_state.step == 4:
         st.stop()
     st.markdown(metric_row([
         ("Posts", str(len(selected)), "To tag"),
-        ("Mode", "General" if st.session_state.mode.startswith("General") else "Drama", "Taxonomy"),
+        ("Mode", "General", "Taxonomy"),
         ("Markets", str(len([m for m in selected['Market'].fillna('').unique() if safe_str(m)])), "Detected"),
         ("Tracks", str(len([t for t in selected['Track'].fillna('').unique() if safe_str(t)])), "Detected"),
         ("Selection", st.session_state.get("selection_mode", "Top posts"), "Method"),
@@ -3941,18 +4257,20 @@ elif st.session_state.step == 6:
 
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
-    er = (total_eng / total_views * 100) if total_views else 0
-    avg_views = int(total_views / len(filtered)) if len(filtered) and total_views else 0
+    avg_engagements = float(filtered["Total Engagement"].mean()) if len(filtered) else 0
     market_count = len([m for m in filtered["Market"].fillna("").unique().tolist() if safe_str(m)])
     track_count = len([t for t in filtered["Track"].fillna("").unique().tolist() if safe_str(t)])
     has_metrics = bool(total_views or total_eng or filtered[["Likes", "Comments", "Shares", "Saves"]].sum().sum())
     filtered["Engagement Rate"] = filtered.apply(lambda r: (clean_num(r.get("Total Engagement")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
+    filtered["Shares Rate"] = filtered.apply(lambda r: (clean_num(r.get("Shares")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
+    filtered["Saves Rate"] = filtered.apply(lambda r: (clean_num(r.get("Saves")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
+    avg_engagement_rate = float(filtered["Engagement Rate"].mean()) if len(filtered) else 0
 
     st.markdown(summary_kpi_row([
         ("Posts", f"{len(filtered):,}", "", "kpi-purple"),
         ("Views", short_num(total_views) if has_metrics else "—", "", "kpi-blue"),
-        ("Engagements", short_num(total_eng) if has_metrics else "—", "Likes + comments + shares + saves", "kpi-orange"),
-        ("Engagement Rate", f"{er:.1f}%" if has_metrics else "—", "Engagements / views", "kpi-green"),
+        ("Average Engagements", short_num(round(avg_engagements)) if has_metrics else "—", "Average per post", "kpi-orange"),
+        ("Average Engagement Rate", f"{avg_engagement_rate:.1f}%" if has_metrics else "—", "Mean of each post's engagement rate", "kpi-green"),
         ("Markets", str(market_count) if market_count else "—", "", "kpi-pink"),
     ]), unsafe_allow_html=True)
 
@@ -3980,6 +4298,33 @@ elif st.session_state.step == 6:
         ("Track / source", top_track if top_track != "Not specified" else source_text, "", "focus-orange"),
     ]), unsafe_allow_html=True)
 
+    # Begin with campaign structure, then move into creative insights.
+    st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
+    if market_count:
+        market_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display"]).rename(columns={
+            "Market Display": "Market",
+            "Average_Engagements": "Average Engagements",
+            "Average_Engagement_Rate": "Average Engagement Rate",
+        })
+        market_sort_col = summary_sort_column_v68_15(focus_metric, market_summary.columns)
+        market_summary = market_summary.sort_values([market_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
+        st.markdown(render_table(market_summary, max_rows=12, cols=["Market", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='card'>" + section_title("Track Summary", "#f97316"), unsafe_allow_html=True)
+    track_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display", "Track Display"]).rename(columns={
+        "Market Display": "Market",
+        "Track Display": "Track",
+        "Average_Engagements": "Average Engagements",
+        "Average_Engagement_Rate": "Average Engagement Rate",
+    })
+    track_sort_col = summary_sort_column_v68_15(focus_metric, track_summary.columns)
+    track_summary = track_summary.sort_values([track_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
+    st.markdown(render_table(track_summary, max_rows=12, cols=["Market", "Track", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
     # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
     c1, c2 = st.columns(2)
     with c1:
@@ -4002,113 +4347,15 @@ elif st.session_state.step == 6:
     # Source summary is useful when users mix uploaded files and pasted links.
     if filtered["Source Display"].nunique() > 1:
         st.markdown("<div class='card'>" + section_title("Source Summary", "#8b5cf6"), unsafe_allow_html=True)
-        source_summary = filtered.groupby("Source Display", dropna=False).agg(
-            Posts=("Link", "count"), Views=("Views", "sum"), Likes=("Likes", "sum"), Comments=("Comments", "sum"), Shares=("Shares", "sum"), Saves=("Saves", "sum"), Engagements=("Total Engagement", "sum")
-        ).reset_index().rename(columns={"Source Display": "Source"})
-        source_summary["Engagement Rate"] = source_summary.apply(lambda r: f"{(r['Engagements']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
-        st.markdown(render_table(source_summary.sort_values("Views" if focus_metric == "Engagement Rate" else focus_metric if focus_metric in source_summary.columns else "Views", ascending=(sort_order == "Lowest first")), max_rows=12, cols=["Source", "Posts", "Views", "Engagements", "Engagement Rate"]), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
-    if market_count:
-        market_summary = filtered.groupby("Market Display", dropna=False).agg(
-            Posts=("Link", "count"), Views=("Views", "sum"), Likes=("Likes", "sum"), Comments=("Comments", "sum"), Shares=("Shares", "sum"), Saves=("Saves", "sum"), Engagements=("Total Engagement", "sum")
-        ).reset_index().rename(columns={"Market Display": "Market"})
-        market_summary["Engagement Rate"] = market_summary.apply(lambda r: f"{(r['Engagements']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
-        market_sort_col = "Views" if focus_metric == "Engagement Rate" else focus_metric if focus_metric in market_summary.columns else "Views"
-        market_summary = market_summary.sort_values([market_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
-        st.markdown(render_table(market_summary, max_rows=12, cols=["Market", "Posts", "Views", "Engagements", "Engagement Rate"]), unsafe_allow_html=True)
-    else:
-        st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # KOL performance follows every Summary filter. When several markets are
-    # visible, include Market in the grouping because KOL thresholds differ by
-    # country; within one market, keep the view compact by showing KOL Size only.
-    st.markdown("<div class='card'>" + section_title("KOL Size Performance", "#14b8a6"), unsafe_allow_html=True)
-    if filtered.empty:
-        st.markdown("<div class='empty-panel'>No posts are available in the current view.</div>", unsafe_allow_html=True)
-    else:
-        kol_group_cols = ["KOL Size Display"]
-        if market_filter == "All":
-            kol_group_cols = ["Market Display", "KOL Size Display"]
-        kol_summary = filtered.groupby(kol_group_cols, dropna=False).agg(
-            Posts=("Link", "count"),
-            Average_Views=("Views", "mean"),
-            Average_Engagements=("Total Engagement", "mean"),
-            Median_Engagement_Rate=("Engagement Rate", "median"),
-            Total_Views=("Views", "sum"),
-            Total_Shares=("Shares", "sum"),
-            Total_Saves=("Saves", "sum"),
-        ).reset_index()
-        kol_summary["Shares Rate"] = kol_summary.apply(
-            lambda row: (row["Total_Shares"] / row["Total_Views"] * 100) if row["Total_Views"] else 0,
-            axis=1,
-        )
-        kol_summary["Saves Rate"] = kol_summary.apply(
-            lambda row: (row["Total_Saves"] / row["Total_Views"] * 100) if row["Total_Views"] else 0,
-            axis=1,
-        )
-        if market_filter == "All":
-            kol_summary["Performance Group"] = kol_summary.apply(
-                lambda row: f"{display_empty(row.get('Market Display'), 'Other')} · {display_empty(row.get('KOL Size Display'), 'Unknown')}",
-                axis=1,
-            )
-        else:
-            kol_summary["Performance Group"] = kol_summary["KOL Size Display"].map(lambda value: display_empty(value, "Unknown"))
-
-        k1, k2 = st.columns(2)
-        with k1:
-            kol_views_chart = kol_summary[["Performance Group", "Average_Views"]].copy()
-            kol_views_chart["Average Views"] = kol_views_chart["Average_Views"].round().astype(int)
-            chart_bar(
-                kol_views_chart.sort_values("Average Views", ascending=False).head(12),
-                "Performance Group",
-                "Average Views",
-                "Average Views by KOL Size",
-                orientation="h",
-                value_format="integer",
-            )
-        with k2:
-            kol_rate_chart = kol_summary[["Performance Group", "Median_Engagement_Rate"]].copy()
-            kol_rate_chart["Median Engagement Rate"] = kol_rate_chart["Median_Engagement_Rate"].round(2)
-            chart_bar(
-                kol_rate_chart.sort_values("Median Engagement Rate", ascending=False).head(12),
-                "Performance Group",
-                "Median Engagement Rate",
-                "Median Engagement Rate by KOL Size",
-                orientation="h",
-                value_format="percent",
-            )
-
-        kol_table = kol_summary.copy()
-        if market_filter == "All":
-            kol_table = kol_table.rename(columns={"Market Display": "Market", "KOL Size Display": "KOL Size"})
-            kol_cols = ["Market", "KOL Size", "Posts", "Average Views", "Average Engagements", "Median Engagement Rate", "Shares Rate", "Saves Rate"]
-        else:
-            kol_table = kol_table.rename(columns={"KOL Size Display": "KOL Size"})
-            kol_cols = ["KOL Size", "Posts", "Average Views", "Average Engagements", "Median Engagement Rate", "Shares Rate", "Saves Rate"]
-        kol_table = kol_table.rename(columns={
-            "Average_Views": "Average Views",
+        source_summary = aggregate_summary_performance_v68_15(filtered, ["Source Display"]).rename(columns={
+            "Source Display": "Source",
             "Average_Engagements": "Average Engagements",
-            "Median_Engagement_Rate": "Median Engagement Rate",
+            "Average_Engagement_Rate": "Average Engagement Rate",
         })
-        kol_table["Average Views"] = kol_table["Average Views"].map(lambda value: f"{int(round(value)):,}")
-        kol_table["Average Engagements"] = kol_table["Average Engagements"].map(lambda value: f"{int(round(value)):,}")
-        for rate_col in ["Median Engagement Rate", "Shares Rate", "Saves Rate"]:
-            kol_table[rate_col] = kol_table[rate_col].map(lambda value: f"{float(value):.2f}%")
-        st.markdown(render_table(kol_table, max_rows=40, cols=kol_cols), unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='card'>" + section_title("Track Summary", "#f97316"), unsafe_allow_html=True)
-    track_summary = filtered.groupby(["Market Display", "Track Display"], dropna=False).agg(
-        Posts=("Link", "count"), Views=("Views", "sum"), Likes=("Likes", "sum"), Comments=("Comments", "sum"), Shares=("Shares", "sum"), Saves=("Saves", "sum"), Engagements=("Total Engagement", "sum")
-    ).reset_index().rename(columns={"Market Display": "Market", "Track Display": "Track"})
-    track_summary["Engagement Rate"] = track_summary.apply(lambda r: f"{(r['Engagements']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
-    track_sort_col = "Views" if focus_metric == "Engagement Rate" else focus_metric if focus_metric in track_summary.columns else "Views"
-    track_summary = track_summary.sort_values([track_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
-    st.markdown(render_table(track_summary, max_rows=12, cols=["Market", "Track", "Posts", "Views", "Engagements", "Engagement Rate"]), unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        source_sort_col = summary_sort_column_v68_15(focus_metric, source_summary.columns)
+        source_summary = source_summary.sort_values(source_sort_col, ascending=(sort_order == "Lowest first"))
+        st.markdown(render_table(source_summary, max_rows=12, cols=["Source", "Posts", "Views", "Average Engagements", "Average Engagement Rate"]), unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if has_metrics:
         st.markdown("<div class='card'>" + section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
@@ -4120,6 +4367,9 @@ elif st.session_state.step == 6:
         top_posts["Market"] = top_posts["Market Display"]
         st.markdown(render_table(top_posts, max_rows=15, cols=["Creator", "Market", "Track", "Creative Type", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate", "Link"]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # Keep KOL performance last among the analytical sections.
+    render_kol_size_performance_v68_15(filtered, market_filter)
 
     # Post-level checking is handled by the Review page and final downloads.
     # Keep the marketing Summary focused on performance, mix, market/track/source summaries, and downloads.
@@ -4165,11 +4415,11 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.14",
+            "App Version": "v68.15",
             "Posts": len(filtered),
             "Views": total_views,
-            "Engagements": total_eng,
-            "Engagement Rate": f"{er:.1f}%" if has_metrics else "Metrics unavailable",
+            "Average Engagements": int(round(avg_engagements)) if has_metrics else "Metrics unavailable",
+            "Average Engagement Rate": f"{avg_engagement_rate:.1f}%" if has_metrics else "Metrics unavailable",
             "Top Creative Type": top_type,
             "Top Market": top_market,
             "Top Track": top_track,
@@ -4211,3 +4461,5 @@ elif st.session_state.step == 6:
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             go(2)
+
+_persist_runtime_checkpoint_v68_15()

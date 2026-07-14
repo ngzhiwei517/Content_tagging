@@ -159,8 +159,8 @@ class SummaryCopyContractTests(unittest.TestCase):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, APP_SOURCE)
         for kept in [
-            "Likes + comments + shares + saves",
-            "Engagements / views",
+            "Average per post",
+            "Mean of each post's engagement rate",
             'best_perf_sub = f"{short_num(highest_views_total)} views"',
         ]:
             with self.subTest(kept=kept):

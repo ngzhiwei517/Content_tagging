@@ -1,4 +1,4 @@
-# UI Specification — v68.14
+# UI Specification — v68.15
 
 ## Design tone
 
@@ -21,6 +21,7 @@ Clean, mature, marketing-friendly and direct. Preserve the accepted v41-style fl
 - Date filtering defaults to one shared date; mixed-track batches may choose separate editable dates per track.
 - Review shows only information needed to decide Keep, Edit or Remove.
 - Summary shows marketing insights, not AI debug fields.
+- Summary analysis order is Market Summary, Track Summary, Creative Type Mix, optional Source Summary, Top Posts, then KOL Size Performance.
 - QA diagnostics and label history appear only in the internal QA download.
 
 ## Downloads
