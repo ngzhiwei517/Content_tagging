@@ -20,9 +20,14 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
+from drama_analysis import campaign_track_catalog_status
+
 from final_update2_adapter import (
+    DRAMA_REVIEW_OPTIONS,
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
+    build_review_drama_updates as final_update2_build_review_drama_updates,
+    drama_review_defaults as final_update2_drama_review_defaults,
     normalize_url as final_update2_normalize_url,
     review_audit_update as final_update2_review_audit_update,
     review_cache as final_update2_review_cache,
@@ -37,7 +42,7 @@ except Exception:
 
 st.set_page_config(page_title="TikTok Post Tagging", page_icon="", layout="wide")
 
-MARKETS = ["PH", "MY", "KR", "SG", "VN", "TH"]
+MARKETS = ["PH", "MY", "ID", "KR", "SG", "VN", "TH"]
 MARKET_OPTIONS = ["Other / no market"] + MARKETS
 DATE_SCOPE_SHARED = "Same date for all tracks"
 DATE_SCOPE_PER_TRACK = "Different date by track"
@@ -843,6 +848,12 @@ def safe_str(v) -> str:
     return str(v).strip()
 
 
+@st.cache_data(ttl=900, max_entries=128, show_spinner=False)
+def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
+    """Cache the public catalogue check so UI reruns do not repeat requests."""
+    return campaign_track_catalog_status(track_value)
+
+
 RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
@@ -943,7 +954,7 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         else:
             state_payload[key] = value
     payload = {
-        "version": "v68.15",
+        "version": "v68.39",
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
@@ -1035,7 +1046,7 @@ def display_empty(v: str, fallback: str = "Not specified") -> str:
 
 def display_market(v: str) -> str:
     """Marketing-friendly market display. Blank market rows are grouped as Other."""
-    s = safe_str(v).upper()
+    s = normalize_market(v)
     return s if s else "Other"
 
 
@@ -1349,7 +1360,8 @@ def normalize_market(v: str) -> str:
         return s
     mapping = {
         "PHILIPPINES": "PH", "PHILIPPINE": "PH", "MALAYSIA": "MY", "KOREA": "KR",
-        "SOUTH KOREA": "KR", "SINGAPORE": "SG", "VIETNAM": "VN", "VIET NAM": "VN", "THAILAND": "TH",
+        "SOUTH KOREA": "KR", "INDONESIA": "ID", "INDONESIAN": "ID", "IDN": "ID",
+        "SINGAPORE": "SG", "VIETNAM": "VN", "VIET NAM": "VN", "THAILAND": "TH",
     }
     return mapping.get(s, s if s else "")
 
@@ -1435,6 +1447,13 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
             "Artist - Sound", "Artist-Sound", "Artist / Sound", "Track", "Sound",
             "Song", "Music", "Track Name", "Track Title", "Song Name",
             "Song Title", "Music Name", "Sound Name", "Audio Name",
+            "Campaign Track", "Campaign Track Name", "Campaign Song",
+            "Campaign Song Used", "Campaign Sound", "Artist - Track",
+            "Artist / Track", "Track / Sound", "Track / Sound Name",
+        ]),
+        "artist": detect_col(df, [
+            "Campaign Artist", "Artist", "Artist Name", "Track Artist",
+            "Song Artist", "Music Artist", "Sound Artist",
         ]),
         "viral_date": detect_col(df, ["Viral Date", "2026 Viral Date", "First Viral Date", "Track Viral Date"]),
         "date": detect_col(df, ["Date", "Post Date", "Created Date", "Create Time", "Created At", "Published Date", "createTimeISO"]),
@@ -1471,6 +1490,7 @@ def standardize_file_rows(df: pd.DataFrame, source_name: str) -> Tuple[pd.DataFr
             "Link": link,
             "Market": normalize_market(r.get(cols["market"])) if cols.get("market") else "",
             "Track": safe_str(r.get(cols["track"])) if cols.get("track") else "",
+            "Campaign Artist": safe_str(r.get(cols["artist"])) if cols.get("artist") else "",
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),
@@ -1491,6 +1511,44 @@ def standardize_file_rows(df: pd.DataFrame, source_name: str) -> Tuple[pd.DataFr
     return out_df, cols
 
 
+def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep first-source order while backfilling missing metadata from duplicate URLs."""
+    if frame is None or frame.empty or "_link_key" not in frame.columns:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    backfill_columns = [
+        "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
+        "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
+        "Total Engagement",
+    ]
+
+    def missing(value, column: str) -> bool:
+        try:
+            if pd.isna(value):
+                return True
+        except Exception:
+            pass
+        if isinstance(value, str):
+            return value.strip().casefold() in {"", "nan", "none", "null", "unknown", "not specified"}
+        if column in {"Followers", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement"}:
+            try:
+                return float(value or 0) == 0
+            except Exception:
+                return False
+        return False
+
+    merged_rows = []
+    for _, group in frame.groupby("_link_key", sort=False, dropna=False):
+        merged = group.iloc[0].copy()
+        for _, candidate in group.iloc[1:].iterrows():
+            for column in backfill_columns:
+                if column not in frame.columns:
+                    continue
+                if missing(merged.get(column), column) and not missing(candidate.get(column), column):
+                    merged[column] = candidate[column]
+        merged_rows.append(merged)
+    return pd.DataFrame(merged_rows, columns=frame.columns).reset_index(drop=True)
+
+
 def append_to_batch(new_df: pd.DataFrame) -> Tuple[int, int]:
     if new_df is None or new_df.empty:
         return 0, 0
@@ -1498,7 +1556,7 @@ def append_to_batch(new_df: pd.DataFrame) -> Tuple[int, int]:
     before = len(old)
     combined = pd.concat([old, new_df], ignore_index=True) if not old.empty else new_df.copy()
     combined["_link_key"] = combined["Link"].astype(str).str.split("?").str[0].str.rstrip("/")
-    combined = combined.drop_duplicates("_link_key", keep="first").drop(columns=["_link_key"])
+    combined = coalesce_duplicate_batch_rows(combined).drop(columns=["_link_key"])
     combined = add_performance_fields(combined)
     st.session_state.batch_df = combined.reset_index(drop=True)
     added = len(st.session_state.batch_df) - before
@@ -3107,12 +3165,9 @@ def grouped_excel_bytes(final_df: pd.DataFrame) -> bytes:
     df["Track"] = df["Track"].map(lambda x: display_empty(x, "Not specified"))
     df["Source"] = df["Source"].map(lambda x: display_empty(x, "Pasted links"))
 
-    sort_cols = [c for c in ["Market", "Track", "Views", "Total Engagement"] if c in df.columns]
-    ascending = [True, True] + [False] * max(0, len(sort_cols) - 2)
-    try:
-        df = df.sort_values(sort_cols, ascending=ascending) if sort_cols else df
-    except Exception:
-        pass
+    # Keep the exact upload/paste order in All Posts and Links Only. Market tabs
+    # remain convenient subsets, but must not redefine the user's row sequence.
+    df = df.reset_index(drop=True)
 
     sheets: Dict[str, pd.DataFrame] = {}
     used_names = set()
@@ -3306,6 +3361,7 @@ def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[s
 
 def summary_sort_column_v68_15(metric: str, available_columns) -> str:
     """Map post-level filter metrics to the matching summary metric."""
+    available = list(available_columns)
     preferred = {
         "Views": "Average Views",
         "Total Engagement": "Average Engagements",
@@ -3313,7 +3369,31 @@ def summary_sort_column_v68_15(metric: str, available_columns) -> str:
         "Shares Rate": "Shares Rate",
         "Saves Rate": "Saves Rate",
     }.get(metric, metric)
-    return preferred if preferred in available_columns else "Average Views"
+    if preferred in available:
+        return preferred
+    for fallback in ("Average Views", "Average Engagements", "Posts"):
+        if fallback in available:
+            return fallback
+    return ""
+
+
+def sort_summary_performance_v68_18(
+    summary: pd.DataFrame,
+    metric: str,
+    sort_order: str,
+) -> pd.DataFrame:
+    """Sort a populated summary safely; empty filtered views stay empty."""
+    if summary is None or summary.empty:
+        return summary
+    sort_column = summary_sort_column_v68_15(metric, summary.columns)
+    if not sort_column:
+        return summary
+    by = [sort_column]
+    ascending = [sort_order == "Lowest first"]
+    if "Posts" in summary.columns and sort_column != "Posts":
+        by.append("Posts")
+        ascending.append(False)
+    return summary.sort_values(by, ascending=ascending)
 
 
 def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
@@ -3497,11 +3577,17 @@ elif st.session_state.step == 2:
     # The demo keeps the established General UGC pipeline. Drama detail remains
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
+    drama_audio_note = (
+        "**For drama audio detection:** include the campaign **Track / Track Name**. "
+        "This lets the app compare **Original, Sped Up, Slowed, or Remix**. "
+        "Without a track name, Audio Version may remain **Unknown**."
+    )
 
     add_tab, paste_tab = st.tabs(["Upload post files", "Paste extra TikTok links"])
 
     with add_tab:
         st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok links. You can select multiple files.</p>", unsafe_allow_html=True)
+        st.info(drama_audio_note, icon=":material/info:")
         files = st.file_uploader(
             "Post data files",
             type=["csv", "xlsx", "xls"],
@@ -3544,11 +3630,48 @@ elif st.session_state.step == 2:
 
     with paste_tab:
         st.markdown("<div class='card'><h3>Paste TikTok links</h3><p class='sub'>Use this to add extra links that are not included in your files.</p>", unsafe_allow_html=True)
+        st.info(drama_audio_note, icon=":material/info:")
         link_text = st.text_area("TikTok links", placeholder="Paste one TikTok link per line", height=150)
-        c1, c2 = st.columns([1.25, 0.75])
+        c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
         with c1:
-            paste_track = st.text_input("Track / sound name", placeholder="Optional")
+            paste_track = st.text_input(
+                "Campaign track / sound name",
+                placeholder="Song title",
+                help="Enter the song title. If left blank, the app will use the detected TikTok audio name.",
+                key="pasted_campaign_track_v68_39",
+            )
         with c2:
+            paste_artist = st.text_input(
+                "Artist name (optional)",
+                placeholder="Only if needed",
+                help="Add the artist only when songs share the same title or the catalogue match is incorrect.",
+                key="pasted_campaign_artist_v68_39",
+            )
+        campaign_track_lookup = " - ".join(
+            part for part in [safe_str(paste_artist), safe_str(paste_track)] if part
+        )
+        with c1:
+            if safe_str(paste_track):
+                with st.spinner("Checking the track name..."):
+                    track_status = campaign_track_catalog_status_v68_36(campaign_track_lookup)
+                if track_status.get("status") == "matched":
+                    matched_title = " — ".join(
+                        part for part in [
+                            safe_str(track_status.get("artist_name")),
+                            safe_str(track_status.get("track_name")),
+                        ] if part
+                    )
+                    st.success(
+                        f"Track confirmed in Apple Music/iTunes: {matched_title}. "
+                        "If this is not the intended artist, fill in the optional Artist field."
+                    )
+                else:
+                    st.warning(
+                        f"Could not confirm ‘{campaign_track_lookup}’ in Apple Music/iTunes. "
+                        "Check the spelling. You can still continue because regional, niche, "
+                        "or unreleased tracks may not be listed."
+                    )
+        with c3:
             market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
             paste_market = "" if market_choice == "Other / no market" else market_choice
         links = parse_links(link_text)
@@ -3565,7 +3688,11 @@ elif st.session_state.step == 2:
                         "Input Type": "Pasted",
                         "Link": l,
                         "Market": paste_market,
+                        # Keep the user-entered campaign track for audio-version
+                        # comparison. When blank, the adapter falls back to the
+                        # scraped TikTok music metadata during tagging.
                         "Track": safe_str(paste_track),
+                        "Campaign Artist": safe_str(paste_artist),
                         "Viral Date": "",
                         "Date": "",
                         "Creator": extract_creator(l),
@@ -3597,7 +3724,7 @@ elif st.session_state.step == 2:
             ("Tracks", str(track_count) if track_count else "—", "Optional"),
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
-        st.markdown(render_table(batch, max_rows=10, cols=["Source", "Link", "Market", "Track", "Date", "Creator"]), unsafe_allow_html=True)
+        st.markdown(render_table(batch, max_rows=10, cols=["Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
@@ -4096,6 +4223,14 @@ elif st.session_state.step == 5:
             narrative_key = f"review_narrative_v55_{original_idx}"
             type_key = f"review_type_v55_{original_idx}"
             details_key = f"review_details_v55_{original_idx}"
+            drama_keys = {
+                name: f"review_drama_{name}_v68_18_audio_{original_idx}"
+                for name in [
+                    "visual_summary", "content_categories", "drama_type", "edit_focus",
+                    "drama_format", "country_region", "drama_title",
+                    "detected_audio", "audio_version",
+                ]
+            }
 
             if narrative_key not in st.session_state:
                 st.session_state[narrative_key] = current_narrative
@@ -4103,6 +4238,10 @@ elif st.session_state.step == 5:
                 st.session_state[type_key] = [x.strip() for x in current_type.split(",") if x.strip() in CREATIVE_TYPES][:2]
             if details_key not in st.session_state:
                 st.session_state[details_key] = current_details
+            drama_defaults = final_update2_drama_review_defaults(row.to_dict())
+            for field, key in drama_keys.items():
+                if key not in st.session_state:
+                    st.session_state[key] = drama_defaults[field]
 
             if st.button("AI Suggest", width="stretch", key=f"review_ai_suggest_v55_{original_idx}"):
                 gemini_key_r = clean_api_secret(st.session_state.get("gemini_key", ""))
@@ -4120,6 +4259,10 @@ elif st.session_state.step == 5:
                         st.session_state[narrative_key] = safe_str(suggestion.get("Narrative"))
                         st.session_state[type_key] = suggested_labels
                         st.session_state[details_key] = safe_str(suggestion.get("Content Details"))
+                        if "Movie/Tv/Drama Edits" in suggested_labels:
+                            suggested_drama = final_update2_drama_review_defaults(suggestion)
+                            for field, key in drama_keys.items():
+                                st.session_state[key] = suggested_drama[field]
                         st.rerun()
 
             ai_prefill = st.session_state.get(ai_result_key, {})
@@ -4138,7 +4281,90 @@ elif st.session_state.step == 5:
 
             narrative = st.text_input("Narrative", key=narrative_key)
             creative_types = st.multiselect("Creative Type (max 2)", CREATIVE_TYPES, max_selections=2, key=type_key)
-            details = st.text_area("Content Details", height=130, key=details_key)
+            drama_updates = {}
+            if "Movie/Tv/Drama Edits" in creative_types:
+                with st.container(border=True):
+                    st.markdown("#### Drama / entertainment details")
+                    content_categories = st.multiselect(
+                        "Content category (max 2)",
+                        DRAMA_REVIEW_OPTIONS["content_categories"],
+                        max_selections=2,
+                        key=drama_keys["content_categories"],
+                    )
+                    st.text_area("Visual summary", height=100, key=drama_keys["visual_summary"])
+
+                    entertainment_news_mode = "Entertainment News" in content_categories
+                    needs_drama_fields = (
+                        not entertainment_news_mode
+                        and bool(set(content_categories) & {"Drama Edit", "CP Edit"})
+                    )
+                    if needs_drama_fields:
+                        cp_only_mode = (
+                            "CP Edit" in content_categories
+                            and "Drama Edit" not in content_categories
+                        )
+                        if cp_only_mode:
+                            st.selectbox(
+                                "Edit focus",
+                                DRAMA_REVIEW_OPTIONS["edit_focus"],
+                                key=drama_keys["edit_focus"],
+                            )
+                        else:
+                            d1, d2 = st.columns(2)
+                            with d1:
+                                st.selectbox(
+                                    "Drama type / representation",
+                                    DRAMA_REVIEW_OPTIONS["drama_type"],
+                                    key=drama_keys["drama_type"],
+                                )
+                            with d2:
+                                st.selectbox(
+                                    "Edit focus",
+                                    DRAMA_REVIEW_OPTIONS["edit_focus"],
+                                    key=drama_keys["edit_focus"],
+                                )
+                    if "Drama Edit" in content_categories and not entertainment_news_mode:
+                        if st.session_state.get(drama_keys["drama_format"]) == "Micro-drama":
+                            # Migrate review state saved by v68.32 and earlier.
+                            st.session_state[drama_keys["drama_format"]] = "Short-form Drama"
+                        elif st.session_state.get(drama_keys["drama_format"]) not in DRAMA_REVIEW_OPTIONS["drama_format"]:
+                            st.session_state[drama_keys["drama_format"]] = "Long-form Drama"
+                        st.selectbox(
+                            "Drama format",
+                            DRAMA_REVIEW_OPTIONS["drama_format"],
+                            key=drama_keys["drama_format"],
+                            help="Choose Long-form or Short-form Drama based on the original production—not the TikTok clip length.",
+                        )
+
+                    st.selectbox(
+                        "Country / region",
+                        DRAMA_REVIEW_OPTIONS["country_region"],
+                        key=drama_keys["country_region"],
+                    )
+                    title_categories = {
+                        "Drama Edit", "CP Edit", "Anime Edit",
+                        "Drama Carousel", "Behind-the-Scenes Edit",
+                    }
+                    if not entertainment_news_mode and set(content_categories) & title_categories:
+                        title_label = "Anime title" if content_categories == ["Anime Edit"] else "Drama / show title"
+                        st.text_input(title_label, key=drama_keys["drama_title"])
+
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        st.text_input("Detected audio", key=drama_keys["detected_audio"])
+                    with a2:
+                        st.selectbox(
+                            "Audio version",
+                            DRAMA_REVIEW_OPTIONS["audio_version"],
+                            key=drama_keys["audio_version"],
+                        )
+
+                    drama_values = {field: st.session_state.get(key) for field, key in drama_keys.items()}
+                    drama_updates = final_update2_build_review_drama_updates(drama_values)
+                    details = safe_str(drama_updates.get("Content Details"))
+                    st.caption("Content Details will be generated from these reviewed fields.")
+            else:
+                details = st.text_area("Content Details", height=130, key=details_key)
 
             # final_update_2 manual-metrics workflow. Scraper exception/sensitive
             # rows often retain a usable TikTok link but have no engagement data.
@@ -4176,6 +4402,8 @@ elif st.session_state.step == 5:
             if st.button("Save & next", type="primary", width="stretch", key=f"review_save_v55_{original_idx}"):
                 if not narrative or not creative_types or not details:
                     st.error("Please fill Narrative, at least one Creative Type, and Content Details before saving.")
+                elif "Movie/Tv/Drama Edits" in creative_types and not content_categories:
+                    st.error("Please choose at least one drama / entertainment content category.")
                 elif needs_manual_metrics and int(manual_views) == 0 and int(manual_likes) == 0 and int(manual_shares) == 0:
                     st.error("Please enter the TikTok metrics before saving.")
                 else:
@@ -4192,6 +4420,9 @@ elif st.session_state.step == 5:
                     st.session_state.tagged_df.at[original_idx, "Narrative"] = narrative
                     st.session_state.tagged_df.at[original_idx, "Creative Type"] = audit_fields["Final Labels"]
                     st.session_state.tagged_df.at[original_idx, "Content Details"] = details
+                    for column, value in drama_updates.items():
+                        if column not in {"Narrative", "Creative Type", "Content Details"}:
+                            st.session_state.tagged_df.at[original_idx, column] = value
                     st.session_state.tagged_df.at[original_idx, "Views"] = int(manual_views)
                     st.session_state.tagged_df.at[original_idx, "Likes"] = int(manual_likes)
                     st.session_state.tagged_df.at[original_idx, "Comments"] = int(manual_comments)
@@ -4206,7 +4437,10 @@ elif st.session_state.step == 5:
                     st.session_state.tagged_df.at[original_idx, "Validation Status"] = "reviewed"
                     st.session_state.tagged_df = add_performance_fields(st.session_state.tagged_df)
                     st.session_state.review_pointer = 0
-                    for key in [ai_result_key, narrative_key, type_key, details_key, action_key, *metric_keys.values()]:
+                    for key in [
+                        ai_result_key, narrative_key, type_key, details_key, action_key,
+                        *metric_keys.values(), *drama_keys.values(),
+                    ]:
                         st.session_state.pop(key, None)
                     st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
@@ -4334,8 +4568,9 @@ elif st.session_state.step == 6:
             "Average_Shares_Rate": "Shares Rate",
             "Average_Saves_Rate": "Saves Rate",
         })
-        market_sort_col = summary_sort_column_v68_15(focus_metric, market_summary.columns)
-        market_summary = market_summary.sort_values([market_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
+        market_summary = sort_summary_performance_v68_18(
+            market_summary, focus_metric, sort_order
+        )
         st.markdown(render_table(
             market_summary,
             max_rows=12,
@@ -4355,8 +4590,9 @@ elif st.session_state.step == 6:
         "Average_Shares_Rate": "Shares Rate",
         "Average_Saves_Rate": "Saves Rate",
     })
-    track_sort_col = summary_sort_column_v68_15(focus_metric, track_summary.columns)
-    track_summary = track_summary.sort_values([track_sort_col, "Posts"], ascending=[(sort_order == "Lowest first"), False])
+    track_summary = sort_summary_performance_v68_18(
+        track_summary, focus_metric, sort_order
+    )
     st.markdown(render_table(
         track_summary,
         max_rows=12,
@@ -4394,8 +4630,9 @@ elif st.session_state.step == 6:
             "Average_Shares_Rate": "Shares Rate",
             "Average_Saves_Rate": "Saves Rate",
         })
-        source_sort_col = summary_sort_column_v68_15(focus_metric, source_summary.columns)
-        source_summary = source_summary.sort_values(source_sort_col, ascending=(sort_order == "Lowest first"))
+        source_summary = sort_summary_performance_v68_18(
+            source_summary, focus_metric, sort_order
+        )
         st.markdown(render_table(
             source_summary,
             max_rows=12,
@@ -4440,19 +4677,12 @@ elif st.session_state.step == 6:
     ]:
         if "Content Details" in export_base_df.columns:
             export_base_df["Content Details"] = export_base_df["Content Details"].replace(_bad_placeholder, "")
-    final_df = export_base_df[[c for c in MARKETING_EXPORT_COLUMNS if c in export_base_df.columns]].copy()
-    final_sort_col = sort_col if sort_col in final_df.columns else ("Views" if "Views" in final_df.columns else None)
-    if "Market" in final_df.columns:
-        try:
-            if final_sort_col:
-                final_df = final_df.sort_values(["Market", "Track", final_sort_col], ascending=[True, True, sort_order == "Lowest first"])
-            else:
-                final_df = final_df.sort_values(["Market", "Track"], ascending=True)
-        except Exception:
-            final_df = final_df.sort_values([c for c in ["Market", "Track"] if c in final_df.columns], ascending=True)
+    # Export follows the user's uploaded/pasted order. Dashboard sorting is only
+    # for the on-screen analytical tables and must never reshuffle the CSV.
+    final_df = export_base_df[[c for c in MARKETING_EXPORT_COLUMNS if c in export_base_df.columns]].copy().reset_index(drop=True)
     qa_df = qa_all_rows.copy()
     qa_front = [
-        "App Version", "Source", "Input Type", "Link", "Market", "Track", "Creator",
+        "App Version", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
         "Needs Review", "Review Action", "Review Note", "Review Risk",
         "Tier Used", "Validation Status", "Validation Score",
@@ -4461,7 +4691,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.15",
+            "App Version": "v68.39",
             "Posts": len(filtered),
             "Views": total_views,
             "Average Engagements": int(round(avg_engagements)) if has_metrics else "Metrics unavailable",
@@ -4481,8 +4711,8 @@ elif st.session_state.step == 6:
     }
     st.markdown("""
     <div class='download-grid'>
-      <div class='download-card'><strong>Final CSV</strong><span>Clean output sorted/grouped by market when market is available.</span></div>
-      <div class='download-card'><strong>Grouped XLSX</strong><span>Excel workbook with All Posts, market tabs, and Links Only.</span></div>
+      <div class='download-card'><strong>Final CSV</strong><span>Clean output in the same order as the uploaded or pasted posts.</span></div>
+      <div class='download-card'><strong>Grouped XLSX</strong><span>Excel workbook with ordered All Posts, market tabs, and Links Only.</span></div>
       <div class='download-card'><strong>Review / QA Report</strong><span>Internal file with review rows, QA priority, QA reason, confidence and diagnostics.</span></div>
     </div>
     """, unsafe_allow_html=True)

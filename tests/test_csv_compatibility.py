@@ -37,6 +37,16 @@ class UploadedFile:
 class CsvCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        markets_node = next(
+            item.value
+            for item in APP_TREE.body
+            if isinstance(item, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "MARKETS"
+                for target in item.targets
+            )
+        )
+        cls.markets = ast.literal_eval(markets_node)
         namespace = {
             "csv": csv,
             "io": io,
@@ -46,13 +56,15 @@ class CsvCompatibilityTests(unittest.TestCase):
             "List": List,
             "Optional": Optional,
             "Tuple": Tuple,
-            "MARKETS": ["PH", "MY", "KR", "SG", "VN", "TH"],
+            "MARKETS": cls.markets,
         }
         for name in [
             "safe_str",
             "clean_num",
             "is_tiktok_link",
             "extract_creator",
+            "display_market",
+            "kol_size_for_market",
             "normalize_market",
             "unique_columns",
             "detect_csv_delimiter",
@@ -60,12 +72,16 @@ class CsvCompatibilityTests(unittest.TestCase):
             "norm_col",
             "detect_col",
             "detect_columns",
+            "coalesce_duplicate_batch_rows",
         ]:
             namespace[name] = load_function(name, namespace)
         namespace["add_performance_fields"] = lambda frame: frame.copy()
         namespace["standardize_file_rows"] = load_function("standardize_file_rows", namespace)
         cls.read_any_table = staticmethod(namespace["read_any_table"])
         cls.standardize_file_rows = staticmethod(namespace["standardize_file_rows"])
+        cls.kol_size_for_market = staticmethod(namespace["kol_size_for_market"])
+        cls.display_market = staticmethod(namespace["display_market"])
+        cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
 
     def parse(self, text: str, *, encoding: str = "utf-8", name: str = "test.csv"):
         raw = text.encode(encoding)
@@ -83,6 +99,44 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Market"], "MY")
         self.assertEqual(rows.loc[0, "Track"], "Track A")
         self.assertEqual(rows.loc[0, "Views"], 1234)
+
+    def test_indonesia_market_name_normalizes_to_id(self):
+        self.assertIn("ID", self.markets)
+        self.assertIn(
+            'MARKET_OPTIONS = ["Other / no market"] + MARKETS',
+            APP_SOURCE,
+        )
+        text = (
+            "TikTok Link,Market,Track Name,Followers\n"
+            "https://www.tiktok.com/@indo/video/7600000000000000010,Indonesia,Track ID,25000\n"
+        )
+        rows, _ = self.parse(text, name="indonesia.csv")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows.loc[0, "Market"], "ID")
+        self.assertEqual(rows.loc[0, "Track"], "Track ID")
+
+    def test_indonesia_uses_its_market_specific_kol_thresholds(self):
+        self.assertEqual(self.display_market("Indonesia"), "ID")
+        self.assertEqual(self.display_market("IDN"), "ID")
+        boundaries = [
+            (0, "Unknown"),
+            (1000, "Buzzer"),
+            (1001, "Nano"),
+            (10000, "Nano"),
+            (10001, "Micro"),
+            (50000, "Micro"),
+            (50001, "Medium"),
+            (200000, "Medium"),
+            (200001, "Macro"),
+            (1000000, "Macro"),
+            (1000001, "Mega"),
+        ]
+        for followers, expected in boundaries:
+            with self.subTest(followers=followers):
+                self.assertEqual(
+                    self.kol_size_for_market(followers, "Indonesia"),
+                    expected,
+                )
 
     def test_semicolon_creator_export_headers(self):
         text = (
@@ -131,6 +185,39 @@ class CsvCompatibilityTests(unittest.TestCase):
         rows, columns = self.parse("Campaign,Views\nExample,100\n", name="invalid.csv")
         self.assertIsNone(columns["link"])
         self.assertTrue(rows.empty)
+
+    def test_campaign_song_used_header_populates_track(self):
+        text = (
+            "TikTok Link,Campaign Song Used,Market\n"
+            "https://www.tiktok.com/@audio/video/7600000000000000011,Artist - Track Name,VN\n"
+        )
+        rows, columns = self.parse(text, name="campaign_song.csv")
+        self.assertEqual(columns["track"], "Campaign Song Used")
+        self.assertEqual(rows.loc[0, "Track"], "Artist - Track Name")
+
+    def test_optional_campaign_artist_column_is_preserved(self):
+        text = (
+            "TikTok Link,Track Name,Artist Name,Market\n"
+            "https://www.tiktok.com/@audio/video/7600000000000000099,Hit the Wall,Gracie Abrams,MY\n"
+        )
+        rows, columns = self.parse(text, name="artist_track.csv")
+        self.assertEqual(columns["artist"], "Artist Name")
+        self.assertEqual(rows.loc[0, "Track"], "Hit the Wall")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Gracie Abrams")
+
+    def test_duplicate_pasted_link_backfills_track_without_changing_first_source_order(self):
+        link = "https://www.tiktok.com/@audio/video/7600000000000000012"
+        combined = pd.DataFrame([
+            {"Source": "upload.csv", "Input Type": "CSV/XLSX", "Link": link, "Track": "", "Market": "", "Views": 0},
+            {"Source": "Pasted links", "Input Type": "Pasted", "Link": link, "Track": "Example Song", "Market": "VN", "Views": 125},
+        ])
+        combined["_link_key"] = combined["Link"]
+        merged = self.coalesce_duplicate_batch_rows(combined)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged.loc[0, "Source"], "upload.csv")
+        self.assertEqual(merged.loc[0, "Track"], "Example Song")
+        self.assertEqual(merged.loc[0, "Market"], "VN")
+        self.assertEqual(merged.loc[0, "Views"], 125)
 
 
 if __name__ == "__main__":

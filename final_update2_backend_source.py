@@ -17,6 +17,21 @@ from evidence_verifier import (
     resolvable_review_reasons,
     targeted_verifier_reasons,
 )
+from drama_analysis import (
+    apply_audio_comparison,
+    apply_generic_original_audio_default,
+    apply_drama_enrichment,
+    build_drama_prompt,
+    clear_resolved_drama_soft_review_flags,
+    compare_video_audio_to_preview,
+    drama_export_values,
+    fetch_itunes_preview,
+    has_drama_label,
+    promote_entertainment_news_label,
+    response_from_json_text,
+    route_thailand_carousel_ambiguity_to_review,
+    route_unknown_drama_audio_to_review,
+)
 
 st.set_page_config(
     page_title="TikTok Content Tagging",
@@ -3966,10 +3981,30 @@ Write one concise sentence describing what happens visually, including setting, 
 === OUTPUT FORMAT ===
 {{"narrative": "<short theme phrase or NA>", "creative_type": ["<label1>", "<label2 optional>"], "content_details": "<one sentence>", "confidence": <float>, "reasoning": "<short reason for Creative Type>"}}"""
 
+def _decode_gemini_json(text):
+    """Decode Gemini JSON even when harmless prose surrounds the payload."""
+    cleaned = str(text or '').strip()
+    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'```$', '', cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as original_error:
+        decoder = json.JSONDecoder()
+        starts = [pos for pos in (cleaned.find('{'), cleaned.find('[')) if pos >= 0]
+        for start in sorted(starts):
+            try:
+                value, _ = decoder.raw_decode(cleaned[start:])
+                return value
+            except json.JSONDecodeError:
+                continue
+        raise original_error
+
+
 def call_gemini(contents, gemini_key, max_retries=2):
     from google import genai
     from google.genai import types
     client = genai.Client(api_key=gemini_key)
+    last_error = ''
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -3977,12 +4012,21 @@ def call_gemini(contents, gemini_key, max_retries=2):
                 contents=contents,
                 config=types.GenerateContentConfig(response_mime_type='application/json')
             )
-            text = response.text.strip()
-            text = re.sub(r'^```json\s*', '', text)
-            text = re.sub(r'```$', '', text).strip()
-            return coerce_gemini_result(json.loads(text))
+            return coerce_gemini_result(_decode_gemini_json(response.text))
+        except json.JSONDecodeError as e:
+            # A malformed response should use the already-budgeted retry rather
+            # than immediately producing Narrative=NA and empty labels.
+            last_error = f'Malformed Gemini JSON: {e}'
+            if attempt + 1 < max_retries:
+                continue
+            return {
+                'parse_error': True,
+                'raw_response': last_error,
+                'needs_human_review': True,
+            }
         except Exception as e:
             err = str(e)
+            last_error = err
             if '429' in err or 'RESOURCE_EXHAUSTED' in err:
                 wait = GEMINI_BACKOFF_SECONDS*(attempt+1) + random.randint(0,5)
                 time.sleep(wait)
@@ -3991,7 +4035,11 @@ def call_gemini(contents, gemini_key, max_retries=2):
                 time.sleep(wait)
             else:
                 return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
-    return {'parse_error': True, 'raw_response': 'Max retries exceeded', 'needs_human_review': True}
+    return {
+        'parse_error': True,
+        'raw_response': last_error or 'Max retries exceeded',
+        'needs_human_review': True,
+    }
 
 
 def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
@@ -4020,6 +4068,155 @@ def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
             else:
                 return {'parse_error': True, 'reason': err}
     return {'parse_error': True, 'reason': 'Targeted verifier retries exhausted'}
+
+
+def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
+    """Return the raw structured response for the conditional drama pass."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=gemini_key)
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(response_mime_type='application/json'),
+            )
+            return response_from_json_text(response.text)
+        except Exception as e:
+            err = str(e)
+            if '429' in err or 'RESOURCE_EXHAUSTED' in err:
+                time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
+            elif '503' in err or 'UNAVAILABLE' in err:
+                time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
+            else:
+                return {'parse_error': True, 'review_reason': err}
+    return {'parse_error': True, 'review_reason': 'Drama enrichment retries exhausted'}
+
+
+def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id='', log_list=None):
+    """Run a visual second pass only after the broad drama label is final."""
+    if not has_drama_label(result):
+        return result
+
+    from google.genai import types as gtypes
+
+    log_list = log_list if log_list is not None else []
+    prompt = build_drama_prompt(result, row)
+    contents = [prompt]
+    evidence_source = 'metadata'
+    audio_comparison = {}
+    verified_itunes = {}
+
+    # Drama/CP distinctions are temporal, so prefer scene-spanning frames.  This
+    # extra media call is made only for already-confirmed drama edits.
+    video_url = get_video_url(row)
+    if video_url:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                video_path = os.path.join(tmp, f'{vid_id or "drama"}.mp4')
+                download_video(video_url, video_path, apify_token)
+                frame_paths = extract_frames(video_path, os.path.join(tmp, 'drama_frames'), FRAME_POINTS_9)
+                for frame_path in frame_paths:
+                    with open(frame_path, 'rb') as handle:
+                        contents.append(gtypes.Part.from_bytes(data=handle.read(), mime_type='image/jpeg'))
+                if frame_paths:
+                    evidence_source = f'{len(frame_paths)} scene frames'
+                response = call_drama_enrichment_gemini(contents, gemini_key)
+                campaign_track = str(row.get('_campaign_track', '') or '').strip()
+                if campaign_track:
+                    verified_itunes = fetch_itunes_preview(campaign_track)
+                    preview_url = verified_itunes.get('preview_url', '')
+                    if preview_url:
+                        audio_comparison = compare_video_audio_to_preview(
+                            video_path,
+                            preview_url,
+                        )
+        except Exception as exc:
+            log_list.append(f"  -> Drama scene-frame pass unavailable: {exc}")
+            response = {'parse_error': True, 'review_reason': str(exc)}
+    else:
+        response = {'parse_error': True, 'review_reason': 'No video media was available for drama enrichment'}
+
+    if response.get('parse_error'):
+        cover_url = get_cover_url(row)
+        if cover_url:
+            try:
+                image_bytes = download_image_bytes(cover_url, apify_token)
+                response = call_drama_enrichment_gemini(
+                    [prompt, gtypes.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')],
+                    gemini_key,
+                )
+                evidence_source = 'cover image'
+            except Exception as exc:
+                response = {'parse_error': True, 'review_reason': str(exc)}
+
+    if verified_itunes:
+        response['_verified_itunes'] = verified_itunes
+    enriched = apply_drama_enrichment(result, response, row)
+    if audio_comparison:
+        enriched = apply_audio_comparison(enriched, audio_comparison)
+    enriched = apply_generic_original_audio_default(enriched, row)
+    enriched = route_unknown_drama_audio_to_review(enriched, row)
+    enriched = route_thailand_carousel_ambiguity_to_review(enriched, row)
+    enriched = clear_resolved_drama_soft_review_flags(enriched)
+    enriched['_drama_enriched'] = True
+    enriched['_drama_evidence_source'] = evidence_source
+    if response.get('parse_error'):
+        existing = str(enriched.get('drama_review_reason', '') or '')
+        failure = str(response.get('review_reason', '') or 'Drama enrichment could not be completed')
+        enriched['drama_review_reason'] = ' | '.join(part for part in [existing, failure] if part)
+        log_list.append("  -> Drama enrichment kept Unknown fields because the second pass failed")
+    else:
+        log_list.append(f"  -> Drama enrichment completed from {evidence_source}")
+    if audio_comparison:
+        version = audio_comparison.get('audio_version', 'Unknown')
+        score = float(audio_comparison.get('similarity', 0.0) or 0.0)
+        log_list.append(f"  -> Audio preview comparison: {version} (score {score:.2f})")
+    return enriched
+
+
+def enrich_existing_drama_review(review_row, raw_record, gemini_key, apify_token='', log_list=None):
+    """Enrich a human-corrected drama label without rerunning broad tagging."""
+    review_row = dict(review_row or {})
+    raw_record = dict(raw_record or {})
+    normalized = pd.json_normalize([raw_record]).iloc[0] if raw_record else pd.Series(dtype=object)
+    campaign_track = str(review_row.get('Track', '') or '').strip()
+    campaign_artist = str(review_row.get('Campaign Artist', '') or '').strip()
+    if campaign_track and campaign_artist and ' - ' not in campaign_track:
+        campaign_track = f'{campaign_artist} - {campaign_track}'
+    normalized['_campaign_track'] = campaign_track
+    normalized['_campaign_market'] = review_row.get('Market', '')
+    for key, value in raw_record.items():
+        if key not in normalized:
+            normalized[key] = value
+    result = {
+        'narrative': str(review_row.get('Narrative', '') or ''),
+        'creative_type': [
+            part.strip() for part in str(
+                review_row.get('Final Labels') or review_row.get('Creative Type') or ''
+            ).split(',') if part.strip()
+        ][:2],
+        'content_details': str(review_row.get('Content Details', '') or ''),
+        'confidence': float(review_row.get('Confidence', 0) or 0),
+        'reasoning': str(review_row.get('Reasoning', '') or ''),
+    }
+    enriched = run_drama_enrichment_pass(
+        result,
+        normalized,
+        gemini_key,
+        apify_token,
+        vid_id=str(raw_record.get('id', '') or 'review_drama'),
+        log_list=log_list,
+    )
+    output = {
+        'Narrative': enriched.get('narrative', ''),
+        'Creative Type': ', '.join(enriched.get('creative_type', [])),
+        'Content Details': enriched.get('content_details', ''),
+    }
+    output.update(drama_export_values(enriched))
+    return output
 
 
 def maybe_run_targeted_evidence_verifier(
@@ -4103,10 +4300,15 @@ Return the same JSON schema only.
                     contents=[video_prompt, uploaded],
                     config=types.GenerateContentConfig(response_mime_type='application/json')
                 )
-                text = response.text.strip()
-                text = re.sub(r'^```json\s*', '', text)
-                text = re.sub(r'```$', '', text).strip()
-                return coerce_gemini_result(json.loads(text))
+                return coerce_gemini_result(_decode_gemini_json(response.text))
+            except json.JSONDecodeError as e:
+                if attempt + 1 < max_retries:
+                    continue
+                return {
+                    'parse_error': True,
+                    'raw_response': f'Malformed Gemini video JSON: {e}',
+                    'needs_human_review': True,
+                }
             except Exception as e:
                 err = str(e)
                 if '429' in err or 'RESOURCE_EXHAUSTED' in err:
@@ -4216,7 +4418,7 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
         not result.get('narrative') or
         result.get('narrative') in ['?', 'null', 'None']
     )
-    return {
+    output = {
         'id':                   vid_id,
         'market':               market,
         'track':                track,
@@ -4267,6 +4469,8 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
         # can still recover metrics/link/cover for every pending item after reruns.
         '_raw_row_json':        json.dumps(raw_record if raw_record else (row.to_dict() if hasattr(row, 'to_dict') else dict(row)), default=str),
     }
+    output.update(drama_export_values(result))
+    return output
 
 def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_seconds=1, on_row_done=None, source_file="", campaign_market=""):
     from google.genai import types as gtypes
@@ -4721,6 +4925,29 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
             result, row, status, score, issues,
             include_audit=True, include_guardrail_changes=False
         )
+        # Route strong editorial/actor-comparison entertainment coverage into
+        # the same broad family before the conditional detail pass. Ordinary
+        # celebrity fan montages remain Celebrity Edits.
+        result = promote_entertainment_news_label(result, row)
+        # The normal General UGC decision is now complete.  Only confirmed
+        # Movie/Tv/Drama Edits receive the additional drama/audio analysis.
+        result = run_drama_enrichment_pass(
+            result,
+            row,
+            gemini_key,
+            apify_token,
+            vid_id=vid_id,
+            log_list=log_list,
+        )
+        # Non-drama carousel results do not enter the conditional detail pass,
+        # so apply the same Thailand ambiguity gate once more at the pipeline
+        # boundary. The helper is idempotent and preserves strong decisions.
+        result = route_thailand_carousel_ambiguity_to_review(result, row)
+        if result.get('_drama_soft_review_flags_cleared') and not result.get('needs_human_review', False):
+            # The scene-frame detail pass resolved the only generic review
+            # trigger. Revalidate the enriched result so stale pre-enrichment
+            # status/issues do not continue routing a safe row to Review.
+            status, score, issues = validate(result)
         final_conf  = result.get('confidence', 0)
         needs_human = (
             result.get('needs_human_review', False) or

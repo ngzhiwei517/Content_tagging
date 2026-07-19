@@ -59,6 +59,9 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace = {"pd": pd, "List": List}
         namespace["clean_num"] = load_function("clean_num", namespace)
         cls.aggregate = staticmethod(load_function("aggregate_summary_performance_v68_15", namespace))
+        cls.summary_sort_column = staticmethod(load_function("summary_sort_column_v68_15", namespace))
+        namespace["summary_sort_column_v68_15"] = cls.summary_sort_column
+        cls.sort_summary = staticmethod(load_function("sort_summary_performance_v68_18", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -99,6 +102,20 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn('target="_blank"', APP_SOURCE)
         self.assertIn('rel="noopener noreferrer"', APP_SOURCE)
         self.assertIn(">Open TikTok</a>", APP_SOURCE)
+
+    def test_empty_filtered_summary_does_not_choose_a_missing_sort_column(self):
+        empty = self.aggregate(pd.DataFrame(), ["Track"])
+        self.assertTrue(empty.empty)
+        self.assertEqual(self.summary_sort_column("Views", empty.columns), "")
+        sorted_empty = self.sort_summary(empty, "Views", "Highest first")
+        self.assertTrue(sorted_empty.empty)
+
+    def test_summary_sort_falls_back_only_to_an_available_column(self):
+        columns = ["Track", "Posts", "Average Engagements"]
+        self.assertEqual(
+            self.summary_sort_column("Followers", columns),
+            "Average Engagements",
+        )
 
 
 if __name__ == "__main__":

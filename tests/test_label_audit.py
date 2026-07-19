@@ -21,7 +21,7 @@ class LabelAuditTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(row["App Version"], "v68.15")
+        self.assertEqual(row["App Version"], "v68.39")
         self.assertEqual(row["Original AI Labels"], "Fashion, Dance")
         self.assertEqual(row["Final Labels"], "Fashion, Dance")
         self.assertFalse(row["Human Reviewed"])
@@ -101,6 +101,50 @@ class LabelAuditTests(unittest.TestCase):
             {},
         )
         self.assertEqual(row["Verifier Confidence"], 0.0)
+
+    def test_na_narrative_uses_detailed_category_suggestion(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/1001"},
+            {
+                "Narrative": "NA",
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "content_categories": ["Entertainment News"],
+            },
+            {},
+        )
+        self.assertEqual(row["Narrative"], "Entertainment news")
+
+    def test_na_narrative_uses_broad_label_suggestion(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/1002"},
+            {"Narrative": "N/A", "Creative Type": "Dance"},
+            {},
+        )
+        self.assertEqual(row["Narrative"], "Dance performance")
+
+    def test_parse_error_narrative_is_clear_review_message(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/1003"},
+            {
+                "Narrative": "NA",
+                "Creative Type": "Others",
+                "validation_issues": "Parse error",
+            },
+            {},
+        )
+        self.assertEqual(row["Narrative"], "Content needs review")
+
+    def test_existing_narrative_is_never_overwritten(self):
+        row = _to_ui_row(
+            {"Link": "https://www.tiktok.com/@tester/video/1004"},
+            {
+                "Narrative": "Celebrity interview",
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "content_categories": ["Entertainment News"],
+            },
+            {},
+        )
+        self.assertEqual(row["Narrative"], "Celebrity interview")
 
     def test_human_edit_preserves_original_and_updates_final(self):
         update = review_audit_update(

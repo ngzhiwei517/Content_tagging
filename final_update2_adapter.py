@@ -11,15 +11,24 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 from final_update2_backend import load_backend
+from drama_analysis import (
+    DRAMA_EXPORT_COLUMNS,
+    DRAMA_REVIEW_OPTIONS,
+    build_review_drama_updates,
+    drama_review_defaults,
+    has_drama_label,
+)
 
 
 ProgressCallback = Callable[[int, int, str], None]
 
 
 MARKETING_EXPORT_COLUMNS = [
-    "Source", "Link", "Market", "Track", "Creator", "Followers", "KOL Size",
+    "Source", "Link", "Market", "Track", "Campaign Artist", "Creator", "Followers", "KOL Size",
     "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement",
     "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate",
+    # Detailed drama fields are deliberately consolidated into Content Details
+    # so the marketing export remains one clean, readable table.
     "Narrative", "Creative Type", "Content Details",
 ]
 
@@ -279,6 +288,122 @@ def _creator_followers(record: Dict) -> int:
     return _number(author.get("fans") or author.get("followers") or author.get("followerCount"))
 
 
+def _record_music_name(record: Dict) -> str:
+    """Return TikTok's scraped sound title without requiring user input."""
+    music = record.get("musicMeta") if isinstance(record.get("musicMeta"), dict) else {}
+    return _text(
+        music.get("musicName")
+        or record.get("musicName")
+        or record.get("musicTitle")
+        or record.get("soundName")
+    )
+
+
+def _resolved_campaign_track(row, record: Dict) -> str:
+    """Prefer an uploaded track; otherwise use the scraped TikTok sound title."""
+    track = _text(row.get("Track"))
+    artist = _text(row.get("Campaign Artist"))
+    if track and artist and " - " not in track:
+        return f"{artist} - {track}"
+    return track or _record_music_name(record)
+
+
+_NARRATIVE_PLACEHOLDERS = {
+    "", "na", "n/a", "none", "null", "unknown", "not available",
+    "not specified", "?",
+}
+
+
+def _narrative_values(value) -> List[str]:
+    """Return stable text values from a scalar or list-like backend field."""
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = re.split(r"\s*[,|]\s*", _text(value)) if _text(value) else []
+    return [text for item in items if (text := _text(item))]
+
+
+def _resolved_narrative_suggestion(tagged: Dict, creative_type: str) -> str:
+    """Keep a real AI narrative and replace only placeholder/failed values.
+
+    The legacy backend deliberately permits ``NA``.  That is safe for storage
+    but unhelpful on the marketing review screen.  This fallback stays
+    evidence-bound: it summarizes the already selected detailed category or
+    broad creative label and never invents a new label from a TikTok URL.
+    """
+    existing = _text(tagged.get("Narrative") or tagged.get("narrative"))
+    if existing.casefold().strip(". ") not in _NARRATIVE_PLACEHOLDERS:
+        return existing
+
+    issues = " ".join([
+        _text(tagged.get("validation_issues")),
+        _text(tagged.get("tier3_reason")),
+        _text(tagged.get("reasoning")),
+    ]).casefold()
+    if _truthy(tagged.get("parse_error")) or "parse error" in issues:
+        return "Content needs review"
+
+    categories = _narrative_values(
+        tagged.get("Drama Content Category")
+        or tagged.get("content_categories")
+        or tagged.get("content_kind")
+    )
+    category = categories[0] if categories else ""
+    edit_focus = _text(tagged.get("Drama Edit Focus") or tagged.get("edit_focus"))
+    drama_type = _text(tagged.get("Drama Type") or tagged.get("drama_type"))
+
+    if category == "CP Edit":
+        return {
+            "BL CP Edit": "BL actor chemistry",
+            "GL CP Edit": "GL actor chemistry",
+        }.get(edit_focus, "Actor couple chemistry")
+    if category == "Drama Edit":
+        return {
+            "BL Drama": "BL drama moments",
+            "GL Drama": "GL drama moments",
+        }.get(drama_type, "Drama story moments")
+
+    category_narratives = {
+        "Entertainment News": "Entertainment news",
+        "Anime Edit": "Anime story moments",
+        "Actor/Actress Carousel": "Actor/actress profile",
+        "Drama Carousel": "Drama story highlights",
+        "Behind-the-Scenes Edit": "Behind-the-scenes moments",
+        "K-pop Show Cut": "K-pop show moments",
+        "Actor/Actress Daily Vlog": "Actor/actress daily life",
+        "POV": "Point-of-view story",
+        "Other": "Other content",
+    }
+    if category in category_narratives:
+        return category_narratives[category]
+
+    broad_narratives = {
+        "Comedy": "Humorous moment",
+        "Dance": "Dance performance",
+        "Lip Sync": "Lip-sync performance",
+        "Fashion": "Fashion showcase",
+        "Beauty": "Beauty showcase",
+        "Fitness": "Fitness content",
+        "Travel": "Travel moment",
+        "Relationship": "Relationship moment",
+        "Reflection": "Personal reflection",
+        "Quotes": "Text-led message",
+        "Carousel": "Photo carousel",
+        "Gaming": "Gaming content",
+        "Movie/Tv/Drama Edits": "Drama or entertainment edit",
+        "Celebrity Edits": "Celebrity edit",
+        "Slice of Life": "Everyday life moment",
+        "Lyrics": "Lyrics-focused post",
+        "Lyrics Translation": "Translated lyrics post",
+        "Media/Infotainment": "Informational content",
+        "Others": "Other content",
+    }
+    for label in _narrative_values(creative_type):
+        if label in broad_narratives:
+            return broad_narratives[label]
+    return "Content needs review"
+
+
 def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     original_dict = original.to_dict() if hasattr(original, "to_dict") else dict(original)
     tagged_dict = tagged.to_dict() if hasattr(tagged, "to_dict") else dict(tagged)
@@ -291,6 +416,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         validation_status = "removed"
     needs_review = False if removed else _truthy(tagged_dict.get("needs_human_review"))
     creative_type = _text(tagged_dict.get("Creative Type")) or "Others"
+    narrative = _resolved_narrative_suggestion(tagged_dict, creative_type)
     qa_reason = " | ".join(
         value for value in [
             _text(tagged_dict.get("validation_issues")),
@@ -300,13 +426,18 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     )
 
     output.update({
-        "App Version": "v68.15",
+        "App Version": "v68.39",
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to
         # TikTok/Apify locationCreated, which describes post or creator origin.
         "Market": _text(original_dict.get("Market")),
         "Market Source": "Uploaded file / user input" if _text(original_dict.get("Market")) else "Not provided",
-        "Track": _text(original_dict.get("Track")) or _text(tagged_dict.get("track")),
+        "Track": (
+            _text(original_dict.get("Track"))
+            or _text(tagged_dict.get("track"))
+            or _text(tagged_dict.get("music_name"))
+            or _record_music_name(raw_record)
+        ),
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
         "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
         "Creator Display": _text(tagged_dict.get("creator_display")),
@@ -322,7 +453,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Is Slideshow": _truthy(tagged_dict.get("is_slideshow")),
         "Cover URL": _text(tagged_dict.get("cover_url")),
         "Video URL": _text(tagged_dict.get("video_url")),
-        "Narrative": _text(tagged_dict.get("Narrative")),
+        "Narrative": narrative,
         "Creative Type": creative_type,
         "Content Details": _text(tagged_dict.get("Content Details")),
         "Confidence": _float(tagged_dict.get("confidence")),
@@ -347,6 +478,8 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Raw Apify Status": _text(raw_record.get("error")) or _text(raw_record.get("errorCode")) or "OK",
         "_raw_row_json": _text(tagged_dict.get("_raw_row_json")),
     })
+    for column in DRAMA_EXPORT_COLUMNS:
+        output[column] = _text(tagged_dict.get(column))
     output.update(initial_label_audit(
         creative_type,
         tier=_text(tagged_dict.get("tier_used")),
@@ -358,6 +491,27 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     ))
     output["Total Engagement"] = sum(output.get(key, 0) for key in ["Likes", "Comments", "Shares", "Saves"])
     return output
+
+
+def enrich_review_drama(
+    review_row,
+    raw_record: Dict,
+    gemini_key: str,
+    apify_token: str = "",
+    logs: Optional[List[str]] = None,
+) -> Dict:
+    """Run the same conditional enrichment for a human-corrected drama row."""
+    row_dict = review_row.to_dict() if hasattr(review_row, "to_dict") else dict(review_row)
+    if not has_drama_label(row_dict.get("Final Labels") or row_dict.get("Creative Type")):
+        return {}
+    backend = load_backend()
+    return dict(backend.enrich_existing_drama_review(
+        row_dict,
+        raw_record or {},
+        gemini_key,
+        apify_token,
+        log_list=logs if logs is not None else [],
+    ))
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
@@ -380,8 +534,8 @@ def tag_candidates(
     logs = logs if logs is not None else []
     by_id, by_url = index_records(records)
 
-    groups: OrderedDict[Tuple[str, str, str], List[Tuple[object, Dict]]] = OrderedDict()
-    for _, row in candidates.iterrows():
+    groups: OrderedDict[Tuple[str, str, str], List[Tuple[int, object, Dict]]] = OrderedDict()
+    for input_position, (_, row) in enumerate(candidates.iterrows()):
         record = match_record(row, by_id, by_url)
         if not isinstance(record, dict):
             link = _text(row.get("Link"))
@@ -391,14 +545,15 @@ def tag_candidates(
                 "error": "POST_NOT_FOUND",
                 "errorCode": "POST_NOT_FOUND",
             }
-        key = (_text(row.get("Source")), _text(row.get("Market")), _text(row.get("Track")))
-        groups.setdefault(key, []).append((row, record))
+        resolved_track = _resolved_campaign_track(row, record)
+        key = (_text(row.get("Source")), _text(row.get("Market")), resolved_track)
+        groups.setdefault(key, []).append((input_position, row, record))
 
-    converted: List[Dict] = []
+    converted: List[Tuple[int, Dict]] = []
     completed = 0
     total = len(candidates)
     for (source, market, track), pairs in groups.items():
-        group_records = [record for _, record in pairs]
+        group_records = [record for _, _, record in pairs]
 
         def row_done(_done, _group_total, output, tier):
             nonlocal completed
@@ -420,19 +575,22 @@ def tag_candidates(
             campaign_market=market or "UNKNOWN",
         )
         tagged_rows = [row for _, row in tagged_group.iterrows()]
-        for position, (original, raw_record) in enumerate(pairs):
+        for position, (input_position, original, raw_record) in enumerate(pairs):
             if position < len(tagged_rows):
-                converted.append(_to_ui_row(original, tagged_rows[position], raw_record))
+                converted.append((input_position, _to_ui_row(original, tagged_rows[position], raw_record)))
             else:
-                converted.append(_to_ui_row(original, {
+                converted.append((input_position, _to_ui_row(original, {
                     "Creative Type": "",
                     "confidence": 0,
                     "needs_human_review": True,
                     "validation_status": "review",
                     "validation_issues": "Backend returned no output row.",
-                }, raw_record))
+                }, raw_record)))
                 completed += 1
                 if on_progress:
                     on_progress(completed, total, "missing_output")
 
-    return pd.DataFrame(converted)
+    # Source/market/track grouping is an implementation detail. Restore the
+    # exact upload/paste sequence before handing rows back to the UI.
+    converted.sort(key=lambda item: item[0])
+    return pd.DataFrame([row for _, row in converted]).reset_index(drop=True)
