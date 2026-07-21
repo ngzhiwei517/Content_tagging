@@ -139,6 +139,11 @@ chmod +x run_mac.command
 - Apify TikTok Scraper and Instagram Scraper
 - Plotly, OpenCV, OpenPyXL, NumPy and Pillow
 
+## Documentation
+
+Project context, release history and test instructions are organized under
+[`docs/`](docs/README.md).
+
 ## Tests
 
 ```bash
