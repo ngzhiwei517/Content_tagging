@@ -1183,7 +1183,10 @@ def download_image_bytes(url, apify_token):
     return r.content
 
 def download_video(video_url, output_path, apify_token):
-    headers = {'Authorization': f'Bearer {apify_token}'}
+    # Clockworks media can require the Apify bearer token. Instagram's actor
+    # returns a direct CDN URL, where an unrelated Authorization header can be
+    # rejected by the CDN.
+    headers = {'Authorization': f'Bearer {apify_token}'} if 'api.apify.com' in str(video_url) else {}
     r = requests.get(video_url, headers=headers, timeout=90)
     r.raise_for_status()
     with open(output_path, 'wb') as f:
@@ -4074,6 +4077,28 @@ def build_prompt(row):
     music_auth = row.get('musicMeta.musicAuthor','')
     duration   = row.get('videoMeta.duration','')
     campaign_market = _kb_extract_market(row) or '(not provided)'
+    platform = _kb_norm_text(_kb_get(row, '_platform') or _kb_get(row, 'platform')) or 'TikTok'
+    is_instagram = platform.casefold().startswith('instagram')
+    platform_name = 'Instagram Reels' if is_instagram else 'TikTok'
+    platform_location_label = 'Instagram-reported Location' if is_instagram else 'TikTok-reported Location'
+    analyst_intro = (
+        'You are a senior Instagram Reels UGC content analyst for Universal Music Group.\n'
+        'Your task is to classify Instagram Reels posts for music marketing analysis across Southeast Asia and other markets.'
+        if is_instagram else
+        'You are a senior TikTok UGC content analyst for Universal Music Group.\n'
+        'Your task is to classify TikTok posts for music marketing analysis across Southeast Asia and other markets.'
+    )
+    metadata_context = (
+        f'Platform: Instagram Reels | Campaign Market: {campaign_market} | Instagram-reported Location: {{location}}'
+        if is_instagram else
+        f'Campaign Market: {campaign_market} | TikTok-reported Location: {{location}}'
+    )
+    location_rule = (
+        'Campaign Market is workflow context; Instagram-reported Location is platform metadata. Do not use either field as proof of content format, subject identity, or setting, and never substitute Instagram-reported Location for Campaign Market.'
+        if is_instagram else
+        "Campaign Market is workflow context; TikTok-reported Location is platform metadata. Do not use either field as proof of content format, subject identity, or setting, and never substitute TikTok-reported Location for Campaign Market."
+    )
+    carousel_platform = 'Instagram Reels' if is_instagram else 'TikTok'
     tiktok_location = _kb_norm_text(row.get('locationCreated', '')) or '(not reported)'
     play       = row.get('playCount', 0)
     likes      = row.get('diggCount', 0)
@@ -4084,8 +4109,7 @@ def build_prompt(row):
     slide_count = _slideshow_image_count(row)
     slide_count_display = slide_count if slide_count is not None else 'unknown'
     allowed_str = '\n'.join(f'  - {t}' for t in ALLOWED_CREATIVE_TYPES)
-    return f"""You are a senior TikTok UGC content analyst for Universal Music Group.
-Your task is to classify TikTok posts for music marketing analysis across Southeast Asia and other markets.
+    return f"""{analyst_intro}
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON.
 
@@ -4094,7 +4118,7 @@ Caption: {caption}
 Hashtags: {htag_str}
 Creator: {author}
 Music: {music} by {music_auth}
-Campaign Market: {campaign_market} | TikTok-reported Location: {tiktok_location}
+{metadata_context.format(location=tiktok_location)}
 Duration: {duration}s | Is Slideshow: {is_slide} | Confirmed Slideshow Images: {slide_count_display}
 Plays: {play:,} | Likes: {likes:,} | Shares: {shares:,} | Saves: {saves:,}
 Historical KB: {kb_hint}
@@ -4105,7 +4129,7 @@ Use exact spelling only:
 
 === VERY IMPORTANT CLASSIFICATION PRINCIPLE ===
 Do NOT simply describe the scene. Classify the PRIMARY CONTENT FORMAT.
-Ask: "What type of TikTok content is this?" rather than "What objects appear in the frame?"
+Ask: "What type of {platform_name} content is this?" rather than "What objects appear in the frame?"
 
 Examples:
 - A person dancing in a mall is Dance, not Slice of Life.
@@ -4124,11 +4148,11 @@ Examples:
 - A casual commute, local road, sunset or rainbow capture is normally Slice of Life, not Travel, unless a trip, destination, tourism or journey is the central purpose.
 
 === OUTPUT RULES ===
-- Campaign Market is workflow context; TikTok-reported Location is platform metadata. Do not use either field as proof of content format, subject identity, or setting, and never substitute TikTok-reported Location for Campaign Market.
+- {location_rule}
 - Creative Type: return 1 or 2 labels only.
 - Include Carousel only when the post has at least 2 confirmed slideshow images.
 - If Confirmed Slideshow Images is 1, do NOT use Carousel; classify the single image by its content.
-- Carousel is a TikTok photo-mode format, not an editing style. If Is Slideshow is false, do NOT use Carousel even when a normal video is edited from several photos.
+- Carousel is a {carousel_platform} photo-mode format, not an editing style. If Is Slideshow is false, do NOT use Carousel even when a normal video is edited from several photos.
 - If the slideshow image count is unknown, use isSlideshow conservatively and never infer Carousel from a video montage alone.
 - If Carousel is included, use the second label for the actual content type when possible, e.g. ["Carousel", "Beauty"].
 - Do not use Slice of Life as a fallback when a more specific label applies.
@@ -4324,10 +4348,10 @@ Use ONLY for: sped up, slowed, mashup, DJ edit, remix audio, alternate audio ver
 Do NOT use for: visual transitions, edited clips, fashion transformations, fan edits.
 
 21) Carousel
-Definition: TikTok slideshow/photo carousel format.
-Use when: TikTok/Apify metadata confirms photo/slideshow mode with at least 2 images.
+Definition: {carousel_platform} slideshow/photo carousel format.
+Use when: {carousel_platform}/Apify metadata confirms photo/slideshow mode with at least 2 images.
 Do not use Carousel for a confirmed single-image photo-mode post; classify that image by its content.
-Do not use Carousel for a normal TikTok video made from a montage or sequence of photos.
+Do not use Carousel for a normal {carousel_platform} video made from a montage or sequence of photos.
 Best practice: use Carousel + content label, e.g. Carousel + Beauty, Carousel + Quotes, Carousel + Celebrity Edits.
 
 === COMMON CONFUSIONS TO AVOID ===
@@ -4818,6 +4842,7 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
     )
     output = {
         'id':                   vid_id,
+        'platform':             (_get('_platform') or _get('platform') or raw_record.get('_platform') or raw_record.get('platform') or 'TikTok'),
         'market':               market,
         'track':                track,
         'source_file':          source_file,

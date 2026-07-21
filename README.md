@@ -1,23 +1,23 @@
-# TikTok UGC Content Tagging Platform
+# TikTok + Instagram Reels UGC Tagging Platform
 
-An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok user-generated content for music marketing.
+An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok and Instagram Reels user-generated content for music marketing.
 
-[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — this v68.41.6 final-validation candidate runs locally and does not replace that demo.
+[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — the live demo remains the validated TikTok release. This v68.42.3 Instagram integration candidate runs locally and does not replace it yet.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
 ![Google Gemini](https://img.shields.io/badge/Google-Gemini_AI-blue)
-![Apify](https://img.shields.io/badge/Apify-TikTok_Scraper-green)
+![Apify](https://img.shields.io/badge/Apify-Social_Scrapers-green)
 
 ## Overview
 
-The platform reduces the manual work required to review large batches of TikTok posts while keeping human oversight for uncertain results.
+The platform reduces the manual work required to review large batches of short-form UGC posts while keeping human oversight for uncertain results.
 
 It can:
 
-- upload one or more CSV/XLSX post files or accept pasted TikTok links;
+- upload one or more CSV/XLSX post files or accept pasted TikTok/Instagram links;
 - select every link or rank the Top N posts;
-- collect TikTok metadata through Apify;
+- collect TikTok or Instagram metadata through a platform-specific Apify adapter;
 - classify creative content with Gemini multimodal analysis;
 - apply tagging guardrails and an optional Creative Knowledge Base;
 - route uncertain posts for human review;
@@ -27,7 +27,7 @@ It can:
 
 ### Balanced model setup
 
-This v68.41.6 package uses Gemini 3.1 Flash-Lite by default because the completed 24-post diagnostic showed a much better speed/review balance. Gemini 3.5 Flash remains available under **Analysis model (optional)** for smaller batches where a slower run is acceptable. Targeted verification stays on the model selected for the run, so a 3.1 run is no longer silently converted into a slower hybrid run.
+This v68.42.3 candidate keeps Gemini 3.1 Flash-Lite as the default and preserves the validated TikTok prompt/guardrail path. Instagram Reels is normalized into the same taxonomy and review workflow, but its accuracy must be validated separately before production use. Explicit Reel URLs use Data Slayer's Instagram Post Details actor for public play, like, comment, share and save counts, with Apify's broad Instagram scraper retained as a fallback. Metrics that a scraper does not return remain marked as unavailable rather than being treated as confirmed zeroes.
 
 - Gemini 3.1 Flash-Lite (recommended default)
 - Gemini 3.5 Flash (slower, deeper analysis)
@@ -36,9 +36,10 @@ The targeted evidence verifier is deliberately narrow and uses the same model se
 
 ### Post selection
 
-- Generic post files are supported as long as a TikTok link is available.
+- Generic post files are supported as long as a supported TikTok or Instagram post link is available.
 - Market and Track are optional.
-- Duplicate TikTok URLs are removed automatically.
+- Duplicate post URLs are removed automatically.
+- TikTok and Instagram Reels can be added to one Current Batch and combined export.
 - Top posts can be ranked by Views, Total Engagement or original file order.
 - Top N can be grouped by Market, Track, Source or a combined group.
 - Viral-date filtering supports one shared date or a different date for each track.
@@ -61,7 +62,7 @@ Dance is determined by visible action, not subject type. People, animals and ani
 
 ### Human review
 
-Flagged posts can be previewed, opened on TikTok, kept, edited or removed. Reviewers can update Narrative, Creative Type and Content Details while the system preserves the original AI result for internal auditing.
+Flagged posts can be previewed, opened on their source platform, kept, edited or removed. Reviewers can update Narrative, Creative Type and Content Details while the system preserves the original AI result for internal auditing.
 
 ### Summary and export
 
@@ -124,17 +125,24 @@ python3 -m venv .venv
 .venv/bin/python -m streamlit run app.py
 ```
 
+Or run the included launcher from Terminal:
+
+```bash
+chmod +x run_mac.command
+./run_mac.command
+```
+
 ## Technology stack
 
 - Python, Streamlit and Pandas
 - Google Gemini API
-- Apify TikTok Scraper
+- Apify TikTok Scraper and Instagram Scraper
 - Plotly, OpenCV, OpenPyXL, NumPy and Pillow
 
 ## Tests
 
 ```bash
-python -m py_compile app.py final_update2_adapter.py final_update2_backend.py final_update2_backend_source.py model_comparison.py review_routing.py
+python -m py_compile app.py final_update2_adapter.py final_update2_backend.py final_update2_backend_source.py instagram_reels_adapter.py model_comparison.py review_routing.py
 python -m unittest discover -s tests -v
 ```
 
@@ -142,6 +150,6 @@ python -m unittest discover -s tests -v
 
 The repository excludes API secrets, raw campaign data, exports, downloaded media and learned creator/track files. Do not commit real tokens or confidential campaign data.
 
-TikTok availability and platform changes can affect scraping. Gemini and Apify use external quotas, and genuinely ambiguous content may still require human review.
+TikTok/Instagram availability and platform changes can affect scraping. Instagram shares may still be unavailable when the Apify share-count option is not included in the user's plan or when Instagram does not expose a Reel; saves and follower counts may also be unavailable. The export identifies missing fields under `Metrics Unavailable`. Gemini and Apify use external quotas, and genuinely ambiguous content may still require human review.
 
-This project is intended for research, workflow automation and marketing analytics using publicly available TikTok content. It is not affiliated with TikTok, Google or Apify.
+This project is intended for research, workflow automation and marketing analytics using publicly available social content. It is not affiliated with TikTok, Instagram, Google or Apify.

@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+from instagram_reels_adapter import (
+    INSTAGRAM_REELS,
+    TIKTOK,
+    creator_from_url as platform_creator_from_url,
+    detect_platform as platform_for_url,
+    is_instagram_post_url,
+    is_supported_post_url,
+)
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -57,11 +65,20 @@ class CsvCompatibilityTests(unittest.TestCase):
             "Optional": Optional,
             "Tuple": Tuple,
             "MARKETS": cls.markets,
+            "TIKTOK": TIKTOK,
+            "INSTAGRAM_REELS": INSTAGRAM_REELS,
+            "platform_for_url": platform_for_url,
+            "platform_creator_from_url": platform_creator_from_url,
+            "is_instagram_post_url": is_instagram_post_url,
+            "is_supported_post_url": is_supported_post_url,
         }
         for name in [
             "safe_str",
             "clean_num",
             "is_tiktok_link",
+            "is_instagram_link",
+            "post_platform",
+            "is_supported_link",
             "extract_creator",
             "display_market",
             "kol_size_for_market",
@@ -72,10 +89,22 @@ class CsvCompatibilityTests(unittest.TestCase):
             "norm_col",
             "detect_col",
             "detect_columns",
+            "instagram_export_campaign_context",
+            "is_opaque_instagram_sound_id",
             "coalesce_duplicate_batch_rows",
         ]:
             namespace[name] = load_function(name, namespace)
-        namespace["add_performance_fields"] = lambda frame: frame.copy()
+        for name in [
+            "rate_pct",
+            "unavailable_metric_names",
+            "metric_is_available",
+            "available_metric_rate",
+            "preserve_unavailable_metric_blanks",
+            "add_performance_fields",
+            "format_display_value",
+            "aggregate_summary_performance_v68_15",
+        ]:
+            namespace[name] = load_function(name, namespace)
         namespace["standardize_file_rows"] = load_function("standardize_file_rows", namespace)
         cls.read_any_table = staticmethod(namespace["read_any_table"])
         cls.standardize_file_rows = staticmethod(namespace["standardize_file_rows"])
@@ -83,6 +112,9 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.display_market = staticmethod(namespace["display_market"])
         cls.normalize_market = staticmethod(namespace["normalize_market"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
+        cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
+        cls.format_display_value = staticmethod(namespace["format_display_value"])
+        cls.aggregate_summary_performance = staticmethod(namespace["aggregate_summary_performance_v68_15"])
 
     def parse(self, text: str, *, encoding: str = "utf-8", name: str = "test.csv"):
         raw = text.encode(encoding)
@@ -100,6 +132,90 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Market"], "MY")
         self.assertEqual(rows.loc[0, "Track"], "Track A")
         self.assertEqual(rows.loc[0, "Views"], 1234)
+
+    def test_instagram_reel_file_uses_the_same_canonical_schema(self):
+        text = (
+            "Instagram Reel URL,Market,Track Name,View Count,Like Count\n"
+            "https://www.instagram.com/reel/DExampleAbC1/?utm_source=test,SG,Track IG,5000,250\n"
+        )
+        rows, columns = self.parse(text, name="instagram.csv")
+        self.assertEqual(columns["link"], "Instagram Reel URL")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows.loc[0, "Platform"], INSTAGRAM_REELS)
+        self.assertEqual(rows.loc[0, "Market"], "SG")
+        self.assertEqual(rows.loc[0, "Track"], "Track IG")
+
+    def test_instagram_numeric_sound_id_uses_campaign_context_from_filename(self):
+        text = (
+            "Impact Ranking,Sound,Username,Link,Views,Likes,Comments\n"
+            "1,2422397121605345,arianagrande,https://www.instagram.com/reel/DExampleAbC1,5000,250,12\n"
+        )
+        rows, columns = self.parse(
+            text,
+            name="2026-07-20_HateThatIMadeYouLoveMe_ArianaGrande_posts_instagram.csv",
+        )
+        self.assertEqual(columns["track"], "Sound")
+        self.assertEqual(rows.loc[0, "Track"], "Hate That I Made You Love Me")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Ariana Grande")
+
+    def test_instagram_descriptive_sound_name_beats_filename_fallback(self):
+        text = (
+            "Sound,Link\n"
+            "Original audio,https://www.instagram.com/reel/DExampleAbC2\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="2026-07-20_ExampleTrack_ExampleArtist_posts_instagram.csv",
+        )
+        self.assertEqual(rows.loc[0, "Track"], "Original audio")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Example Artist")
+
+    def test_instagram_unavailable_share_and_save_metrics_remain_missing(self):
+        frame = pd.DataFrame([
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Market": "",
+                "Views": 1000,
+                "Likes": 100,
+                "Comments": 10,
+                "Shares": 0,
+                "Saves": 0,
+                "Followers": 200,
+                "Metrics Unavailable": "Shares, Saves",
+            }
+        ])
+        result = self.add_performance_fields(frame)
+        self.assertTrue(pd.isna(result.loc[0, "Shares"]))
+        self.assertTrue(pd.isna(result.loc[0, "Saves"]))
+        self.assertTrue(pd.isna(result.loc[0, "Shares Rate"]))
+        self.assertTrue(pd.isna(result.loc[0, "Saves Rate"]))
+        self.assertEqual(self.format_display_value("Shares Rate", result.loc[0, "Shares Rate"]), "Not available")
+        result["Link"] = "https://www.instagram.com/reel/DExampleAbC1"
+        summary = self.aggregate_summary_performance(result, ["Platform"])
+        self.assertTrue(pd.isna(summary.loc[0, "Shares"]))
+        self.assertTrue(pd.isna(summary.loc[0, "Saves"]))
+        self.assertTrue(pd.isna(summary.loc[0, "Average_Shares_Rate"]))
+        self.assertTrue(pd.isna(summary.loc[0, "Average_Saves_Rate"]))
+
+    def test_tiktok_real_zero_share_and_save_metrics_remain_zero(self):
+        frame = pd.DataFrame([
+            {
+                "Platform": TIKTOK,
+                "Market": "SG",
+                "Views": 1000,
+                "Likes": 100,
+                "Comments": 10,
+                "Shares": 0,
+                "Saves": 0,
+                "Followers": 200,
+                "Metrics Unavailable": "",
+            }
+        ])
+        result = self.add_performance_fields(frame)
+        self.assertEqual(result.loc[0, "Shares"], 0)
+        self.assertEqual(result.loc[0, "Saves"], 0)
+        self.assertEqual(result.loc[0, "Shares Rate"], 0.0)
+        self.assertEqual(result.loc[0, "Saves Rate"], 0.0)
 
     def test_indonesia_market_name_normalizes_to_id(self):
         self.assertIn("ID", self.markets)

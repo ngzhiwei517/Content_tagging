@@ -21,7 +21,8 @@ class LabelAuditTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(row["App Version"], "v68.41.6")
+        self.assertEqual(row["App Version"], "v68.42.3")
+        self.assertEqual(row["Platform"], "TikTok")
         self.assertEqual(row["Original AI Labels"], "Fashion, Dance")
         self.assertEqual(row["Final Labels"], "Fashion, Dance")
         self.assertFalse(row["Human Reviewed"])

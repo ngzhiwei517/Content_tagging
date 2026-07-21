@@ -41,16 +41,27 @@ from final_update2_adapter import (
     scrape_links as final_update2_scrape_links,
     tag_candidates as final_update2_tag_candidates,
 )
+from instagram_reels_adapter import (
+    INSTAGRAM_REELS,
+    SUPPORTED_PLATFORMS,
+    TIKTOK,
+    creator_from_url as platform_creator_from_url,
+    detect_platform as platform_for_url,
+    is_instagram_post_url,
+    is_supported_post_url,
+    post_identifier as platform_post_identifier,
+)
 
 try:
     import plotly.express as px
 except Exception:
     px = None
 
-st.set_page_config(page_title="TikTok Post Tagging", page_icon="", layout="wide")
+st.set_page_config(page_title="UGC Post Tagging", page_icon="", layout="wide")
 
 MARKETS = ["PH", "MY", "ID", "KR", "SG", "VN", "TH"]
 MARKET_OPTIONS = ["Other / no market"] + MARKETS
+PLATFORM_OPTIONS = list(SUPPORTED_PLATFORMS)
 DATE_SCOPE_SHARED = "Same date for all tracks"
 DATE_SCOPE_PER_TRACK = "Different date by track"
 CREATIVE_TYPES = [
@@ -827,6 +838,7 @@ DEFAULT_STATE = {
     "selected_df": pd.DataFrame(),
     "tagged_df": pd.DataFrame(),
     "last_message": "",
+    "input_platform": TIKTOK,
     "review_pointer": 0,
     "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
@@ -885,6 +897,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "enable_full_video_fallback_v46",
     "date_filter_scope_v68",
     "track_date_settings_v68",
+    "input_platform",
     "selection_mode",
     "top_n",
     "rank_metrics",
@@ -977,7 +990,7 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         else:
             state_payload[key] = value
     payload = {
-        "version": "v68.41.6",
+        "version": "v68.42.3",
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
@@ -1107,6 +1120,42 @@ def rate_pct(numerator, denominator) -> float:
     return round(clean_num(numerator) / denom * 100, 2)
 
 
+def unavailable_metric_names(value) -> set:
+    """Return normalized metric names explicitly missing from the platform."""
+    names = set()
+    for part in re.split(r"[,;|]", safe_str(value)):
+        name = re.sub(r"\s+", " ", part).strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def metric_is_available(row, metric: str) -> bool:
+    unavailable = unavailable_metric_names(row.get("Metrics Unavailable", ""))
+    return safe_str(metric).strip().lower() not in unavailable
+
+
+def available_metric_rate(row, metric: str) -> float:
+    """Calculate a rate, preserving unavailable platform metrics as missing."""
+    if not metric_is_available(row, metric):
+        return float("nan")
+    return rate_pct(row.get(metric), row.get("Views"))
+
+
+def preserve_unavailable_metric_blanks(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep unavailable Instagram counts blank instead of converting them to zero."""
+    out = df.copy()
+    if out.empty or "Metrics Unavailable" not in out.columns:
+        return out
+    share_unavailable = ~out.apply(lambda row: metric_is_available(row, "Shares"), axis=1)
+    save_unavailable = ~out.apply(lambda row: metric_is_available(row, "Saves"), axis=1)
+    if "Shares" in out.columns:
+        out.loc[share_unavailable, "Shares"] = pd.NA
+    if "Saves" in out.columns:
+        out.loc[save_unavailable, "Saves"] = pd.NA
+    return out
+
+
 def kol_size_for_market(followers, market) -> str:
     """Return market-specific KOL size bucket using follower thresholds.
 
@@ -1153,8 +1202,9 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
     out["Engagement Rate"] = out.apply(lambda r: rate_pct(r.get("Total Engagement"), r.get("Views")), axis=1)
     out["Likes Rate"] = out.apply(lambda r: rate_pct(r.get("Likes"), r.get("Views")), axis=1)
     out["Comments Rate"] = out.apply(lambda r: rate_pct(r.get("Comments"), r.get("Views")), axis=1)
-    out["Shares Rate"] = out.apply(lambda r: rate_pct(r.get("Shares"), r.get("Views")), axis=1)
-    out["Saves Rate"] = out.apply(lambda r: rate_pct(r.get("Saves"), r.get("Views")), axis=1)
+    out["Shares Rate"] = out.apply(lambda r: available_metric_rate(r, "Shares"), axis=1)
+    out["Saves Rate"] = out.apply(lambda r: available_metric_rate(r, "Saves"), axis=1)
+    out = preserve_unavailable_metric_blanks(out)
     def resolved_kol_size(row) -> str:
         calculated = kol_size_for_market(row.get("Followers"), row.get("Market"))
         if calculated != "Unknown":
@@ -1167,6 +1217,16 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def format_display_value(col: str, val) -> str:
+    unavailable_columns = {
+        "Shares", "Saves", "Shares Rate", "Average Shares Rate",
+        "Saves Rate", "Average Saves Rate",
+    }
+    try:
+        value_is_missing = val is None or bool(pd.isna(val))
+    except Exception:
+        value_is_missing = val is None
+    if col in unavailable_columns and value_is_missing:
+        return "Not available"
     if col in {
         "Engagement Rate", "Average Engagement Rate", "Likes Rate", "Comments Rate",
         "Shares Rate", "Average Shares Rate", "Saves Rate", "Average Saves Rate",
@@ -1214,12 +1274,23 @@ def esc(v) -> str:
 
 
 def is_tiktok_link(v) -> bool:
-    return "tiktok.com" in safe_str(v).lower()
+    return platform_for_url(safe_str(v)) == TIKTOK
+
+
+def is_instagram_link(v) -> bool:
+    return is_instagram_post_url(safe_str(v))
+
+
+def post_platform(v, fallback: str = "") -> str:
+    return platform_for_url(safe_str(v), fallback=fallback)
+
+
+def is_supported_link(v) -> bool:
+    return is_supported_post_url(safe_str(v))
 
 
 def extract_creator(url: str) -> str:
-    m = re.search(r"tiktok\.com/@([^/\?]+)", safe_str(url))
-    return m.group(1) if m else ""
+    return platform_creator_from_url(safe_str(url))
 
 
 def tiktok_post_date(url: str) -> pd.Timestamp:
@@ -1361,16 +1432,17 @@ def selection_rank_metric_label(selection_mode: str, rank_metrics) -> str:
     return ", ".join(labels) or "Total Engagement"
 
 
-def parse_links(text: str) -> List[str]:
+def parse_links(text: str, platform: str = "") -> List[str]:
     links = []
     for raw in re.split(r"[\n,\s]+", text or ""):
         s = raw.strip()
-        if is_tiktok_link(s):
+        detected = post_platform(s)
+        if detected and (not platform or detected == platform):
             links.append(s)
     seen = set()
     out = []
     for link in links:
-        key = link.split("?")[0].rstrip("/")
+        key = final_update2_normalize_url(link)
         if key not in seen:
             seen.add(key)
             out.append(link)
@@ -1468,10 +1540,13 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {
         "link": detect_col(df, [
             "Link", "URL", "TikTok Link", "TikTok URL", "TikTok Post URL",
+            "Instagram Link", "Instagram URL", "Instagram Reel", "Instagram Reel URL",
+            "Reel Link", "Reel URL",
             "Post URL", "Post Link", "Video URL", "Video Link", "Permalink",
             "Share URL", "webVideoUrl", "submittedVideoUrl", "itemWebUrl",
             "item_web_url", "tiktok_url",
         ]),
+        "platform": detect_col(df, ["Platform", "Social Platform", "Channel", "Source Platform"]),
         # Prefer explicit campaign-market fields. Country remains a compatibility
         # fallback for exports that do not provide Market/Market Code.
         "market": detect_col(df, ["Market", "Market Code", "Country", "Country Code", "Region", "Locale"]),
@@ -1501,28 +1576,79 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     }
 
 
-def standardize_file_rows(df: pd.DataFrame, source_name: str) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
+def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
+    """Extract campaign track and artist from common Instagram export names.
+
+    Supported example:
+    ``2026-07-20_TheOneThatGotAway_KatyPerry_posts_instagram (1).csv``.
+    This is only a fallback for exports whose ``Sound`` column is an opaque
+    numeric Instagram audio identifier; explicit descriptive track/artist
+    columns continue to win.
+    """
+    basename = re.split(r"[\\/]", safe_str(source_name))[-1]
+    stem = re.sub(r"\.(?:csv|xlsx?|xls)$", "", basename, flags=re.I)
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
+    match = re.match(
+        r"^\d{4}-\d{2}-\d{2}_(.+)_posts_instagram$",
+        stem,
+        flags=re.I,
+    )
+    if not match or "_" not in match.group(1):
+        return "", ""
+
+    track_token, artist_token = match.group(1).rsplit("_", 1)
+
+    def humanize(token: str) -> str:
+        text = re.sub(r"[_-]+", " ", safe_str(token))
+        text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
+        text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+        return " ".join(text.split())
+
+    return humanize(track_token), humanize(artist_token)
+
+
+def is_opaque_instagram_sound_id(value) -> bool:
+    """Return True for numeric Instagram audio IDs that are not track names."""
+    text = safe_str(value).replace(",", "").strip()
+    return bool(re.fullmatch(r"\d+(?:\.0+)?(?:[eE][+-]?\d+)?", text))
+
+
+def standardize_file_rows(
+    df: pd.DataFrame,
+    source_name: str,
+    platform: str = "",
+) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
     if not link_col:
         return pd.DataFrame(), cols
+    filename_track, filename_artist = instagram_export_campaign_context(source_name)
     rows = []
     for _, r in df.iterrows():
         link = safe_str(r.get(link_col))
-        if not is_tiktok_link(link):
+        detected_platform = post_platform(link)
+        if not detected_platform or (platform and detected_platform != platform):
             continue
+        track = safe_str(r.get(cols["track"])) if cols.get("track") else ""
+        artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
+        if detected_platform == INSTAGRAM_REELS:
+            if is_opaque_instagram_sound_id(track):
+                track = filename_track
+            if not artist:
+                artist = filename_artist
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
         shares = clean_num(r.get(cols["shares"])) if cols.get("shares") else 0
         saves = clean_num(r.get(cols["saves"])) if cols.get("saves") else 0
         total_eng = clean_num(r.get(cols["total_engagement"])) if cols.get("total_engagement") else likes + comments + shares + saves
         rows.append({
+            "Platform": detected_platform,
             "Source": source_name,
             "Input Type": "CSV/XLSX",
             "Link": link,
             "Market": normalize_market(r.get(cols["market"])) if cols.get("market") else "",
-            "Track": safe_str(r.get(cols["track"])) if cols.get("track") else "",
-            "Campaign Artist": safe_str(r.get(cols["artist"])) if cols.get("artist") else "",
+            "Track": track,
+            "Campaign Artist": artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),
@@ -1548,7 +1674,7 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty or "_link_key" not in frame.columns:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
     backfill_columns = [
-        "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
+        "Platform", "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
         "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
         "Total Engagement",
     ]
@@ -1591,7 +1717,7 @@ def append_to_batch(new_df: pd.DataFrame) -> Tuple[int, int]:
     old = st.session_state.batch_df.copy()
     before = len(old)
     combined = pd.concat([old, new_df], ignore_index=True) if not old.empty else new_df.copy()
-    combined["_link_key"] = combined["Link"].astype(str).str.split("?").str[0].str.rstrip("/")
+    combined["_link_key"] = combined["Link"].map(final_update2_normalize_url)
     combined = coalesce_duplicate_batch_rows(combined).drop(columns=["_link_key"])
     combined = add_performance_fields(combined)
     st.session_state.batch_df = combined.reset_index(drop=True)
@@ -1618,23 +1744,23 @@ def render_table(df: pd.DataFrame, max_rows: int = 10, cols: Optional[List[str]]
     safe_show = show.copy()
     for col in safe_show.columns:
         if col == "Link":
-            def clickable_tiktok_link(value):
+            def clickable_post_link(value):
                 url = safe_str(value)
-                try:
-                    parsed = urlparse(url)
-                    host = parsed.netloc.lower().split(":", 1)[0]
-                    valid = parsed.scheme in {"http", "https"} and (host == "tiktok.com" or host.endswith(".tiktok.com"))
-                except Exception:
-                    valid = False
-                if not valid:
+                platform = post_platform(url)
+                if not platform:
                     return html.escape(url)
                 safe_url = html.escape(url, quote=True)
+                if platform == INSTAGRAM_REELS:
+                    return (
+                        f'<a class="table-link" href="{safe_url}" target="_blank" '
+                        'rel="noopener noreferrer">Open Instagram</a>'
+                    )
                 return (
                     f'<a class="table-link" href="{safe_url}" target="_blank" '
                     'rel="noopener noreferrer">Open TikTok</a>'
                 )
 
-            safe_show[col] = safe_show[col].map(clickable_tiktok_link)
+            safe_show[col] = safe_show[col].map(clickable_post_link)
         else:
             safe_show[col] = safe_show[col].map(lambda value: html.escape(safe_str(value)))
     return "<div class='table-wrap'>" + safe_show.to_html(index=False, escape=False, classes="clean-table") + "</div>"
@@ -1677,6 +1803,11 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
     out["Market Display"] = out.get("Market", "").map(display_market) if "Market" in out.columns else "Other"
     out["Track Display"] = out.get("Track", "").map(lambda x: display_empty(x, "Not specified")) if "Track" in out.columns else "Not specified"
     out["Source Display"] = out.get("Source", "").map(lambda x: display_empty(x, "Unknown source")) if "Source" in out.columns else "Unknown source"
+    out["Platform Display"] = out.get("Platform", "").map(lambda x: display_empty(x, "TikTok")) if "Platform" in out.columns else "TikTok"
+
+    selected_platforms = st.session_state.get("select_platforms", ["All"])
+    if selected_platforms and "All" not in selected_platforms:
+        out = out[out["Platform Display"].isin(selected_platforms)]
 
     selected_markets = st.session_state.get("select_markets", ["All"])
     if selected_markets and "All" not in selected_markets:
@@ -1743,6 +1874,7 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
 
     group_by = st.session_state.get("group_by", "No grouping")
     group_map = {
+        "Platform": ["Platform Display"],
         "Market": ["Market Display"],
         "Track": ["Track Display"],
         "Source": ["Source Display"],
@@ -2072,20 +2204,27 @@ def _render_run_log_v45(placeholder, logs: List[str]) -> None:
     placeholder.markdown("<div class='v45-run-log'>" + "<br>".join(lines) + "</div>", unsafe_allow_html=True)
 
 
-def _render_review_preview_v45(image_url: str, video_url: str, link: str, apify_token: str = "") -> None:
-    """Render TikTok preview from cover, video frame, or public oEmbed thumbnail."""
+def _render_review_preview_v45(
+    image_url: str,
+    video_url: str,
+    link: str,
+    apify_token: str = "",
+    platform: str = TIKTOK,
+) -> None:
+    """Render a post preview from cover, video frame, or TikTok oEmbed."""
     preview_bytes = _download_image_for_display_v45(image_url, apify_token) if image_url else b""
     if not preview_bytes and video_url:
         preview_bytes = _video_frame_preview_bytes_v45(video_url, apify_token)
-    if not preview_bytes and link:
+    if not preview_bytes and link and platform == TIKTOK:
         preview_bytes = _tiktok_oembed_thumbnail_bytes_v48(link)
     st.markdown("<div class='review-media-card'>", unsafe_allow_html=True)
     if preview_bytes:
         st.image(preview_bytes, width="stretch")
     else:
-        st.markdown("<div class='review-placeholder'>Preview unavailable<br><span style='font-size:12px;color:#64748b'>Open TikTok to review this post.</span></div>", unsafe_allow_html=True)
+        st.markdown("<div class='review-placeholder'>Preview unavailable<br><span style='font-size:12px;color:#64748b'>Open the post to review it.</span></div>", unsafe_allow_html=True)
     if link:
-        st.markdown(f"<a class='review-tiktok-btn' href='{esc(link)}' target='_blank'>▶ Watch on TikTok</a>", unsafe_allow_html=True)
+        platform_label = "Instagram" if platform == INSTAGRAM_REELS else "TikTok"
+        st.markdown(f"<a class='review-tiktok-btn' href='{esc(link)}' target='_blank'>▶ Watch on {platform_label}</a>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -2956,6 +3095,8 @@ def _run_v55_backend_reference(df: pd.DataFrame) -> pd.DataFrame:
 
 def _selection_group_key_v56(row) -> Tuple[str, ...]:
     group_by = st.session_state.get("group_by", "No grouping")
+    if group_by == "Platform":
+        return (display_empty(row.get("Platform"), "TikTok"),)
     if group_by == "Market":
         return (display_market(row.get("Market")),)
     if group_by == "Track":
@@ -3034,9 +3175,9 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     selected = df.copy().reset_index(drop=True)
-    selected = selected[selected.get("Link", pd.Series(dtype=str)).map(is_tiktok_link)].reset_index(drop=True)
+    selected = selected[selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)].reset_index(drop=True)
     if selected.empty:
-        st.error("No valid TikTok links were selected for tagging.")
+        st.error("No valid TikTok or Instagram post links were selected for tagging.")
         return pd.DataFrame()
 
     comparison_model = normalize_gemini_model(
@@ -3070,7 +3211,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
     replacement_count = 0
 
     while not pending.empty:
-        links = [safe_str(link) for link in pending["Link"].tolist() if is_tiktok_link(link)]
+        links = [safe_str(link) for link in pending["Link"].tolist() if is_supported_link(link)]
         status.markdown(
             f"<div class='good-note'>Scraping and tagging {len(links)} post(s) with {esc(gemini_model_label(comparison_model))}...</div>",
             unsafe_allow_html=True,
@@ -3165,8 +3306,11 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
     row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     link = safe_str(row_dict.get("Link"))
     post_id = _extract_tiktok_id_from_url(link)
+    platform_post_id = platform_post_identifier(link)
     cache = st.session_state.get("apify_records_by_key", {}) or {}
-    record = cache.get(f"id:{post_id}") if post_id else None
+    record = cache.get(f"id:{platform_post_id}") if platform_post_id else None
+    if not isinstance(record, dict) and post_id:
+        record = cache.get(f"id:{post_id}")
     if not isinstance(record, dict) and link:
         record = cache.get(f"url:{final_update2_normalize_url(link)}")
     records = [record] if isinstance(record, dict) else []
@@ -3220,7 +3364,7 @@ def grouped_excel_bytes(final_df: pd.DataFrame) -> bytes:
         return to_excel_bytes({"Final Output": pd.DataFrame()})
 
     df = final_df.copy()
-    for col in ["Market", "Track", "Source"]:
+    for col in ["Platform", "Market", "Track", "Source"]:
         if col not in df.columns:
             df[col] = ""
     df["Market"] = df["Market"].map(display_market)
@@ -3252,7 +3396,7 @@ def grouped_excel_bytes(final_df: pd.DataFrame) -> bytes:
         for market, sub in df.groupby("Market", dropna=False, sort=True):
             add_sheet(f"Market {display_market(market)}", sub.copy())
 
-    link_cols = [c for c in ["Source", "Market", "Track", "Creator", "Creative Type", "Link"] if c in df.columns]
+    link_cols = [c for c in ["Platform", "Source", "Market", "Track", "Creator", "Creative Type", "Link"] if c in df.columns]
     links_df = df[link_cols].copy() if link_cols else (df[["Link"]].copy() if "Link" in df.columns else df.copy())
     add_sheet("Links Only", links_df)
     return to_excel_bytes(sheets)
@@ -3394,25 +3538,17 @@ def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[s
             axis=1,
         )
     if "Shares Rate" not in working.columns:
-        working["Shares Rate"] = working.apply(
-            lambda row: (clean_num(row.get("Shares")) / clean_num(row.get("Views")) * 100)
-            if clean_num(row.get("Views")) else 0,
-            axis=1,
-        )
+        working["Shares Rate"] = working.apply(lambda row: available_metric_rate(row, "Shares"), axis=1)
     if "Saves Rate" not in working.columns:
-        working["Saves Rate"] = working.apply(
-            lambda row: (clean_num(row.get("Saves")) / clean_num(row.get("Views")) * 100)
-            if clean_num(row.get("Views")) else 0,
-            axis=1,
-        )
+        working["Saves Rate"] = working.apply(lambda row: available_metric_rate(row, "Saves"), axis=1)
     return working.groupby(group_columns, dropna=False).agg(
         Posts=("Link", "count"),
         Views=("Views", "sum"),
         Average_Views=("Views", "mean"),
         Likes=("Likes", "sum"),
         Comments=("Comments", "sum"),
-        Shares=("Shares", "sum"),
-        Saves=("Saves", "sum"),
+        Shares=("Shares", lambda values: values.sum(min_count=1)),
+        Saves=("Saves", lambda values: values.sum(min_count=1)),
         Total_Engagement=("Total Engagement", "sum"),
         Average_Engagements=("Total Engagement", "mean"),
         Average_Engagement_Rate=("Engagement Rate", "mean"),
@@ -3589,7 +3725,7 @@ st.markdown(
     """
 <div class='app-title hero-v37 hero-title-only'>
   <div class='hero-copy'>
-    <h1>TikTok Post Tagging Tool</h1>
+    <h1>UGC Post Tagging Tool</h1>
   </div>
 </div>
 """,
@@ -3634,7 +3770,7 @@ if st.session_state.step == 1:
 # STEP 2
 # -----------------------------
 elif st.session_state.step == 2:
-    st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste TikTok links into one batch.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
     # The demo keeps the established General UGC pipeline. Drama detail remains
     # a separate candidate and is intentionally not exposed in this release.
@@ -3645,10 +3781,18 @@ elif st.session_state.step == 2:
         "Without a track name, Audio Version may remain **Unknown**."
     )
 
-    add_tab, paste_tab = st.tabs(["Upload post files", "Paste extra TikTok links"])
+    input_platform = st.radio(
+        "Platform to add",
+        PLATFORM_OPTIONS,
+        horizontal=True,
+        key="input_platform",
+    )
+    platform_short = "Instagram" if input_platform == INSTAGRAM_REELS else "TikTok"
+
+    add_tab, paste_tab = st.tabs(["Upload post files", f"Paste extra {platform_short} links"])
 
     with add_tab:
-        st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok links. You can select multiple files.</p>", unsafe_allow_html=True)
+        st.markdown(f"<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with {esc(input_platform)} links. You can select multiple files.</p>", unsafe_allow_html=True)
         st.info(drama_audio_note, icon=":material/info:")
         files = st.file_uploader(
             "Post data files",
@@ -3664,13 +3808,13 @@ elif st.session_state.step == 2:
             for f in files:
                 try:
                     df = read_any_table(f)
-                    std, cols = standardize_file_rows(df, f.name)
+                    std, cols = standardize_file_rows(df, f.name, input_platform)
                     parsed_frames.append(std)
                     markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
                     tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
                     summary_rows.append({
                         "File": f.name,
-                        "TikTok links": len(std),
+                        "Posts": len(std),
                         "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
                         "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
                     })
@@ -3691,15 +3835,19 @@ elif st.session_state.step == 2:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with paste_tab:
-        st.markdown("<div class='card'><h3>Paste TikTok links</h3><p class='sub'>Use this to add extra links that are not included in your files.</p>", unsafe_allow_html=True)
+        st.markdown(f"<div class='card'><h3>Paste {esc(input_platform)} links</h3><p class='sub'>Use this to add extra links that are not included in your files.</p>", unsafe_allow_html=True)
         st.info(drama_audio_note, icon=":material/info:")
-        link_text = st.text_area("TikTok links", placeholder="Paste one TikTok link per line", height=150)
+        link_text = st.text_area(
+            f"{input_platform} links",
+            placeholder=f"Paste one {platform_short} post link per line",
+            height=150,
+        )
         c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
         with c1:
             paste_track = st.text_input(
                 "Campaign track / sound name (optional)",
                 placeholder="Song title",
-                help="Enter the song title. If left blank, the app will use the detected TikTok audio name.",
+                help="Enter the song title. If left blank, the app will use the detected platform audio name.",
                 key="pasted_campaign_track_v68_39",
             )
         with c2:
@@ -3736,23 +3884,24 @@ elif st.session_state.step == 2:
         with c3:
             market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
             paste_market = "" if market_choice == "Other / no market" else market_choice
-        links = parse_links(link_text)
+        links = parse_links(link_text, input_platform)
         market_label = paste_market if paste_market else "Other"
         st.markdown(f"<div class='pill-row'><span class='pill green'>Links detected: {len(links)}</span><span class='pill blue'>Market: {esc(market_label)}</span></div>", unsafe_allow_html=True)
         if st.button("Add pasted links to batch", type="primary", width="stretch"):
             if not links:
-                st.warning("Paste at least one TikTok link first.")
+                st.warning(f"Paste at least one valid {input_platform} post link first.")
             else:
                 rows = []
                 for l in links:
                     rows.append({
+                        "Platform": input_platform,
                         "Source": "Pasted links",
                         "Input Type": "Pasted",
                         "Link": l,
                         "Market": paste_market,
                         # Keep the user-entered campaign track for audio-version
                         # comparison. When blank, the adapter falls back to the
-                        # scraped TikTok music metadata during tagging.
+                        # scraped platform music metadata during tagging.
                         "Track": safe_str(paste_track),
                         "Campaign Artist": safe_str(paste_artist),
                         "Viral Date": "",
@@ -3784,9 +3933,10 @@ elif st.session_state.step == 2:
             ("Posts", str(len(batch)), "Ready in batch"),
             ("Markets", str(market_count) if market_count else "—", "Optional"),
             ("Tracks", str(track_count) if track_count else "—", "Optional"),
+            ("Platforms", str(batch.get("Platform", pd.Series([TIKTOK] * len(batch))).nunique()), "TikTok + Instagram"),
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
-        st.markdown(render_table(batch, max_rows=10, cols=["Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
+        st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
@@ -3820,6 +3970,7 @@ elif st.session_state.step == 3:
     filter_df["Market Display"] = filter_df["Market"].map(display_market) if "Market" in filter_df.columns else "Other"
     filter_df["Track Display"] = filter_df["Track"].map(lambda x: display_empty(x, "Not specified")) if "Track" in filter_df.columns else "Not specified"
     filter_df["Source Display"] = filter_df["Source"].map(lambda x: display_empty(x, "Unknown source")) if "Source" in filter_df.columns else "Unknown source"
+    filter_df["Platform Display"] = filter_df["Platform"].map(lambda x: display_empty(x, TIKTOK)) if "Platform" in filter_df.columns else TIKTOK
 
     st.session_state.selection_mode = st.radio(
         "How many posts do you want to tag?",
@@ -3854,11 +4005,11 @@ elif st.session_state.step == 3:
             if not st.session_state.rank_metrics:
                 st.session_state.rank_metrics = ["Total Engagement"]
     else:
-        st.markdown("<div class='good-note'>Every TikTok link in the filtered view will be tagged in the original combined-batch order.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='good-note'>Every post link in the filtered view will be tagged in the original combined-batch order.</div>", unsafe_allow_html=True)
 
     with st.expander("Optional: grouping and filters", expanded=False):
         if st.session_state.selection_mode == "Top posts":
-            group_options = ["No grouping", "Market", "Track", "Source", "Market + Track"]
+            group_options = ["No grouping", "Platform", "Market", "Track", "Source", "Market + Track"]
             prev_group = st.session_state.get("group_by", "No grouping")
             if prev_group not in group_options:
                 prev_group = "No grouping"
@@ -3870,6 +4021,7 @@ elif st.session_state.step == 3:
 
             group_explain = {
                 "No grouping": "Select the Top N posts from the whole batch.",
+                "Platform": "Select Top N separately for TikTok and Instagram Reels.",
                 "Market": "Select Top N separately for each market. Blank market will be grouped as Other.",
                 "Track": "Select Top N separately for each track. Blank track will be grouped as Not specified.",
                 "Source": "Select Top N separately for each uploaded file or pasted-link batch.",
@@ -3887,10 +4039,17 @@ elif st.session_state.step == 3:
                 unsafe_allow_html=True,
             )
 
-        limit_input = st.checkbox("Limit input to specific market, track, or source", value=st.session_state.get("limit_input", False))
+        limit_input = st.checkbox("Limit input to a specific platform, market, track, or source", value=st.session_state.get("limit_input", False))
         st.session_state.limit_input = limit_input
         if limit_input:
-            f1, f2, f3 = st.columns(3)
+            f0, f1, f2, f3 = st.columns(4)
+            with f0:
+                platform_options = ["All"] + sorted(filter_df["Platform Display"].dropna().unique().tolist())
+                prev = st.session_state.get("select_platforms", ["All"])
+                prev = [x for x in prev if x in platform_options] or ["All"]
+                st.session_state.select_platforms = st.multiselect("Platform", platform_options, default=prev)
+                if not st.session_state.select_platforms:
+                    st.session_state.select_platforms = ["All"]
             with f1:
                 market_options = ["All"] + sorted(filter_df["Market Display"].dropna().unique().tolist())
                 prev = st.session_state.get("select_markets", ["All"])
@@ -3913,6 +4072,7 @@ elif st.session_state.step == 3:
                 if not st.session_state.select_sources:
                     st.session_state.select_sources = ["All"]
         else:
+            st.session_state.select_platforms = ["All"]
             st.session_state.select_markets = ["All"]
             st.session_state.select_tracks = ["All"]
             st.session_state.select_sources = ["All"]
@@ -3928,6 +4088,9 @@ elif st.session_state.step == 3:
             # Only show tracks still eligible after the optional Market/Track/Source
             # filters. This keeps the per-track date form short and relevant.
             date_scope_df = filter_df.copy()
+            selected_platforms = st.session_state.get("select_platforms", ["All"])
+            if selected_platforms and "All" not in selected_platforms:
+                date_scope_df = date_scope_df[date_scope_df["Platform Display"].isin(selected_platforms)]
             selected_markets = st.session_state.get("select_markets", ["All"])
             if selected_markets and "All" not in selected_markets:
                 date_scope_df = date_scope_df[date_scope_df["Market Display"].isin(selected_markets)]
@@ -4023,7 +4186,7 @@ elif st.session_state.step == 3:
                 window_end = pd.Timestamp(st.session_state.viral_date) + pd.Timedelta(days=int(st.session_state.date_window))
                 st.caption(
                     f"Date range: {window_start.strftime('%d %b %Y')} to {window_end.strftime('%d %b %Y')}. "
-                    "TikTok link dates are used when available."
+                    "Post dates from links or uploaded files are used when available."
                 )
         if st.session_state.selection_mode == "Top posts":
             # Top N must remain complete, so unavailable and sensitive posts are
@@ -4075,7 +4238,7 @@ elif st.session_state.step == 3:
         ("Markets", str(selected_markets_count) if selected_markets_count else "—", "Other included if blank"),
         ("Rank", rank_summary, "Selection logic"),
     ]), unsafe_allow_html=True)
-    st.markdown(render_table(selected, max_rows=12, cols=["Source", "Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
+    st.markdown(render_table(selected, max_rows=12, cols=["Platform", "Source", "Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back", width="stretch"):
@@ -4189,6 +4352,7 @@ elif st.session_state.step == 5:
             st.rerun()
 
     link = safe_str(row.get("Link"))
+    platform = safe_str(row.get("Platform")) or post_platform(link) or TIKTOK
     creator = safe_str(row.get("Creator")) or extract_creator(link) or "Unknown creator"
     market = display_market(row.get("Market"))
     track = display_empty(row.get("Track"), "Not specified")
@@ -4196,6 +4360,12 @@ elif st.session_state.step == 5:
     views = clean_num(row.get("Views"))
     likes = clean_num(row.get("Likes"))
     shares = clean_num(row.get("Shares"))
+    metrics_unavailable = safe_str(row.get("Metrics Unavailable"))
+    shares_display = f"{shares:,}" if metric_is_available(row, "Shares") else "Not available"
+    metrics_note_html = (
+        f"<div class='review-label'>Not returned by platform</div><div class='review-value'>{esc(metrics_unavailable)}</div>"
+        if metrics_unavailable else ""
+    )
     reason = display_empty(
         _first_nonblank_v43(row.get("Review Note"), row.get("QA Reason"), row.get("Reasoning")),
         "The AI result needs a manual check.",
@@ -4218,28 +4388,34 @@ elif st.session_state.step == 5:
     left, middle, right = st.columns([0.82, 1.18, 1.48], gap="large")
 
     with left:
-        _render_review_preview_v45(image_url, video_url, link, st.session_state.get("apify_token", ""))
+        _render_review_preview_v45(
+            image_url,
+            video_url,
+            link,
+            st.session_state.get("apify_token", ""),
+            platform,
+        )
 
     with middle:
-        st.markdown(
+        st.html(
             f"""
             <div class='review-info-card'>
               <div class='review-label'>Creator</div>
               <div class='review-value'>@{esc(creator)}</div>
-              <div class='review-label'>Market · Track</div>
-              <div class='review-value'>{esc(market)} · {esc(track)}</div>
+              <div class='review-label'>Platform · Market · Track</div>
+              <div class='review-value'>{esc(platform)} · {esc(market)} · {esc(track)}</div>
               <div class='review-label'>Caption</div>
               <div class='review-value' style='white-space:pre-wrap'>{esc(caption)}</div>
               <div class='review-stats'>
                 <div class='review-stat'><div class='num'>{views:,}</div><div class='lbl'>Views</div></div>
                 <div class='review-stat'><div class='num'>{likes:,}</div><div class='lbl'>Likes</div></div>
-                <div class='review-stat'><div class='num'>{shares:,}</div><div class='lbl'>Shares</div></div>
+                <div class='review-stat'><div class='num'>{esc(shares_display)}</div><div class='lbl'>Shares</div></div>
               </div>
+              {metrics_note_html}
               <div class='review-label'>Flagged reason</div>
               <div class='review-reason'>{esc(reason)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
     with right:
@@ -4448,7 +4624,7 @@ elif st.session_state.step == 5:
                 details = st.text_area("Content Details", height=130, key=details_key)
 
             # final_update_2 manual-metrics workflow. Scraper exception/sensitive
-            # rows often retain a usable TikTok link but have no engagement data.
+            # rows often retain a usable post link but have no engagement data.
             metric_values = {
                 "Views": clean_num(row.get("Views")),
                 "Likes": clean_num(row.get("Likes")),
@@ -4462,7 +4638,7 @@ elif st.session_state.step == 5:
             metric_keys = {name: f"review_metric_{name.lower()}_v56_{original_idx}" for name in metric_values}
             if needs_manual_metrics:
                 st.markdown(
-                    "<div class='review-note-warn'>Metrics were not captured by the scraper. Open the TikTok link and enter the current numbers before saving.</div>",
+                    "<div class='review-note-warn'>Metrics were not captured by the scraper. Open the post and enter the current numbers before saving.</div>",
                     unsafe_allow_html=True,
                 )
                 mc1, mc2 = st.columns(2)
@@ -4486,7 +4662,7 @@ elif st.session_state.step == 5:
                 elif "Movie/Tv/Drama Edits" in creative_types and not content_categories:
                     st.error("Please choose at least one drama / entertainment content category.")
                 elif needs_manual_metrics and int(manual_views) == 0 and int(manual_likes) == 0 and int(manual_shares) == 0:
-                    st.error("Please enter the TikTok metrics before saving.")
+                    st.error("Please enter the available post metrics before saving.")
                 else:
                     selected_label_text = ", ".join(creative_types)
                     audit_fields = final_update2_review_audit_update(
@@ -4550,13 +4726,15 @@ elif st.session_state.step == 6:
     # internal QA workbook still receives every attempted row below.
     qa_all_rows = tagged.copy()
     work = tagged[~_removed_mask_v56(tagged)].copy()
-    for col in ["Source", "Input Type", "Link", "Market", "Track", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
+    for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
         if col not in work.columns:
             work[col] = ""
     for col in ["Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Followers"]:
         if col not in work.columns:
             work[col] = 0
         work[col] = work[col].map(clean_num)
+    work = preserve_unavailable_metric_blanks(work)
+    work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)
     work["Track Display"] = work["Track"].map(lambda x: display_empty(x, "Not specified"))
     work["Source Display"] = work["Source"].map(lambda x: display_empty(x, "Manual / pasted links"))
@@ -4564,8 +4742,11 @@ elif st.session_state.step == 6:
     work["Primary Creative Type"] = work["Creative Type"].map(primary_creative_type)
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Combined filters: users can focus by source + market + track + creative type, then sort the post table by any metric.
-    f1, f2, f3, f4 = st.columns(4)
+    # Combined filters: users can focus by platform + source + market + track + creative type.
+    f0, f1, f2, f3, f4 = st.columns(5)
+    with f0:
+        platform_opts = ["All"] + sorted(work["Platform Display"].dropna().unique().tolist())
+        platform_filter = st.selectbox("Platform", platform_opts, key="summary_platform_v68_42")
     with f1:
         source_opts = ["All"] + sorted(work["Source Display"].dropna().unique().tolist())
         source_filter = st.selectbox("Source", source_opts, key="summary_source_v28")
@@ -4586,6 +4767,8 @@ elif st.session_state.step == 6:
         sort_order = st.selectbox("Order", ["Highest first", "Lowest first"], key="summary_sort_v28")
 
     filtered = work.copy()
+    if platform_filter != "All":
+        filtered = filtered[filtered["Platform Display"] == platform_filter]
     if source_filter != "All":
         filtered = filtered[filtered["Source Display"] == source_filter]
     if market_filter != "All":
@@ -4598,12 +4781,13 @@ elif st.session_state.step == 6:
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
     avg_engagements = float(filtered["Total Engagement"].mean()) if len(filtered) else 0
+    platform_count = filtered["Platform Display"].nunique()
     market_count = len([m for m in filtered["Market"].fillna("").unique().tolist() if safe_str(m)])
     track_count = len([t for t in filtered["Track"].fillna("").unique().tolist() if safe_str(t)])
     has_metrics = bool(total_views or total_eng or filtered[["Likes", "Comments", "Shares", "Saves"]].sum().sum())
     filtered["Engagement Rate"] = filtered.apply(lambda r: (clean_num(r.get("Total Engagement")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
-    filtered["Shares Rate"] = filtered.apply(lambda r: (clean_num(r.get("Shares")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
-    filtered["Saves Rate"] = filtered.apply(lambda r: (clean_num(r.get("Saves")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
+    filtered["Shares Rate"] = filtered.apply(lambda r: available_metric_rate(r, "Shares"), axis=1)
+    filtered["Saves Rate"] = filtered.apply(lambda r: available_metric_rate(r, "Saves"), axis=1)
     avg_engagement_rate = float(filtered["Engagement Rate"].mean()) if len(filtered) else 0
 
     st.markdown(summary_kpi_row([
@@ -4612,10 +4796,13 @@ elif st.session_state.step == 6:
         ("Average Engagements", short_num(round(avg_engagements)) if has_metrics else "—", "Average per post", "kpi-orange"),
         ("Average Engagement Rate", f"{avg_engagement_rate:.1f}%" if has_metrics else "—", "Mean of each post's engagement rate", "kpi-green"),
         ("Markets", str(market_count) if market_count else "—", "", "kpi-pink"),
+        ("Platforms", str(platform_count) if platform_count else "—", "", "kpi-purple"),
     ]), unsafe_allow_html=True)
 
     if not has_metrics:
         st.markdown("<div class='soft-note'>Metrics are not available yet. Once Apify refreshes views, likes, comments, shares, and saves, the performance sections will populate automatically.</div>", unsafe_allow_html=True)
+    if "Metrics Unavailable" in filtered.columns and filtered["Metrics Unavailable"].fillna("").astype(str).str.strip().ne("").any():
+        st.markdown("<div class='soft-note'>Some Instagram metrics are not exposed by the scraper. They are shown as Not available, not zero. Total engagement and engagement rate use only the metrics returned by Instagram.</div>", unsafe_allow_html=True)
 
     top_type = display_empty(filtered["Primary Creative Type"].mode().iloc[0] if not filtered.empty else "", "—")
     top_type_count = int((filtered["Primary Creative Type"] == top_type).sum()) if top_type != "—" else 0
@@ -4639,6 +4826,24 @@ elif st.session_state.step == 6:
     ]), unsafe_allow_html=True)
 
     # Begin with campaign structure, then move into creative insights.
+    if work["Platform Display"].nunique() > 1:
+        st.markdown("<div class='card'>" + section_title("Platform Summary", "#6254e8"), unsafe_allow_html=True)
+        platform_summary = aggregate_summary_performance_v68_15(filtered, ["Platform Display"]).rename(columns={
+            "Platform Display": "Platform",
+            "Average_Views": "Average Views",
+            "Average_Engagements": "Average Engagements",
+            "Average_Engagement_Rate": "Average Engagement Rate",
+            "Average_Shares_Rate": "Shares Rate",
+            "Average_Saves_Rate": "Saves Rate",
+        })
+        platform_summary = sort_summary_performance_v68_18(platform_summary, focus_metric, sort_order)
+        st.markdown(render_table(
+            platform_summary,
+            max_rows=4,
+            cols=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        ), unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
     if market_count:
         market_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display"]).rename(columns={
@@ -4693,7 +4898,7 @@ elif st.session_state.step == 6:
         metric_for_chart = focus_metric if focus_metric != "Engagement Rate" else "Views"
         metric_title = f"{metric_for_chart} by Creative Type"
         st.markdown("<div class='card'>" + section_title(metric_title, "#0ea5e9"), unsafe_allow_html=True)
-        if has_metrics and metric_for_chart in filtered.columns:
+        if has_metrics and metric_for_chart in filtered.columns and filtered[metric_for_chart].notna().any():
             metric_mix = filtered.groupby("Primary Creative Type", dropna=False)[metric_for_chart].sum().reset_index().rename(columns={"Primary Creative Type": "Creative Type"}).sort_values(metric_for_chart, ascending=False)
             st.markdown(bar_list(metric_mix.head(12), "Creative Type", metric_for_chart, max_rows=12), unsafe_allow_html=True)
         else:
@@ -4729,7 +4934,7 @@ elif st.session_state.step == 6:
         top_posts["Engagement Rate"] = top_posts.apply(lambda r: f"{(r['Total Engagement']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
         top_posts["Track"] = top_posts["Track Display"]
         top_posts["Market"] = top_posts["Market Display"]
-        st.markdown(render_table(top_posts, max_rows=15, cols=["Creator", "Market", "Track", "Creative Type", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate", "Link"]), unsafe_allow_html=True)
+        st.markdown(render_table(top_posts, max_rows=15, cols=["Platform", "Creator", "Market", "Track", "Creative Type", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate", "Link"]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Keep KOL performance last among the analytical sections.
@@ -4764,7 +4969,7 @@ elif st.session_state.step == 6:
     qa_df = qa_all_rows.copy()
     qa_front = [
         "App Version", "Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds",
-        "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
+        "Platform", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
         "Needs Review", "Review Action", "Review Note", "Review Risk",
         "Tier Used", "Validation Status", "Validation Score",
@@ -4773,7 +4978,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.41.6",
+            "App Version": "v68.42.3",
             "Gemini Model": safe_str(qa_df.iloc[0].get("Gemini Model")) if not qa_df.empty else normalize_gemini_model(st.session_state.get("qa_gemini_model_v68_41_4")),
             "Comparison Run ID": safe_str(qa_df.iloc[0].get("Comparison Run ID")) if not qa_df.empty else st.session_state.get("comparison_run_id_v68_41_4", ""),
             "Run Started UTC": safe_str(qa_df.iloc[0].get("Run Started UTC")) if not qa_df.empty else st.session_state.get("comparison_run_started_utc_v68_41_4", ""),

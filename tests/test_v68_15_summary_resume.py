@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 import unittest
 from pathlib import Path
 from typing import Dict, List
@@ -56,8 +57,16 @@ class RuntimeCheckpointTests(unittest.TestCase):
 class SummaryV6815Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        namespace = {"pd": pd, "List": List}
-        namespace["clean_num"] = load_function("clean_num", namespace)
+        namespace = {"pd": pd, "List": List, "re": re}
+        for name in [
+            "safe_str",
+            "clean_num",
+            "rate_pct",
+            "unavailable_metric_names",
+            "metric_is_available",
+            "available_metric_rate",
+        ]:
+            namespace[name] = load_function(name, namespace)
         cls.aggregate = staticmethod(load_function("aggregate_summary_performance_v68_15", namespace))
         cls.summary_sort_column = staticmethod(load_function("summary_sort_column_v68_15", namespace))
         namespace["summary_sort_column_v68_15"] = cls.summary_sort_column
