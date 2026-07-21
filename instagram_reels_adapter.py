@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 TIKTOK = "TikTok"
 INSTAGRAM_REELS = "Instagram Reels"
 SUPPORTED_PLATFORMS = (TIKTOK, INSTAGRAM_REELS)
-INSTAGRAM_REEL_ACTOR_ID = "apify/instagram-reel-scraper"
+INSTAGRAM_REEL_ACTOR_ID = "data-slayer/instagram-post-details"
 INSTAGRAM_POST_ACTOR_ID = "apify/instagram-scraper"
 # Backward-compatible alias for integrations that imported the original name.
 INSTAGRAM_ACTOR_ID = INSTAGRAM_REEL_ACTOR_ID
@@ -146,7 +146,9 @@ def creator_from_url(url: str) -> str:
 
 
 def _instagram_record_url(record: Dict) -> str:
-    return _text(_first(record, ("url", "postUrl", "inputUrl")))
+    return _text(
+        _first(record, ("url", "postUrl", "post_url", "permalink", "inputUrl"))
+    )
 
 
 def _instagram_record_shortcode(record: Dict) -> str:
@@ -162,19 +164,32 @@ def _image_urls(record: Dict) -> List[str]:
         if isinstance(value, str) and value.strip() and value.strip() not in urls:
             urls.append(value.strip())
         elif isinstance(value, dict):
-            add(_first(value, ("displayUrl", "imageUrl", "url", "thumbnailUrl")))
+            add(
+                _first(
+                    value,
+                    ("displayUrl", "imageUrl", "url", "thumbnailUrl", "thumbnail_url"),
+                )
+            )
 
     for item in record.get("images", []) if isinstance(record.get("images"), list) else []:
         add(item)
     for child in record.get("childPosts", []) if isinstance(record.get("childPosts"), list) else []:
         add(child)
+    image_versions = record.get("image_versions")
+    if isinstance(image_versions, dict):
+        for item in image_versions.get("items", []) if isinstance(image_versions.get("items"), list) else []:
+            add(item)
     add(record.get("displayUrl"))
     add(record.get("thumbnailUrl"))
+    add(record.get("thumbnail_url"))
     return urls
 
 
 def _video_url(record: Dict) -> str:
-    value = _first(record, ("videoUrl", "videoURL", "video_url", "downloadUrl"))
+    value = _first(
+        record,
+        ("videoUrl", "videoURL", "video_url", "media_url", "downloadUrl"),
+    )
     if isinstance(value, list):
         return _text(value[0]) if value else ""
     return _text(value)
@@ -183,17 +198,56 @@ def _video_url(record: Dict) -> str:
 def _music(record: Dict) -> Dict:
     info = record.get("musicInfo") if isinstance(record.get("musicInfo"), dict) else {}
     meta = record.get("metaData") if isinstance(record.get("metaData"), dict) else {}
+    clips = record.get("clips_metadata") if isinstance(record.get("clips_metadata"), dict) else {}
+    original_sound = (
+        clips.get("original_sound_info")
+        if isinstance(clips.get("original_sound_info"), dict)
+        else {}
+    )
+    audio_parts = (
+        original_sound.get("audio_parts")
+        if isinstance(original_sound.get("audio_parts"), list)
+        else []
+    )
+    audio_part = next((item for item in audio_parts if isinstance(item, dict)), {})
     name = _text(
         _first(info, ("song_name", "songName", "musicName", "audio_name", "title"))
         or _first(record, ("audioName", "musicName", "soundName"))
         or _first(meta, ("song_name", "musicName", "audioName"))
+        or _first(audio_part, ("display_title", "title", "song_name"))
+        or _first(original_sound, ("original_audio_title", "title"))
     )
     artist = _text(
         _first(info, ("artist_name", "artistName", "musicAuthor", "author"))
         or _first(record, ("musicAuthor", "audioAuthor"))
         or _first(meta, ("artist_name", "musicAuthor"))
+        or _first(audio_part, ("display_artist", "artist", "artist_name"))
     )
     return {"musicName": name, "musicAuthor": artist}
+
+
+def _caption_text(record: Dict) -> str:
+    caption = record.get("caption")
+    if isinstance(caption, dict):
+        return _text(_first(caption, ("text", "caption", "title"))) or _text(
+            record.get("text")
+        )
+    return _text(caption or record.get("text"))
+
+
+def _metric_value(record: Dict, top_level_keys: Iterable[str], metric_keys: Iterable[str]) -> int:
+    value = _first(record, top_level_keys, default=None)
+    if value is None:
+        metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+        value = _first(metrics, metric_keys, default=0)
+    return _number(value)
+
+
+def _metric_available(record: Dict, top_level_keys: Iterable[str], metric_keys: Iterable[str]) -> bool:
+    if any(key in record and record.get(key) is not None for key in top_level_keys):
+        return True
+    metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+    return any(key in metrics and metrics.get(key) is not None for key in metric_keys)
 
 
 def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
@@ -204,8 +258,8 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
     code = _instagram_record_shortcode(raw) or instagram_shortcode(requested_url)
     images = _image_urls(raw)
     video_url = _video_url(raw)
-    type_text = _text(raw.get("type")).casefold()
-    product_type = _text(raw.get("productType")).casefold()
+    type_text = _text(raw.get("type") or raw.get("media_name")).casefold()
+    product_type = _text(raw.get("productType") or raw.get("product_type")).casefold()
     children = raw.get("childPosts") if isinstance(raw.get("childPosts"), list) else []
     is_slideshow = (
         type_text in {"sidecar", "carousel", "carousel_container"}
@@ -213,17 +267,32 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         or len(children) >= 2
         or (not video_url and len(images) >= 2)
     )
-    creator = _text(_first(raw, ("ownerUsername", "username")))
-    creator_display = _text(_first(raw, ("ownerFullName", "fullName")))
+    user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+    creator = _text(
+        _first(raw, ("ownerUsername", "username"))
+        or _first(user, ("username", "user_name"))
+    )
+    creator_display = _text(
+        _first(raw, ("ownerFullName", "fullName"))
+        or _first(user, ("full_name", "fullName", "name"))
+    )
     followers = _number(
         _first(raw, ("ownerFollowersCount", "followersCount", "followerCount"))
         or _nested(raw, "owner", "followersCount", default=0)
+        or _first(user, ("follower_count", "followers_count", "followers"), default=0)
+        or _nested(raw, "metrics", "user_follower_count", default=0)
     )
     hashtags = raw.get("hashtags") if isinstance(raw.get("hashtags"), list) else []
+    caption = raw.get("caption") if isinstance(raw.get("caption"), dict) else {}
+    if not hashtags and isinstance(caption.get("hashtags"), list):
+        hashtags = caption.get("hashtags", [])
     if not hashtags:
-        hashtags = re.findall(r"#([^\s#]+)", _text(_first(raw, ("caption", "text"))))
-    cover = _text(_first(raw, ("displayUrl", "thumbnailUrl"))) or (images[0] if images else "")
-    duration = _number(_first(raw, ("videoDuration", "duration")))
+        hashtags = re.findall(r"#([^\s#]+)", _caption_text(raw))
+    hashtags = [_text(item).lstrip("#") for item in hashtags if _text(item)]
+    cover = _text(
+        _first(raw, ("displayUrl", "thumbnailUrl", "thumbnail_url"))
+    ) or (images[0] if images else "")
+    duration = _number(_first(raw, ("videoDuration", "duration", "video_duration")))
     music = _music(raw)
 
     normalized = {
@@ -232,15 +301,25 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         "webVideoUrl": public_url,
         "submittedVideoUrl": requested_url or public_url,
         "inputUrl": requested_url or _text(raw.get("inputUrl")) or public_url,
-        "text": _text(_first(raw, ("caption", "text"))),
+        "text": _caption_text(raw),
         "hashtags": hashtags,
-        "playCount": _number(
-            _first(raw, ("videoPlayCount", "videoViewCount", "viewCount", "playsCount"))
+        "playCount": _metric_value(
+            raw,
+            ("videoPlayCount", "videoViewCount", "viewCount", "playsCount"),
+            ("play_count", "ig_play_count", "view_count"),
         ),
-        "diggCount": _number(_first(raw, ("likesCount", "likeCount", "likes"))),
-        "commentCount": _number(_first(raw, ("commentsCount", "commentCount", "comments"))),
-        "shareCount": _number(_first(raw, ("sharesCount", "shareCount", "shares"))),
-        "collectCount": _number(_first(raw, ("savesCount", "saveCount", "saves"))),
+        "diggCount": _metric_value(
+            raw, ("likesCount", "likeCount", "likes"), ("like_count",)
+        ),
+        "commentCount": _metric_value(
+            raw, ("commentsCount", "commentCount", "comments"), ("comment_count",)
+        ),
+        "shareCount": _metric_value(
+            raw, ("sharesCount", "shareCount", "shares"), ("share_count",)
+        ),
+        "collectCount": _metric_value(
+            raw, ("savesCount", "saveCount", "saves"), ("save_count",)
+        ),
         "authorMeta": {
             "name": creator,
             "nickName": creator_display,
@@ -259,20 +338,22 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         "images": images,
         "slideshowImageLinks": images if is_slideshow else [],
         "isSlideshow": bool(is_slideshow),
-        "createTimeISO": _text(_first(raw, ("timestamp", "takenAt", "createdAt"))),
+        "createTimeISO": _text(
+            _first(raw, ("timestamp", "takenAt", "taken_at_date", "createdAt"))
+        ),
         "locationCreated": "",
         "_platform": INSTAGRAM_REELS,
         "platform": INSTAGRAM_REELS,
         "instagramShortcode": code,
-        "instagramProductType": _text(raw.get("productType")),
-        "instagramType": _text(raw.get("type")),
+        "instagramProductType": _text(raw.get("productType") or raw.get("product_type")),
+        "instagramType": _text(raw.get("type") or raw.get("media_name")),
         "instagramMetricsUnavailable": [
             name
-            for name, keys in {
-                "Shares": ("sharesCount", "shareCount", "shares"),
-                "Saves": ("savesCount", "saveCount", "saves"),
-            }.items()
-            if not any(key in raw and raw.get(key) is not None for key in keys)
+            for name, top_keys, metric_keys in (
+                ("Shares", ("sharesCount", "shareCount", "shares"), ("share_count",)),
+                ("Saves", ("savesCount", "saveCount", "saves"), ("save_count",)),
+            )
+            if not _metric_available(raw, top_keys, metric_keys)
         ],
     }
     if _text(raw.get("error")) or _text(raw.get("errorCode")):
@@ -330,26 +411,20 @@ def scrape_instagram_posts(
     generic_links = [link for link in requested if link not in reel_links]
     raw_items: List[Dict] = []
 
-    # Apify's dedicated Reel actor exposes sharesCount when this paid option is
-    # enabled. It also returns the metadata and media used by the shared Gemini
-    # pipeline, so explicit Reel URLs do not need a second scrape.
+    # Data Slayer's post-details actor returns public Reel metadata plus nested
+    # play, like, comment, share and save counts. Explicit Reel URLs use it as
+    # the primary adapter; the broad Apify actor below remains the fallback.
     if reel_links:
         try:
             reel_items = _run_actor_items(
                 client,
                 INSTAGRAM_REEL_ACTOR_ID,
-                {
-                    "username": reel_links,
-                    "resultsLimit": len(reel_links),
-                    "includeSharesCount": True,
-                    "includeTranscript": False,
-                    "includeDownloadedVideo": False,
-                },
+                {"postUrls": reel_links},
             )
         except Exception:
-            # Keep tagging usable when the account does not have access to the
-            # paid share-count option. The normal missing-metric handling will
-            # then report Shares as unavailable instead of a false zero.
+            # Keep tagging usable if the community actor is temporarily
+            # unavailable. Missing metrics stay explicitly unavailable instead
+            # of being exported as confirmed zeroes.
             reel_items = []
         raw_items.extend(reel_items)
 

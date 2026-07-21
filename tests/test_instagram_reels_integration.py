@@ -94,6 +94,49 @@ def instagram_video_record():
     }
 
 
+def instagram_full_metrics_record():
+    return {
+        "id": "3627283333494772362",
+        "pk": "3627283333494772362",
+        "code": "DExampleAbC1",
+        "media_name": "reel",
+        "product_type": "clips",
+        "caption": {
+            "text": "A short Reel #dance",
+            "hashtags": ["#dance"],
+            "mentions": [],
+        },
+        "metrics": {
+            "play_count": 5000,
+            "ig_play_count": 5000,
+            "like_count": 250,
+            "comment_count": 12,
+            "share_count": 41,
+            "save_count": 17,
+            "repost_count": 2,
+        },
+        "thumbnail_url": "https://cdn.example/cover.jpg",
+        "video_url": "https://cdn.example/video.mp4",
+        "video_duration": 15.5,
+        "taken_at_date": "2026-01-01T00:00:00+00:00",
+        "user": {
+            "username": "creator_name",
+            "full_name": "Creator Name",
+            "follower_count": 1000,
+        },
+        "clips_metadata": {
+            "original_sound_info": {
+                "audio_parts": [
+                    {
+                        "display_title": "Test Song",
+                        "display_artist": "Test Artist",
+                    }
+                ]
+            }
+        },
+    }
+
+
 class InstagramUrlTests(unittest.TestCase):
     def test_supported_instagram_paths_and_case_sensitive_shortcode(self):
         self.assertTrue(is_instagram_post_url(VIDEO_URL))
@@ -134,6 +177,24 @@ class InstagramRecordTests(unittest.TestCase):
         )
         self.assertEqual(record["shareCount"], 41)
         self.assertEqual(record["instagramMetricsUnavailable"], ["Saves"])
+
+    def test_full_metrics_actor_nested_output_maps_all_available_metrics(self):
+        record = normalize_instagram_record(instagram_full_metrics_record(), VIDEO_URL)
+        self.assertEqual(record["text"], "A short Reel #dance")
+        self.assertEqual(record["hashtags"], ["dance"])
+        self.assertEqual(record["playCount"], 5000)
+        self.assertEqual(record["diggCount"], 250)
+        self.assertEqual(record["commentCount"], 12)
+        self.assertEqual(record["shareCount"], 41)
+        self.assertEqual(record["collectCount"], 17)
+        self.assertEqual(record["authorMeta"]["name"], "creator_name")
+        self.assertEqual(record["authorMeta"]["fans"], 1000)
+        self.assertEqual(record["musicMeta"]["musicName"], "Test Song")
+        self.assertEqual(record["musicMeta"]["musicAuthor"], "Test Artist")
+        self.assertEqual(record["videoMeta"]["originalCoverUrl"], "https://cdn.example/cover.jpg")
+        self.assertEqual(record["mediaUrls"], ["https://cdn.example/video.mp4"])
+        self.assertEqual(record["createTimeISO"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(record["instagramMetricsUnavailable"], [])
 
     def test_sidecar_maps_to_a_confirmed_carousel(self):
         raw = {
@@ -179,7 +240,7 @@ class InstagramRecordTests(unittest.TestCase):
             },
             raw,
         )
-        self.assertEqual(row["App Version"], "v68.42.1")
+        self.assertEqual(row["App Version"], "v68.42.2")
         self.assertEqual(row["Platform"], INSTAGRAM_REELS)
         self.assertEqual(row["Metrics Unavailable"], "Shares, Saves")
         self.assertEqual(row["Audio From Platform"], "Test Song")
@@ -187,21 +248,42 @@ class InstagramRecordTests(unittest.TestCase):
         self.assertIn("Platform", MARKETING_EXPORT_COLUMNS)
         self.assertIn("Metrics Unavailable", MARKETING_EXPORT_COLUMNS)
 
+    def test_ui_and_export_preserve_returned_shares_and_saves(self):
+        raw = normalize_instagram_record(instagram_full_metrics_record(), VIDEO_URL)
+        row = _to_ui_row(
+            {"Platform": INSTAGRAM_REELS, "Link": VIDEO_URL, "Source": "Pasted links"},
+            {
+                "tiktok_url": VIDEO_URL,
+                "platform": INSTAGRAM_REELS,
+                "Creative Type": "Dance",
+                "plays": 5000,
+                "likes": 250,
+                "comments": 12,
+                "shares": 41,
+                "saves": 17,
+                "validation_status": "pass",
+                "confidence": 0.9,
+            },
+            raw,
+        )
+        self.assertEqual(row["Shares"], 41)
+        self.assertEqual(row["Saves"], 17)
+        self.assertEqual(row["Metrics Unavailable"], "")
+        self.assertEqual(row["Total Engagement"], 320)
+
 
 class InstagramScrapeTests(unittest.TestCase):
-    def test_reel_actor_requests_paid_share_count_and_preserves_result_order(self):
-        client = _FakeClient([{**instagram_video_record(), "sharesCount": 41}])
+    def test_reel_actor_requests_post_details_and_preserves_full_metrics(self):
+        client = _FakeClient([instagram_full_metrics_record()])
         records = scrape_instagram_posts([VIDEO_URL], "", client=client)
         self.assertEqual(client.actor_id, INSTAGRAM_ACTOR_ID)
         self.assertEqual(client.actor_id, INSTAGRAM_REEL_ACTOR_ID)
         self.assertEqual(client.dataset_id, "dataset-1")
-        self.assertEqual(client.run_input["username"], [VIDEO_URL])
-        self.assertTrue(client.run_input["includeSharesCount"])
-        self.assertFalse(client.run_input["includeTranscript"])
-        self.assertFalse(client.run_input["includeDownloadedVideo"])
+        self.assertEqual(client.run_input, {"postUrls": [VIDEO_URL]})
         self.assertEqual(records[0]["_platform"], INSTAGRAM_REELS)
         self.assertEqual(records[0]["shareCount"], 41)
-        self.assertEqual(records[0]["instagramMetricsUnavailable"], ["Saves"])
+        self.assertEqual(records[0]["collectCount"], 17)
+        self.assertEqual(records[0]["instagramMetricsUnavailable"], [])
 
     def test_regular_post_urls_keep_using_the_broad_instagram_actor(self):
         post_url = "https://www.instagram.com/p/DExampleAbC1/"
