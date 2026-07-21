@@ -990,7 +990,7 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         else:
             state_payload[key] = value
     payload = {
-        "version": "v68.42.2",
+        "version": "v68.42.3",
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
@@ -4397,7 +4397,7 @@ elif st.session_state.step == 5:
         )
 
     with middle:
-        st.markdown(
+        st.html(
             f"""
             <div class='review-info-card'>
               <div class='review-label'>Creator</div>
@@ -4415,8 +4415,7 @@ elif st.session_state.step == 5:
               <div class='review-label'>Flagged reason</div>
               <div class='review-reason'>{esc(reason)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
     with right:
@@ -4979,7 +4978,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.42.2",
+            "App Version": "v68.42.3",
             "Gemini Model": safe_str(qa_df.iloc[0].get("Gemini Model")) if not qa_df.empty else normalize_gemini_model(st.session_state.get("qa_gemini_model_v68_41_4")),
             "Comparison Run ID": safe_str(qa_df.iloc[0].get("Comparison Run ID")) if not qa_df.empty else st.session_state.get("comparison_run_id_v68_41_4", ""),
             "Run Started UTC": safe_str(qa_df.iloc[0].get("Run Started UTC")) if not qa_df.empty else st.session_state.get("comparison_run_started_utc_v68_41_4", ""),

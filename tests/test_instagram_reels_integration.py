@@ -240,7 +240,7 @@ class InstagramRecordTests(unittest.TestCase):
             },
             raw,
         )
-        self.assertEqual(row["App Version"], "v68.42.2")
+        self.assertEqual(row["App Version"], "v68.42.3")
         self.assertEqual(row["Platform"], INSTAGRAM_REELS)
         self.assertEqual(row["Metrics Unavailable"], "Shares, Saves")
         self.assertEqual(row["Audio From Platform"], "Test Song")

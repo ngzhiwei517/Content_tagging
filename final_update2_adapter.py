@@ -488,7 +488,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     if not isinstance(unavailable_metrics, list):
         unavailable_metrics = []
     output.update({
-        "App Version": "v68.42.2",
+        "App Version": "v68.42.3",
         "Platform": platform,
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to

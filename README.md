@@ -2,7 +2,7 @@
 
 An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok and Instagram Reels user-generated content for music marketing.
 
-[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — the live demo remains the validated TikTok release. This v68.42.2 Instagram integration candidate runs locally and does not replace it yet.
+[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — the live demo remains the validated TikTok release. This v68.42.3 Instagram integration candidate runs locally and does not replace it yet.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
@@ -27,7 +27,7 @@ It can:
 
 ### Balanced model setup
 
-This v68.42.2 candidate keeps Gemini 3.1 Flash-Lite as the default and preserves the validated TikTok prompt/guardrail path. Instagram Reels is normalized into the same taxonomy and review workflow, but its accuracy must be validated separately before production use. Explicit Reel URLs use Data Slayer's Instagram Post Details actor for public play, like, comment, share and save counts, with Apify's broad Instagram scraper retained as a fallback. Metrics that a scraper does not return remain marked as unavailable rather than being treated as confirmed zeroes.
+This v68.42.3 candidate keeps Gemini 3.1 Flash-Lite as the default and preserves the validated TikTok prompt/guardrail path. Instagram Reels is normalized into the same taxonomy and review workflow, but its accuracy must be validated separately before production use. Explicit Reel URLs use Data Slayer's Instagram Post Details actor for public play, like, comment, share and save counts, with Apify's broad Instagram scraper retained as a fallback. Metrics that a scraper does not return remain marked as unavailable rather than being treated as confirmed zeroes.
 
 - Gemini 3.1 Flash-Lite (recommended default)
 - Gemini 3.5 Flash (slower, deeper analysis)
