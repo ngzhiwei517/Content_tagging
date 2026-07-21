@@ -1120,6 +1120,42 @@ def rate_pct(numerator, denominator) -> float:
     return round(clean_num(numerator) / denom * 100, 2)
 
 
+def unavailable_metric_names(value) -> set:
+    """Return normalized metric names explicitly missing from the platform."""
+    names = set()
+    for part in re.split(r"[,;|]", safe_str(value)):
+        name = re.sub(r"\s+", " ", part).strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def metric_is_available(row, metric: str) -> bool:
+    unavailable = unavailable_metric_names(row.get("Metrics Unavailable", ""))
+    return safe_str(metric).strip().lower() not in unavailable
+
+
+def available_metric_rate(row, metric: str) -> float:
+    """Calculate a rate, preserving unavailable platform metrics as missing."""
+    if not metric_is_available(row, metric):
+        return float("nan")
+    return rate_pct(row.get(metric), row.get("Views"))
+
+
+def preserve_unavailable_metric_blanks(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep unavailable Instagram counts blank instead of converting them to zero."""
+    out = df.copy()
+    if out.empty or "Metrics Unavailable" not in out.columns:
+        return out
+    share_unavailable = ~out.apply(lambda row: metric_is_available(row, "Shares"), axis=1)
+    save_unavailable = ~out.apply(lambda row: metric_is_available(row, "Saves"), axis=1)
+    if "Shares" in out.columns:
+        out.loc[share_unavailable, "Shares"] = pd.NA
+    if "Saves" in out.columns:
+        out.loc[save_unavailable, "Saves"] = pd.NA
+    return out
+
+
 def kol_size_for_market(followers, market) -> str:
     """Return market-specific KOL size bucket using follower thresholds.
 
@@ -1166,8 +1202,9 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
     out["Engagement Rate"] = out.apply(lambda r: rate_pct(r.get("Total Engagement"), r.get("Views")), axis=1)
     out["Likes Rate"] = out.apply(lambda r: rate_pct(r.get("Likes"), r.get("Views")), axis=1)
     out["Comments Rate"] = out.apply(lambda r: rate_pct(r.get("Comments"), r.get("Views")), axis=1)
-    out["Shares Rate"] = out.apply(lambda r: rate_pct(r.get("Shares"), r.get("Views")), axis=1)
-    out["Saves Rate"] = out.apply(lambda r: rate_pct(r.get("Saves"), r.get("Views")), axis=1)
+    out["Shares Rate"] = out.apply(lambda r: available_metric_rate(r, "Shares"), axis=1)
+    out["Saves Rate"] = out.apply(lambda r: available_metric_rate(r, "Saves"), axis=1)
+    out = preserve_unavailable_metric_blanks(out)
     def resolved_kol_size(row) -> str:
         calculated = kol_size_for_market(row.get("Followers"), row.get("Market"))
         if calculated != "Unknown":
@@ -1180,6 +1217,16 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def format_display_value(col: str, val) -> str:
+    unavailable_columns = {
+        "Shares", "Saves", "Shares Rate", "Average Shares Rate",
+        "Saves Rate", "Average Saves Rate",
+    }
+    try:
+        value_is_missing = val is None or bool(pd.isna(val))
+    except Exception:
+        value_is_missing = val is None
+    if col in unavailable_columns and value_is_missing:
+        return "Not available"
     if col in {
         "Engagement Rate", "Average Engagement Rate", "Likes Rate", "Comments Rate",
         "Shares Rate", "Average Shares Rate", "Saves Rate", "Average Saves Rate",
@@ -3491,25 +3538,17 @@ def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[s
             axis=1,
         )
     if "Shares Rate" not in working.columns:
-        working["Shares Rate"] = working.apply(
-            lambda row: (clean_num(row.get("Shares")) / clean_num(row.get("Views")) * 100)
-            if clean_num(row.get("Views")) else 0,
-            axis=1,
-        )
+        working["Shares Rate"] = working.apply(lambda row: available_metric_rate(row, "Shares"), axis=1)
     if "Saves Rate" not in working.columns:
-        working["Saves Rate"] = working.apply(
-            lambda row: (clean_num(row.get("Saves")) / clean_num(row.get("Views")) * 100)
-            if clean_num(row.get("Views")) else 0,
-            axis=1,
-        )
+        working["Saves Rate"] = working.apply(lambda row: available_metric_rate(row, "Saves"), axis=1)
     return working.groupby(group_columns, dropna=False).agg(
         Posts=("Link", "count"),
         Views=("Views", "sum"),
         Average_Views=("Views", "mean"),
         Likes=("Likes", "sum"),
         Comments=("Comments", "sum"),
-        Shares=("Shares", "sum"),
-        Saves=("Saves", "sum"),
+        Shares=("Shares", lambda values: values.sum(min_count=1)),
+        Saves=("Saves", lambda values: values.sum(min_count=1)),
         Total_Engagement=("Total Engagement", "sum"),
         Average_Engagements=("Total Engagement", "mean"),
         Average_Engagement_Rate=("Engagement Rate", "mean"),
@@ -4322,6 +4361,7 @@ elif st.session_state.step == 5:
     likes = clean_num(row.get("Likes"))
     shares = clean_num(row.get("Shares"))
     metrics_unavailable = safe_str(row.get("Metrics Unavailable"))
+    shares_display = f"{shares:,}" if metric_is_available(row, "Shares") else "Not available"
     metrics_note_html = (
         f"<div class='review-label'>Not returned by platform</div><div class='review-value'>{esc(metrics_unavailable)}</div>"
         if metrics_unavailable else ""
@@ -4369,7 +4409,7 @@ elif st.session_state.step == 5:
               <div class='review-stats'>
                 <div class='review-stat'><div class='num'>{views:,}</div><div class='lbl'>Views</div></div>
                 <div class='review-stat'><div class='num'>{likes:,}</div><div class='lbl'>Likes</div></div>
-                <div class='review-stat'><div class='num'>{shares:,}</div><div class='lbl'>Shares</div></div>
+                <div class='review-stat'><div class='num'>{esc(shares_display)}</div><div class='lbl'>Shares</div></div>
               </div>
               {metrics_note_html}
               <div class='review-label'>Flagged reason</div>
@@ -4694,6 +4734,7 @@ elif st.session_state.step == 6:
         if col not in work.columns:
             work[col] = 0
         work[col] = work[col].map(clean_num)
+    work = preserve_unavailable_metric_blanks(work)
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)
     work["Track Display"] = work["Track"].map(lambda x: display_empty(x, "Not specified"))
@@ -4746,8 +4787,8 @@ elif st.session_state.step == 6:
     track_count = len([t for t in filtered["Track"].fillna("").unique().tolist() if safe_str(t)])
     has_metrics = bool(total_views or total_eng or filtered[["Likes", "Comments", "Shares", "Saves"]].sum().sum())
     filtered["Engagement Rate"] = filtered.apply(lambda r: (clean_num(r.get("Total Engagement")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
-    filtered["Shares Rate"] = filtered.apply(lambda r: (clean_num(r.get("Shares")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
-    filtered["Saves Rate"] = filtered.apply(lambda r: (clean_num(r.get("Saves")) / clean_num(r.get("Views")) * 100) if clean_num(r.get("Views")) else 0, axis=1)
+    filtered["Shares Rate"] = filtered.apply(lambda r: available_metric_rate(r, "Shares"), axis=1)
+    filtered["Saves Rate"] = filtered.apply(lambda r: available_metric_rate(r, "Saves"), axis=1)
     avg_engagement_rate = float(filtered["Engagement Rate"].mean()) if len(filtered) else 0
 
     st.markdown(summary_kpi_row([
@@ -4762,7 +4803,7 @@ elif st.session_state.step == 6:
     if not has_metrics:
         st.markdown("<div class='soft-note'>Metrics are not available yet. Once Apify refreshes views, likes, comments, shares, and saves, the performance sections will populate automatically.</div>", unsafe_allow_html=True)
     if "Metrics Unavailable" in filtered.columns and filtered["Metrics Unavailable"].fillna("").astype(str).str.strip().ne("").any():
-        st.markdown("<div class='soft-note'>Some Instagram metrics are not exposed by the scraper. These fields are identified in the export under Metrics Unavailable.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='soft-note'>Some Instagram metrics are not exposed by the scraper. They are shown as Not available, not zero. Total engagement and engagement rate use only the metrics returned by Instagram.</div>", unsafe_allow_html=True)
 
     top_type = display_empty(filtered["Primary Creative Type"].mode().iloc[0] if not filtered.empty else "", "—")
     top_type_count = int((filtered["Primary Creative Type"] == top_type).sum()) if top_type != "—" else 0
@@ -4858,7 +4899,7 @@ elif st.session_state.step == 6:
         metric_for_chart = focus_metric if focus_metric != "Engagement Rate" else "Views"
         metric_title = f"{metric_for_chart} by Creative Type"
         st.markdown("<div class='card'>" + section_title(metric_title, "#0ea5e9"), unsafe_allow_html=True)
-        if has_metrics and metric_for_chart in filtered.columns:
+        if has_metrics and metric_for_chart in filtered.columns and filtered[metric_for_chart].notna().any():
             metric_mix = filtered.groupby("Primary Creative Type", dropna=False)[metric_for_chart].sum().reset_index().rename(columns={"Primary Creative Type": "Creative Type"}).sort_values(metric_for_chart, ascending=False)
             st.markdown(bar_list(metric_mix.head(12), "Creative Type", metric_for_chart, max_rows=12), unsafe_allow_html=True)
         else:

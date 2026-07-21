@@ -17,6 +17,10 @@ In the app:
 6. Run tagging, inspect each Reel, and accept or correct every Review row. The reviewed rows become the first Instagram answer key.
 7. Download the **Review / QA Report** and send it back to Codex.
 
+For Reels where Instagram does not return shares or saves, confirm that the
+Review, Summary, and exports show `Not available` rather than `0` for those
+counts and rates.
+
 ## What to return
 
 - the Review / QA Report XLSX;
