@@ -24,4 +24,3 @@ Streamlit deployment.
 The `includeSharesCount` option is available only to eligible paid Apify
 accounts. The app uses the Apify token entered for the current Streamlit
 session and does not store it in the repository or exported checkpoint.
-

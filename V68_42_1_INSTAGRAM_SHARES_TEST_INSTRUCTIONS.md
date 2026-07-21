@@ -14,4 +14,3 @@ usage, test three rows first.
 
 If all three rows show Shares as `Not available`, confirm that the Apify plan
 supports the paid `includeSharesCount` option before running a larger batch.
-
