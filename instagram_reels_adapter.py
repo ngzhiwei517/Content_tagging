@@ -15,7 +15,10 @@ from urllib.parse import urlsplit, urlunsplit
 TIKTOK = "TikTok"
 INSTAGRAM_REELS = "Instagram Reels"
 SUPPORTED_PLATFORMS = (TIKTOK, INSTAGRAM_REELS)
-INSTAGRAM_ACTOR_ID = "apify/instagram-scraper"
+INSTAGRAM_REEL_ACTOR_ID = "apify/instagram-reel-scraper"
+INSTAGRAM_POST_ACTOR_ID = "apify/instagram-scraper"
+# Backward-compatible alias for integrations that imported the original name.
+INSTAGRAM_ACTOR_ID = INSTAGRAM_REEL_ACTOR_ID
 
 
 def _text(value) -> str:
@@ -81,6 +84,17 @@ def is_instagram_post_url(url: str) -> bool:
     except ValueError:
         return False
     return bool(re.search(r"/(?:reel|reels|p|tv)/[^/?#]+", path, flags=re.IGNORECASE))
+
+
+def is_explicit_instagram_reel_url(url: str) -> bool:
+    """Return True only for URLs whose path explicitly identifies a Reel."""
+    if not is_instagram_post_url(url):
+        return False
+    try:
+        path = urlsplit(_text(url)).path
+    except ValueError:
+        return False
+    return bool(re.search(r"/(?:reel|reels)/[^/?#]+", path, flags=re.IGNORECASE))
 
 
 def detect_platform(url: str, fallback: str = "") -> str:
@@ -273,6 +287,14 @@ def _dataset_id(run) -> str:
     return _text(getattr(run, "default_dataset_id", None) or getattr(run, "defaultDatasetId", None))
 
 
+def _run_actor_items(client, actor_id: str, run_input: Dict) -> List[Dict]:
+    run = client.actor(actor_id).call(run_input=run_input)
+    dataset_id = _dataset_id(run)
+    if not dataset_id:
+        raise RuntimeError("Instagram Apify run finished but no default dataset was returned.")
+    return [item for item in client.dataset(dataset_id).iterate_items() if isinstance(item, dict)]
+
+
 def scrape_instagram_posts(
     links: List[str],
     apify_token: str,
@@ -304,17 +326,58 @@ def scrape_instagram_posts(
             raise RuntimeError("Missing dependency: install with `pip install apify-client`.") from exc
         client = ApifyClient(apify_token)
 
-    run_input = {
-        "directUrls": requested,
-        "resultsType": "posts",
-        "resultsLimit": len(requested),
-        "addParentData": True,
-    }
-    run = client.actor(INSTAGRAM_ACTOR_ID).call(run_input=run_input)
-    dataset_id = _dataset_id(run)
-    if not dataset_id:
-        raise RuntimeError("Instagram Apify run finished but no default dataset was returned.")
-    raw_items = list(client.dataset(dataset_id).iterate_items())
+    reel_links = [link for link in requested if is_explicit_instagram_reel_url(link)]
+    generic_links = [link for link in requested if link not in reel_links]
+    raw_items: List[Dict] = []
+
+    # Apify's dedicated Reel actor exposes sharesCount when this paid option is
+    # enabled. It also returns the metadata and media used by the shared Gemini
+    # pipeline, so explicit Reel URLs do not need a second scrape.
+    if reel_links:
+        try:
+            reel_items = _run_actor_items(
+                client,
+                INSTAGRAM_REEL_ACTOR_ID,
+                {
+                    "username": reel_links,
+                    "resultsLimit": len(reel_links),
+                    "includeSharesCount": True,
+                    "includeTranscript": False,
+                    "includeDownloadedVideo": False,
+                },
+            )
+        except Exception:
+            # Keep tagging usable when the account does not have access to the
+            # paid share-count option. The normal missing-metric handling will
+            # then report Shares as unavailable instead of a false zero.
+            reel_items = []
+        raw_items.extend(reel_items)
+
+        returned_codes = {
+            _instagram_record_shortcode(item)
+            for item in reel_items
+            if _instagram_record_shortcode(item)
+        }
+        generic_links.extend(
+            link for link in reel_links if instagram_shortcode(link) not in returned_codes
+        )
+
+    # Regular Instagram posts/carousels and Reel fallbacks continue through the
+    # existing broad actor so a share-count entitlement issue never blocks the
+    # rest of the tagging workflow.
+    if generic_links:
+        raw_items.extend(
+            _run_actor_items(
+                client,
+                INSTAGRAM_POST_ACTOR_ID,
+                {
+                    "directUrls": generic_links,
+                    "resultsType": "posts",
+                    "resultsLimit": len(generic_links),
+                    "addParentData": True,
+                },
+            )
+        )
 
     by_code: Dict[str, Dict] = {}
     by_url: Dict[str, Dict] = {}

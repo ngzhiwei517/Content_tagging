@@ -2,7 +2,7 @@
 
 An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok and Instagram Reels user-generated content for music marketing.
 
-[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — the live demo remains the validated TikTok release. This v68.42.0 Instagram integration candidate runs locally and does not replace it yet.
+[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — the live demo remains the validated TikTok release. This v68.42.1 Instagram integration candidate runs locally and does not replace it yet.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
@@ -27,7 +27,7 @@ It can:
 
 ### Balanced model setup
 
-This v68.42.0 candidate keeps Gemini 3.1 Flash-Lite as the default and preserves the validated TikTok prompt/guardrail path. Instagram Reels is normalized into the same taxonomy and review workflow, but its accuracy must be validated separately before production use.
+This v68.42.1 candidate keeps Gemini 3.1 Flash-Lite as the default and preserves the validated TikTok prompt/guardrail path. Instagram Reels is normalized into the same taxonomy and review workflow, but its accuracy must be validated separately before production use. Explicit Reel URLs use Apify's dedicated Reel actor with `includeSharesCount` enabled; this share-count option requires an eligible paid Apify plan. Saves remain unavailable for public third-party Reels.
 
 - Gemini 3.1 Flash-Lite (recommended default)
 - Gemini 3.5 Flash (slower, deeper analysis)
@@ -150,6 +150,6 @@ python -m unittest discover -s tests -v
 
 The repository excludes API secrets, raw campaign data, exports, downloaded media and learned creator/track files. Do not commit real tokens or confidential campaign data.
 
-TikTok/Instagram availability and platform changes can affect scraping. Instagram shares, saves or follower counts may be unavailable for some posts; the export identifies missing fields under `Metrics Unavailable`. Gemini and Apify use external quotas, and genuinely ambiguous content may still require human review.
+TikTok/Instagram availability and platform changes can affect scraping. Instagram shares may still be unavailable when the Apify share-count option is not included in the user's plan or when Instagram does not expose a Reel; saves and follower counts may also be unavailable. The export identifies missing fields under `Metrics Unavailable`. Gemini and Apify use external quotas, and genuinely ambiguous content may still require human review.
 
 This project is intended for research, workflow automation and marketing analytics using publicly available social content. It is not affiliated with TikTok, Instagram, Google or Apify.

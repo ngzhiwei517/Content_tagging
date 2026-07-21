@@ -15,10 +15,13 @@ from final_update2_adapter import (
 from final_update2_backend import load_backend
 from instagram_reels_adapter import (
     INSTAGRAM_ACTOR_ID,
+    INSTAGRAM_POST_ACTOR_ID,
+    INSTAGRAM_REEL_ACTOR_ID,
     INSTAGRAM_REELS,
     TIKTOK,
     detect_platform,
     instagram_shortcode,
+    is_explicit_instagram_reel_url,
     is_instagram_post_url,
     normalize_instagram_record,
     normalize_post_url,
@@ -31,11 +34,15 @@ VIDEO_URL = "https://www.instagram.com/reel/DExampleAbC1/?utm_source=copy"
 
 
 class _FakeActor:
-    def __init__(self, parent):
+    def __init__(self, parent, actor_id):
         self.parent = parent
+        self.actor_id = actor_id
 
     def call(self, *, run_input):
+        if self.actor_id in self.parent.fail_actor_ids:
+            raise RuntimeError("Actor is not available for this account")
         self.parent.run_input = run_input
+        self.parent.actor_calls.append((self.actor_id, run_input))
         return {"defaultDatasetId": "dataset-1"}
 
 
@@ -48,15 +55,17 @@ class _FakeDataset:
 
 
 class _FakeClient:
-    def __init__(self, items):
+    def __init__(self, items, *, fail_actor_ids=None):
         self.items = items
         self.actor_id = ""
+        self.actor_calls = []
+        self.fail_actor_ids = set(fail_actor_ids or [])
         self.dataset_id = ""
         self.run_input = {}
 
     def actor(self, actor_id):
         self.actor_id = actor_id
-        return _FakeActor(self)
+        return _FakeActor(self, actor_id)
 
     def dataset(self, dataset_id):
         self.dataset_id = dataset_id
@@ -93,6 +102,8 @@ class InstagramUrlTests(unittest.TestCase):
         self.assertEqual(instagram_shortcode(VIDEO_URL), "DExampleAbC1")
         self.assertEqual(post_identifier(VIDEO_URL), "instagram:DExampleAbC1")
         self.assertEqual(detect_platform(VIDEO_URL), INSTAGRAM_REELS)
+        self.assertTrue(is_explicit_instagram_reel_url(VIDEO_URL))
+        self.assertFalse(is_explicit_instagram_reel_url("https://instagram.com/p/AbCdEf123/"))
 
     def test_normalization_removes_tracking_without_lowercasing_shortcode(self):
         self.assertEqual(
@@ -115,6 +126,14 @@ class InstagramRecordTests(unittest.TestCase):
         self.assertEqual(record["mediaUrls"], ["https://cdn.example/video.mp4"])
         self.assertFalse(record["isSlideshow"])
         self.assertEqual(record["instagramMetricsUnavailable"], ["Shares", "Saves"])
+
+    def test_paid_share_count_is_preserved_and_only_saves_remain_unavailable(self):
+        record = normalize_instagram_record(
+            {**instagram_video_record(), "sharesCount": 41},
+            VIDEO_URL,
+        )
+        self.assertEqual(record["shareCount"], 41)
+        self.assertEqual(record["instagramMetricsUnavailable"], ["Saves"])
 
     def test_sidecar_maps_to_a_confirmed_carousel(self):
         raw = {
@@ -160,7 +179,7 @@ class InstagramRecordTests(unittest.TestCase):
             },
             raw,
         )
-        self.assertEqual(row["App Version"], "v68.42.0")
+        self.assertEqual(row["App Version"], "v68.42.1")
         self.assertEqual(row["Platform"], INSTAGRAM_REELS)
         self.assertEqual(row["Metrics Unavailable"], "Shares, Saves")
         self.assertEqual(row["Audio From Platform"], "Test Song")
@@ -170,14 +189,38 @@ class InstagramRecordTests(unittest.TestCase):
 
 
 class InstagramScrapeTests(unittest.TestCase):
-    def test_actor_call_and_result_order(self):
-        client = _FakeClient([instagram_video_record()])
+    def test_reel_actor_requests_paid_share_count_and_preserves_result_order(self):
+        client = _FakeClient([{**instagram_video_record(), "sharesCount": 41}])
         records = scrape_instagram_posts([VIDEO_URL], "", client=client)
         self.assertEqual(client.actor_id, INSTAGRAM_ACTOR_ID)
+        self.assertEqual(client.actor_id, INSTAGRAM_REEL_ACTOR_ID)
         self.assertEqual(client.dataset_id, "dataset-1")
-        self.assertEqual(client.run_input["directUrls"], [VIDEO_URL])
-        self.assertEqual(client.run_input["resultsType"], "posts")
+        self.assertEqual(client.run_input["username"], [VIDEO_URL])
+        self.assertTrue(client.run_input["includeSharesCount"])
+        self.assertFalse(client.run_input["includeTranscript"])
+        self.assertFalse(client.run_input["includeDownloadedVideo"])
         self.assertEqual(records[0]["_platform"], INSTAGRAM_REELS)
+        self.assertEqual(records[0]["shareCount"], 41)
+        self.assertEqual(records[0]["instagramMetricsUnavailable"], ["Saves"])
+
+    def test_regular_post_urls_keep_using_the_broad_instagram_actor(self):
+        post_url = "https://www.instagram.com/p/DExampleAbC1/"
+        client = _FakeClient([instagram_video_record()])
+        scrape_instagram_posts([post_url], "", client=client)
+        self.assertEqual(client.actor_id, INSTAGRAM_POST_ACTOR_ID)
+        self.assertEqual(client.run_input["directUrls"], [post_url])
+        self.assertEqual(client.run_input["resultsType"], "posts")
+
+    def test_share_actor_entitlement_failure_falls_back_without_false_zero(self):
+        client = _FakeClient(
+            [instagram_video_record()],
+            fail_actor_ids={INSTAGRAM_REEL_ACTOR_ID},
+        )
+        records = scrape_instagram_posts([VIDEO_URL], "", client=client)
+        self.assertEqual(client.actor_id, INSTAGRAM_POST_ACTOR_ID)
+        self.assertEqual(client.run_input["directUrls"], [VIDEO_URL])
+        self.assertEqual(records[0]["shareCount"], 0)
+        self.assertIn("Shares", records[0]["instagramMetricsUnavailable"])
 
     def test_missing_actor_result_becomes_auto_removable_error_record(self):
         client = _FakeClient([])
