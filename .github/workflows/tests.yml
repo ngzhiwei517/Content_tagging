@@ -20,7 +20,6 @@ jobs:
       - name: Compile
         run: >-
           python -m py_compile app.py final_update2_adapter.py final_update2_backend.py
-          final_update2_backend_source.py review_routing.py
+          final_update2_backend_source.py model_comparison.py review_routing.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
-

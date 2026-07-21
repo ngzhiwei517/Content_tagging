@@ -9,6 +9,14 @@ import requests
 import cv2
 import tempfile
 import io
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+from model_comparison import (
+    DEFAULT_GEMINI_MODEL,
+    TARGETED_VERIFIER_MODEL,
+    normalize_gemini_model,
+)
 
 from review_routing import apply_review_policy, review_risk_reasons, visual_escalation_reasons
 from evidence_verifier import (
@@ -317,6 +325,37 @@ def _kb_norm_text(v):
     return "" if s.lower() in {"nan", "none", "null"} else s
 
 
+def _kb_optional_bool(value):
+    """Return True/False for explicit boolean values, otherwise None.
+
+    ``pandas.json_normalize`` represents a field missing from only some records
+    as NaN.  Python considers both NaN and non-empty strings such as ``"false"``
+    truthy, so a direct ``bool(value)`` can turn normal videos into slideshows.
+    """
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold() if value is not None else ""
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _kb_slideshow_flag(row):
+    """Return the first explicit slideshow flag found on a row."""
+    for key in ('isSlideshow', 'is_slideshow'):
+        flag = _kb_optional_bool(_kb_get(row, key, None))
+        if flag is not None:
+            return flag
+    return None
+
+
 def _kb_slug(v):
     s = _kb_norm_text(v).lower().strip().lstrip("#@")
     return re.sub(r"[^a-z0-9_.\-ก-๙\u0e00-\u0e7f\u4e00-\u9fff가-힣ぁ-んァ-ン]+", "", s)
@@ -395,10 +434,10 @@ def _kb_extract_hashtags(row):
 
 def _kb_url_type(row):
     url = _kb_norm_text(_kb_get(row, 'webVideoUrl') or _kb_get(row, 'submittedVideoUrl') or _kb_get(row, 'url') or _kb_get(row, 'Link') or _kb_get(row, 'tiktok_url'))
-    is_slide = bool(_kb_get(row, 'isSlideshow', False) or _kb_get(row, 'is_slideshow', False))
-    if '/photo/' in url.lower() or is_slide:
+    is_slide = _kb_slideshow_flag(row)
+    if '/photo/' in url.lower() or is_slide is True:
         return 'photo'
-    if '/video/' in url.lower():
+    if '/video/' in url.lower() or is_slide is False:
         return 'video'
     return 'unknown'
 
@@ -408,7 +447,7 @@ def _slideshow_image_count(row):
     if row is None:
         return None
     candidates = []
-    for key in ['slideshowImageLinks', 'slideshow_images', 'images']:
+    for key in ['slideshowImageLinks', 'slideshow_images', 'images', 'imagePostMeta.images']:
         try:
             candidates.append(row.get(key))
         except Exception:
@@ -427,6 +466,17 @@ def _slideshow_image_count(row):
     return None
 
 
+def _kb_carousel_state(row):
+    """Return required/forbidden/unknown for the structural Carousel label."""
+    url_type = _kb_url_type(row)
+    image_count = _slideshow_image_count(row)
+    if url_type == 'video' or image_count == 1:
+        return 'forbidden'
+    if (image_count is not None and image_count >= 2) or url_type == 'photo':
+        return 'required'
+    return 'unknown'
+
+
 def _kb_valid_labels(labels):
     if isinstance(labels, str):
         labels = [x.strip() for x in labels.split(',')]
@@ -441,29 +491,33 @@ def _kb_valid_labels(labels):
 
 
 def _kb_extract_market(row):
-    # IMPORTANT: source-report campaign market must beat TikTok locationCreated.
-    # locationCreated describes the creator/post origin and can be US/ID/KR/etc.
-    # The tagging benchmark is evaluated by the MelodyIQ source market, so PH/KR/TH
-    # market-specific guardrails should read _campaign_market first.
+    # Campaign/report market and TikTok's locationCreated are different fields.
+    # Market-scoped guardrails must never infer the campaign market from the
+    # platform-reported location of the post or creator.
     vals = [
         _kb_get(row, '_campaign_market'),
-        _kb_get(row, 'Country'), _kb_get(row, 'country'),
+        _kb_get(row, 'Market Code'), _kb_get(row, 'market_code'), _kb_get(row, 'marketCode'),
         _kb_get(row, 'Market'), _kb_get(row, 'market'),
+        _kb_get(row, 'Country'), _kb_get(row, 'country'),
         _kb_get(row, 'Region'), _kb_get(row, 'region'),
-        _kb_get(row, 'locationCreated'),
     ]
     aliases = {
         'malaysia': 'MY', 'my': 'MY', 'philippines': 'PH', 'ph': 'PH', 'phl': 'PH', 'pilipinas': 'PH',
         'singapore': 'SG', 'sg': 'SG', 'thailand': 'TH', 'thai': 'TH', 'th': 'TH',
         'vietnam': 'VN', 'viet nam': 'VN', 'vn': 'VN',
         'korea': 'KR', 'south korea': 'KR', 'republic of korea': 'KR', 'kr': 'KR',
-        'indonesia': 'ID', 'id': 'ID',
+        'indonesia': 'ID', 'indonesian': 'ID', 'id': 'ID', 'idn': 'ID',
     }
+    supported = {'MY', 'PH', 'SG', 'TH', 'VN', 'KR', 'ID'}
     for v in vals:
         s = _kb_norm_text(v).strip()
         if not s:
             continue
-        return aliases.get(s.lower(), s.upper() if len(s) <= 3 else s)
+        canonical = aliases.get(s.lower(), s.upper() if len(s) <= 3 else '')
+        # The first explicit market field is authoritative. Values such as
+        # Other or unsupported countries stay blank and must not fall through
+        # to TikTok location or a lower-priority metadata field.
+        return canonical if canonical in supported else ''
     return ''
 
 
@@ -515,12 +569,11 @@ def creative_kb_lookup(row, result_context=None):
     Fashion, Gaming and Movie/Tv/Drama Edits after Gemini has described the post.
     """
     kb = load_creative_kb()
-    if not any(kb.get(x) for x in ['creator_rules', 'hashtag_rules', 'url_type_rules', 'keyword_rules', 'market_rules', 'track_rules']):
+    if not any(kb.get(x) for x in ['creator_rules', 'hashtag_rules', 'keyword_rules', 'market_rules', 'track_rules']):
         return {"labels": [], "narrative": "", "confidence": 0.0, "total": 0, "source": "", "evidence": []}
 
     creator = _kb_extract_creator(row)
     tags = _kb_extract_hashtags(row)
-    url_type = _kb_url_type(row)
     market = _kb_extract_market(row)
     track = _kb_extract_track(row)
     context_blob = _kb_context_blob(row, result_context)
@@ -558,8 +611,10 @@ def creative_kb_lookup(row, result_context=None):
         add_rule((kb.get('creator_rules') or {}).get(creator), f"creator:{creator}", weight=1.25)
     for h in tags:
         add_rule((kb.get('hashtag_rules') or {}).get(h), f"hashtag:{h}", weight=1.0)
-    if url_type:
-        add_rule((kb.get('url_type_rules') or {}).get(url_type), f"url_type:{url_type}", weight=0.25)
+    # URL type is structural evidence only. A /video/ or unknown URL says
+    # nothing about its semantic content, so url_type_rules are deliberately
+    # excluded from KB candidates and confidence calculations. Photo/Carousel
+    # structure is enforced by _kb_carousel_state instead.
     if market:
         add_rule((kb.get('market_rules') or {}).get(market), f"market:{market}", weight=0.20)
     if track:
@@ -574,7 +629,7 @@ def creative_kb_lookup(row, result_context=None):
     if not candidates:
         return {"labels": [], "narrative": "", "confidence": 0.0, "total": 0, "source": "", "evidence": evidence}
 
-    # Prefer strong creator/track/keyword rules over broad url_type/market rules.
+    # Prefer strong creator/track/keyword rules over broad market rules.
     best = sorted(candidates, key=lambda r: (r['score'], r['confidence'], r['total']), reverse=True)[0]
     return {**best, "evidence": evidence[:8]}
 
@@ -603,15 +658,35 @@ def apply_knowledge_guardrails(result, row=None):
     """
     if row is None or not isinstance(result, dict) or result.get('parse_error'):
         return result
-    hit = creative_kb_lookup(row, result)
-    kb_labels = _kb_valid_labels(hit.get('labels', []))
-    if not kb_labels:
-        return result
-
     labels = result.get('creative_type', [])
     if not isinstance(labels, list):
         labels = []
     labels = [x for x in labels if x in ALLOWED_SET]
+    carousel_state = _kb_carousel_state(row)
+
+    def preserve_structure(candidate_labels):
+        candidate_labels = [x for x in candidate_labels if x in ALLOWED_SET]
+        if carousel_state == 'required':
+            return ['Carousel'] + [x for x in candidate_labels if x != 'Carousel'][:1]
+        return candidate_labels[:2]
+
+    structured_labels = preserve_structure(labels)
+    structural_changed = structured_labels != labels
+    labels = structured_labels
+    if structural_changed:
+        result['creative_type'] = labels
+        old_reason = str(result.get('reasoning', '') or '')
+        format_reason = 'Post-format safeguard: confirmed photo/slideshow structure, so Carousel was preserved.'
+        if format_reason not in old_reason:
+            result['reasoning'] = (old_reason + ' | ' + format_reason).strip(' |')
+
+    hit = creative_kb_lookup(row, result)
+    kb_labels = _kb_valid_labels(hit.get('labels', []))
+    if carousel_state == 'forbidden':
+        kb_labels = [x for x in kb_labels if x != 'Carousel']
+    if not kb_labels:
+        return result
+
     label_set = set(labels)
     kb_set = set(kb_labels)
     try:
@@ -620,27 +695,21 @@ def apply_knowledge_guardrails(result, row=None):
         conf = 0.0
     kb_conf = float(hit.get('confidence', 0) or 0)
     kb_total = int(hit.get('total', 0) or 0)
-    url_type = _kb_url_type(row)
-
     changed = False
-    reason_add = ""
+    reason_add = ''
 
-    # Always preserve true slideshow/photo carousel when Apify says it is a slideshow.
-    if url_type == 'photo' and 'Carousel' not in label_set:
-        labels = ['Carousel'] + [x for x in labels if x != 'Carousel']
-        labels = labels[:2]
-        changed = True
-        reason_add = "KB/post-type guardrail: photo/slideshow post, so Carousel was included."
-
-    # If Gemini already agrees with the KB, just order labels and raise confidence slightly.
+    # Agreement is useful only after repeated reviewed examples. A one-row rule
+    # must not reorder labels or inflate model confidence merely because it agrees.
+    repeated_support = kb_conf >= 0.55 and kb_total >= 3
     if kb_set & set(labels):
-        ordered = [x for x in kb_labels if x in labels] + [x for x in labels if x not in kb_labels]
-        labels = ordered[:2]
-        result['creative_type'] = labels
-        result['confidence'] = max(conf, min(0.92, kb_conf))
-        old = str(result.get('reasoning', '') or '')
-        agree = f"KB support: {hit.get('source','historical signal')} also suggests {', '.join(kb_labels)}."
-        result['reasoning'] = (old + ' | ' + agree).strip(' |')
+        if repeated_support:
+            ordered = [x for x in kb_labels if x in labels] + [x for x in labels if x not in kb_labels]
+            labels = preserve_structure(ordered)
+            result['creative_type'] = labels
+            result['confidence'] = max(conf, min(0.92, kb_conf))
+            old = str(result.get('reasoning', '') or '')
+            agree = f"KB support: {hit.get('source','historical signal')} also suggests {', '.join(kb_labels)}."
+            result['reasoning'] = (old + ' | ' + agree).strip(' |')
         return result
 
     # Strong override only when Gemini is weak/review-ish or KB has repeated high-confidence evidence.
@@ -653,7 +722,7 @@ def apply_knowledge_guardrails(result, row=None):
     motion_obvious = bool(label_set & motion_labels) and (_row_has_motion_cues(row) or _result_has_dance_visual_cues(result))
 
     if (weak_model and strong_kb and not motion_obvious) or (very_strong_kb and not motion_obvious):
-        labels = kb_labels[:2]
+        labels = preserve_structure(kb_labels)
         result['creative_type'] = labels
         if hit.get('narrative') and not _kb_norm_text(result.get('narrative')):
             result['narrative'] = hit.get('narrative')
@@ -666,12 +735,34 @@ def apply_knowledge_guardrails(result, row=None):
         result['reasoning'] = (old + ' | ' + reason_add).strip(' |')
     return result
 
-# Default Gemini model. Keep this aligned with your current working setup.
-# If the video fallback fails for your account/model, change this to another video-capable Gemini model available to you.
-GEMINI_MODEL = 'gemini-3.1-flash-lite'
+# Default Gemini model. The optional 3.5 run and targeted verifier use the same
+# isolated context without sharing mutable model state between sessions.
+GEMINI_MODEL = DEFAULT_GEMINI_MODEL
+_GEMINI_MODEL_CONTEXT = ContextVar('ugc_gemini_model', default=GEMINI_MODEL)
 
-# Runtime safety: full-video uploads are slow and can look like the app is hanging.
-# Keep this off by default; frame-based Tier 2A/2B still runs.
+
+def current_gemini_model():
+    """Return the model selected for the current tagging execution context."""
+    return normalize_gemini_model(_GEMINI_MODEL_CONTEXT.get())
+
+
+@contextmanager
+def gemini_model_context(model_id):
+    """Temporarily select one approved model for this execution."""
+    selected = normalize_gemini_model(model_id)
+    model_token = _GEMINI_MODEL_CONTEXT.set(selected)
+    try:
+        yield selected
+    finally:
+        _GEMINI_MODEL_CONTEXT.reset(model_token)
+
+
+def _throttle_gemini_request():
+    """Reserved request hook; both approved Flash models use normal retries."""
+    return
+
+# Runtime safety: full-video uploads are slow, so they run only after the cover,
+# 3-frame and 9-frame passes remain unresolved.
 ENABLE_TIER2C_FULL_VIDEO_FALLBACK = True
 ENABLE_LEGACY_TIER0_VAGUE_SHORTCUT = False
 ENABLE_TARGETED_EVIDENCE_VERIFIER = True
@@ -1220,8 +1311,13 @@ DANCE_VISUAL_CUES = [
     # because PH tracks such as "Raindance" were causing lyric videos to become Dance.
     'dancing', 'dances', 'dancer', 'choreo', 'choreography', 'dance challenge',
     'synchronized', 'synchronised', 'sync movement', 'coordinated movement',
-    'full-body', 'full body', 'body movement', 'rhythmic body movement', 'rhythmic dance', 'performs a rhythmic dance',
-    'hand gesture', 'hand gestures', 'dance move', 'dance formation', 'group dance',
+    'full-body', 'full body', 'upper-body choreography', 'upper body choreography',
+    'body movement', 'rhythmic body movement', 'rhythmic dance', 'performs a rhythmic dance',
+    'hand gesture dance', 'hand-gesture dance', 'hand choreography',
+    'rhythmic hand gesture', 'rhythmic hand gestures', 'rhythmic hand movement',
+    'rhythmic hand movements', 'repeated hand gesture', 'repeated hand gestures',
+    'coordinated hand movement', 'coordinated hand movements',
+    'dance move', 'dance formation', 'group dance',
     'dance practice', 'dance routine', 'dance tutorial', 'dance performance', 'performs a dance',
     'performing a dance', 'performs rhythmic', 'perform rhythmic', 'repeated body movement',
     'dance-like motion', 'dance-like movement', 'rhythmic paw movement',
@@ -1251,20 +1347,13 @@ LYRICS_TRANSLATION_CUES = [
 
 
 def _result_text_blob(result):
-    """Use Gemini narrative/details/reasoning only, not the predicted label itself.
+    """Return direct Gemini observations, not labels or decision reasoning.
 
-    The old version appended creative_type labels to this blob. That made any result
-    already labelled Dance count as having a dance cue, which reinforced false positives.
+    Reasoning frequently explains why a label was rejected (for example, "not
+    a lyric video"). Treating that explanation as visual evidence creates a
+    circular false positive in later guardrails.
     """
-    if not isinstance(result, dict):
-        return ''
-    parts = []
-    for k in ['narrative', 'content_details', 'reasoning']:
-        v = result.get(k, '')
-        if isinstance(v, list):
-            v = ' '.join(map(str, v))
-        parts.append(str(v))
-    return ' '.join(parts).lower()
+    return _result_observation_blob(result)
 
 
 def _result_observation_blob(result):
@@ -1294,8 +1383,53 @@ def _has_phrase(blob, phrases):
     return any(p in blob for p in phrases)
 
 
+def _signal_match_is_negated(blob, start, end):
+    """Return True when an evidence phrase is explicitly absent or rejected."""
+    text = str(blob or '').lower()
+    matched = text[start:end]
+    if re.search(r"\b(?:no|not|never|without|neither|lacks?|lacking|absent|unsupported|unconfirmed|unclear)\b", matched):
+        return True
+
+    # Do not let a negation cross a sentence or contrast boundary. This keeps
+    # "no posing, but then performs choreography" as positive choreography.
+    before = text[max(0, start - 96):start]
+    before = re.split(r"[.!?;]|\b(?:but|however|although|though|yet)\b", before)[-1]
+    negated_prefix = re.search(
+        r"\b(?:no|not|never|without|neither|lacks?|lacking|unsupported|unconfirmed|unclear)\b"
+        r"(?:[\s,:/()\-]+\w+){0,5}[\s,:/()\-]*$",
+        before,
+    )
+    if negated_prefix:
+        return True
+
+    after = text[end:min(len(text), end + 64)]
+    return bool(re.match(
+        r"^\s*(?:(?:is|are|was|were|seems?|appears?|looks?)\s+)?"
+        r"(?:not|never|absent|missing|unsupported|unconfirmed|unclear)\b",
+        after,
+    ))
+
+
+def _has_non_negated_literals(blob, phrases):
+    text = str(blob or '').lower()
+    for phrase in phrases:
+        for match in re.finditer(re.escape(str(phrase).lower()), text):
+            if not _signal_match_is_negated(text, match.start(), match.end()):
+                return True
+    return False
+
+
+def _has_non_negated_patterns(blob, patterns):
+    text = str(blob or '').lower()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            if not _signal_match_is_negated(text, match.start(), match.end()):
+                return True
+    return False
+
+
 def _has_strong_dance_phrase(blob):
-    if _has_phrase(blob, DANCE_VISUAL_CUES):
+    if _has_non_negated_literals(blob, DANCE_VISUAL_CUES):
         return True
     # Accept exact word "dance" only when it appears in an action phrase, not inside song titles.
     action_patterns = [
@@ -1304,12 +1438,18 @@ def _has_strong_dance_phrase(blob):
         r"\bperforms?\s+(a\s+)?(rhythmic\s+)?dance\b",
         r"\b(dance|dancing)\s+(challenge|routine|practice|tutorial|moves|performance)",
         r"\bfull[- ]body\s+(movement|choreography|dance)",
+        r"\bupper[- ]body\s+(movement|choreography|dance)",
+        r"\b(?:rhythmic|repeated|coordinated|synchroni[sz]ed)\s+(?:hand|arm)\s+(?:gesture|movement|motion|move)s?\b",
+        r"\b(?:hand|arm)\s+(?:gesture|movement|motion|move)s?\b.{0,40}\b(?:in sync|synchroni[sz]ed|to the (?:beat|music|song)|rhythmic|choreograph\w*)\b",
+        r"\b(?:gesture|movement|move)s?\b.{0,35}\bchange\w*\b.{0,35}\b(?:in sync|with the (?:beat|music|song))\b",
+        r"\bsimple\s+(?:hand[- ]gesture\s+)?dance\b",
+        r"\b(?:wiggles?|waves?)\b.{0,24}\brhythmically\b",
     ]
-    return any(re.search(p, blob) for p in action_patterns)
+    return _has_non_negated_patterns(blob, action_patterns)
 
 
 def _result_has_dance_visual_cues(result):
-    blob = _result_text_blob(result)
+    blob = _result_observation_blob(result)
     if _result_has_lyric_visual_cues(result):
         # Lyric displays are not Dance just because the song title or style mentions dance.
         return False
@@ -1319,7 +1459,7 @@ def _result_has_dance_visual_cues(result):
 def _has_lyric_language(blob):
     """Detect lyric-display wording beyond exact phrase matches."""
     blob = str(blob or '').lower()
-    if _has_phrase(blob, LYRICS_VISUAL_CUES + LYRICS_TRANSLATION_CUES):
+    if _has_non_negated_literals(blob, LYRICS_VISUAL_CUES + LYRICS_TRANSLATION_CUES):
         return True
     patterns = [
         r"\blyric(s)?\b.{0,50}\b(display|displayed|show|shown|screen|center|central|visible|text|overlay|overlaid|caption|captions|line|lines|video)\b",
@@ -1330,12 +1470,27 @@ def _has_lyric_language(blob):
         r"\bwords?\s+of\s+the\s+song\b",
         r"\bsong\s+text\b",
     ]
-    return any(re.search(p, blob) for p in patterns)
+    return _has_non_negated_patterns(blob, patterns)
 
 
 def _result_has_lyric_visual_cues(result):
-    blob = _result_text_blob(result)
-    return _has_lyric_language(blob)
+    blob = _result_observation_blob(result)
+    # Mouthing or singing song lyrics is performance evidence, not proof that
+    # lyric text is visibly displayed. Remove those action phrases before the
+    # lyric-display detector runs so they cannot suppress Dance recovery.
+    visible_blob = re.sub(
+        r"\b(?:mouths?|mouthing|lip[- ]?sync(?:s|ing)?|sings?|singing)\b.{0,35}\b(?:song\s+)?lyrics?\b",
+        " ",
+        blob,
+        flags=re.I,
+    )
+    visible_blob = re.sub(
+        r"\b(?:song\s+)?lyrics?\b.{0,35}\b(?:mouths?|mouthing|lip[- ]?sync(?:s|ing)?|sings?|singing)\b",
+        " ",
+        visible_blob,
+        flags=re.I,
+    )
+    return _has_lyric_language(visible_blob)
 
 
 def _row_has_lyric_account_cue(row):
@@ -1476,13 +1631,13 @@ def apply_kr_track_dance_guardrails(result, row=None):
 
 
 def _result_has_translation_cues(result):
-    blob = _result_text_blob(result)
-    return _has_phrase(blob, LYRICS_TRANSLATION_CUES)
+    blob = _result_observation_blob(result)
+    return _has_non_negated_literals(blob, LYRICS_TRANSLATION_CUES)
 
 
 def _result_is_clear_lipsync_only(result):
-    blob = _result_text_blob(result)
-    has_lipsync = ('lip sync' in blob or 'lipsync' in blob or 'mouthing' in blob or 'mouth' in blob)
+    blob = _result_observation_blob(result)
+    has_lipsync = _has_non_negated_literals(blob, ['lip sync', 'lipsync', 'mouthing', 'mouth'])
     has_dance = _has_strong_dance_phrase(blob)
     has_non_dance = any(cue in blob for cue in NON_DANCE_LIPSYNC_CUES)
     return has_lipsync and has_non_dance and not has_dance
@@ -1506,7 +1661,7 @@ def apply_lyrics_guardrails(result, row=None):
 
     lyric_cue = _result_has_lyric_visual_cues(result)
     translation_cue = _result_has_translation_cues(result)
-    dance_cue = _has_strong_dance_phrase(_result_text_blob(result))
+    dance_cue = _has_strong_dance_phrase(_result_observation_blob(result))
     market = _row_market_code(row)
     is_ph = market == 'PH'
     row_blob = _row_text_blob_for_safety(row)
@@ -2517,6 +2672,8 @@ def apply_static_non_dance_guardrail(result, row=None):
         r'dance routine', r'dance practice', r'synchronized (?:dance|movement)',
         r'coordinated (?:dance|movement)', r'body rolls?', r'repeated body movement',
         r'performs? (?:a |the )?(?:rhythmic )?dance',
+        r'(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?',
+        r'(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)',
     ])
     static_or_edit = any(re.search(pattern, details, flags=re.I) for pattern in [
         r'static.{0,30}(?:shot|shots|image|images)',
@@ -2611,6 +2768,9 @@ def apply_content_details_consistency_guardrail(result, row=None):
         r'dance challenge', r'dance steps?', r'synchronized (?:dance|movement)',
         r'coordinated dance', r'repeated (?:rhythmic )?body movement',
         r'rhythmic body movements?', r'dance[- ]like (?:motion|movement)',
+        r'(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?',
+        r'(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)',
+        r'hand[- ]gesture dance', r'hand choreography',
         r'rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)',
         r'moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))',
     ])
@@ -2767,6 +2927,8 @@ def apply_v66_semantic_consistency_guardrail(result, row=None):
         r'choreograph', r'dance (?:routine|challenge|performance|practice)',
         r'synchroni[sz]ed (?:dance|movement)', r'coordinated dance',
         r'repeated rhythmic (?:body|hand) movement', r'hand[- ]gesture dance',
+        r'(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?',
+        r'(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)',
         r'performs? (?:a |the )?(?:rhythmic )?dance', r'dance moves?',
         r'dance[- ]like (?:motion|movement)',
         r'rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)',
@@ -2898,7 +3060,7 @@ def apply_v66_semantic_consistency_guardrail(result, row=None):
 
     explicit_pov = has([
         r'\bpov\s*[:\-]', r'\bpoint of view\b',
-        r'\bfirst[- ]person (?:perspective|view|camera|shot|footage|journey|experience)',
+        r'\bfirst[- ]person (?:perspective|view|journey|experience|scenario|roleplay)',
         r'(?:from|through) (?:the )?(?:viewer|creator|camera)(?:\'s)? perspective',
         r'(?:viewer|camera) (?:moves|travels|walks|slides|climbs|crosses|rides|enters|follows)',
         r'(?:acted|role[- ]?played?) (?:pov|first[- ]person) scenario',
@@ -3145,6 +3307,8 @@ def apply_v67_evidence_contradiction_guardrail(result, row=None):
         r'choreograph', r'dance (?:routine|challenge|performance|practice|moves?)',
         r'synchroni[sz]ed (?:dance|movement)', r'coordinated dance',
         r'repeated rhythmic (?:body|hand) movement', r'hand[- ]gesture dance',
+        r'(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?',
+        r'(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)',
         r'performs? (?:a |the )?(?:rhythmic )?dance',
     ]) and not has([
         r'dancing slightly', r'moves? (?:slightly|forward and backward|to the beat)',
@@ -3162,51 +3326,38 @@ def apply_v67_evidence_contradiction_guardrail(result, row=None):
 
 
 def apply_single_image_carousel_guardrail(result, row=None):
-    """Normalize Carousel using the confirmed slideshow image count."""
+    """Enforce Carousel from explicit post structure, never semantic guesses."""
     if not isinstance(result, dict) or result.get('parse_error'):
         return result
     labels = result.get('creative_type', [])
     if not isinstance(labels, list):
         return result
+    labels = [label for label in labels if label in ALLOWED_SET]
     image_count = _slideshow_image_count(row)
-    raw_slideshow = None
-    try:
-        if 'isSlideshow' in row:
-            raw_slideshow = row.get('isSlideshow')
-        elif 'is_slideshow' in row:
-            raw_slideshow = row.get('is_slideshow')
-    except Exception:
-        pass
-    confirmed_video_mode = (
-        raw_slideshow is False
-        or str(raw_slideshow).strip().lower() in {'false', '0', 'no'}
-    )
+    carousel_state = _kb_carousel_state(row)
 
-    if confirmed_video_mode and 'Carousel' in labels:
-        remaining = [label for label in labels if label in ALLOWED_SET and label != 'Carousel']
+    if carousel_state == 'forbidden' and 'Carousel' in labels:
+        remaining = [label for label in labels if label != 'Carousel']
         if not remaining:
             remaining = ['Slice of Life']
         result['creative_type'] = remaining[:2]
         old_reason = str(result.get('reasoning', '') or '')
-        reason = 'Post-format safeguard: Apify confirmed normal video mode, so Carousel was removed from the photo/video montage.'
+        if image_count == 1:
+            reason = 'Post-format safeguard: Apify confirmed only one slideshow image, so Carousel was removed.'
+        else:
+            reason = 'Post-format safeguard: Apify confirmed normal video mode, so Carousel was removed from the photo/video montage.'
         if reason not in old_reason:
             result['reasoning'] = (old_reason + ' | ' + reason).strip(' |')
         return result
 
-    if image_count is not None and image_count >= 2 and 'Carousel' in labels:
-        result['creative_type'] = ['Carousel'] + [label for label in labels if label != 'Carousel'][:1]
-        return result
-    if image_count != 1 or 'Carousel' not in labels:
-        return result
-
-    remaining = [label for label in labels if label in ALLOWED_SET and label != 'Carousel']
-    if not remaining:
-        remaining = ['Slice of Life']
-    result['creative_type'] = remaining[:2]
-    old_reason = str(result.get('reasoning', '') or '')
-    reason = 'Post-format safeguard: Apify confirmed only one slideshow image, so Carousel was removed.'
-    if reason not in old_reason:
-        result['reasoning'] = (old_reason + ' | ' + reason).strip(' |')
+    if carousel_state == 'required':
+        structured = ['Carousel'] + [label for label in labels if label != 'Carousel'][:1]
+        if structured != labels:
+            result['creative_type'] = structured
+            old_reason = str(result.get('reasoning', '') or '')
+            reason = 'Post-format safeguard: confirmed photo/slideshow structure, so Carousel was preserved.'
+            if reason not in old_reason:
+                result['reasoning'] = (old_reason + ' | ' + reason).strip(' |')
     return result
 
 
@@ -3661,6 +3812,223 @@ def coerce_gemini_result(obj):
         result.setdefault('parse_error', True)
     return result
 
+
+def apply_v68_41_3_general_accuracy_guardrail(result, row=None):
+    """Resolve only high-signal, cross-market contradictions from reviewed UGC.
+
+    The rules use reusable descriptions such as rhythmic hand choreography,
+    attributed quote formatting and explicit edit/source language. They never
+    use creator handles, track names or exact TikTok URLs as label memory.
+    Ambiguous local humour, scenic footage and camera-angle-only POV cases are
+    intentionally left to review routing instead of being force-corrected.
+    """
+    if not isinstance(result, dict) or result.get('parse_error'):
+        return result
+
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    if not labels:
+        return result
+
+    narrative = str(result.get('narrative', '') or '').lower()
+    details = str(result.get('content_details', '') or '').lower()
+    observation = f'{narrative} {details}'
+    caption = _row_text_blob_for_safety(row)
+    evidence = f'{observation} {caption}'
+    image_count = _slideshow_image_count(row)
+    structural_carousel = (
+        _kb_url_type(row) == 'photo'
+        and image_count != 1
+        and ('Carousel' in labels or _kb_slideshow_flag(row) is True)
+    )
+
+    def has(patterns, blob=observation):
+        return any(re.search(pattern, blob, flags=re.I) for pattern in patterns)
+
+    def commit(new_labels, reason):
+        nonlocal labels
+        clean = []
+        for label in new_labels:
+            if label in ALLOWED_SET and label not in clean:
+                clean.append(label)
+        if not clean:
+            return
+        result['creative_type'] = clean[:2]
+        labels = list(result['creative_type'])
+        old_reason = str(result.get('reasoning', '') or '')
+        if reason not in old_reason:
+            result['reasoning'] = (old_reason + ' | ' + reason).strip(' |')
+
+    # Source identity outranks generic motion/semantic labels when Gemini itself
+    # clearly describes an edit or montage.
+    drama_edit = has([
+        r'k[- ]?drama (?:edit|scene|montage|clips?)',
+        r'(?:movie|tv|drama|anime|web series) (?:edit|scene montage|clip montage)',
+        r'fan[- ]made edit.{0,65}(?:k[- ]?drama|movie|tv|anime|fictional)',
+        r'montage of (?:fictional |dramatic )?(?:scenes|characters)',
+        r'clips? from (?:a |the )?(?:romantic )?(?:k[- ]?drama|movie|tv show|anime|web series)',
+    ])
+    celebrity_edit = has([
+        r'(?:fan|celebrity|idol|artist|actor|actress|athlete|public figure) (?:edit|montage|compilation)',
+        r'fan[- ]made (?:edit|montage).{0,55}(?:real |k[- ]?pop )?(?:celebrity|idol|artist|actor|actress|athlete)',
+        r'(?:k[- ]?pop|real) (?:celebrity|idol|artist|actor|actress).{0,45}(?:edit|montage|compilation)',
+        r'fancam (?:edit|montage|compilation)',
+        r'(?:fanfiction|fan fiction|fictional (?:story|conversation|narrative)).{0,110}(?:k[- ]?pop|idols?|celebrit(?:y|ies)|public figures?|artists?|actors?|actresses?)',
+        r'(?:k[- ]?pop|idols?|celebrit(?:y|ies)|public figures?|artists?|actors?|actresses?).{0,110}(?:fanfiction|fan fiction|fictional (?:story|conversation|narrative))',
+    ])
+    if drama_edit:
+        keep = next((label for label in ['Relationship', 'Lyrics Translation', 'Lyrics'] if label in labels), None)
+        desired = ['Movie/Tv/Drama Edits'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.3 source safeguard: explicit fictional/drama edit wording was prioritised over a generic label.')
+    elif celebrity_edit:
+        keep = next((label for label in ['Dance', 'Relationship', 'Fashion'] if label in labels), None)
+        desired = ['Celebrity Edits'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.3 source safeguard: explicit real-person fan-edit wording was prioritised.')
+
+    # A seated, close-up or upper-body trend can still be Dance. The evidence
+    # must describe choreography or rhythmic/repeated/coordinated hand/arm moves;
+    # generic expressive gestures remain Lip Sync or review.
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    strong_dance = _has_strong_dance_phrase(observation) and not _result_has_lyric_visual_cues(result)
+    if strong_dance and not drama_edit and not celebrity_edit:
+        keep = next(
+            (label for label in labels if label in {
+                'Fitness', 'Relationship', 'Comedy', 'Fashion', 'Beauty',
+                'Travel', 'Lip Sync', 'Slice of Life'
+            }),
+            None,
+        )
+        desired = ['Dance'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.3 motion safeguard: explicit rhythmic hand/upper-body choreography supports Dance; full-body framing is not required.')
+
+    # Explicitly humorous purpose outranks incidental mouthing, eating, gaming
+    # or everyday setting. Preserve only a genuinely meaningful secondary
+    # purpose; do not keep Lip Sync merely because the creator mouths audio.
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    explicit_comedy = has([
+        r'\bfunny (?:personal )?(?:anecdote|story|incident|moment|interaction)\b',
+        r'\bhumorous (?:anecdote|story|interaction|scenario|skit)\b',
+        r'\bcomedic (?:anecdote|story|interaction|scenario|skit)\b',
+        r'\b(?:joke|meme|prank|punchline|mock kiss|cortisol meme)\b',
+        r'playful and humorous',
+    ])
+    if explicit_comedy and not drama_edit and not celebrity_edit:
+        keep = next((label for label in ['Gaming', 'Relationship', 'Dance'] if label in labels), None)
+        desired = ['Comedy'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.6 comedy-purpose safeguard: explicit joke, meme or humorous-story evidence was prioritised over incidental performance.')
+
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    visible_lyrics = _result_has_lyric_visual_cues(result)
+    translation_patterns = [
+        r'translated (?:song )?lyrics?', r'lyrics? translation', r'bilingual lyrics?',
+        r'original and translated lyrics?', r'lyrics?.{0,50}(?:translation|translated|bilingual)',
+        r'(?:translation|translated|bilingual).{0,50}lyrics?',
+    ]
+    translation_evidence = _has_non_negated_patterns(observation, translation_patterns)
+    lip_sync_evidence = has([
+        r'lip[- ]?sync', r'mouths? (?:along|the lyrics|song lyrics)',
+        r'mouthing (?:along|the lyrics|song lyrics)', r'sings? along to',
+    ])
+    if 'Lyrics Translation' in labels and not translation_evidence:
+        if visible_lyrics:
+            protected_primary = next((label for label in ['Movie/Tv/Drama Edits', 'Celebrity Edits', 'Dance'] if label in labels), None)
+            desired = ([protected_primary, 'Lyrics'] if protected_primary else ['Lyrics'] + [label for label in labels if label not in {'Lyrics Translation', 'Lyrics'}])
+            commit(desired, 'V68.41.3 translation safeguard: visible lyrics without bilingual/translation evidence use Lyrics, not Lyrics Translation.')
+        elif lip_sync_evidence:
+            protected_primary = next((label for label in ['Movie/Tv/Drama Edits', 'Celebrity Edits', 'Dance'] if label in labels), None)
+            desired = ([protected_primary, 'Lip Sync'] if protected_primary else ['Lip Sync'] + [label for label in labels if label not in {'Lyrics Translation', 'Lip Sync'}])
+            commit(desired, 'V68.41.3 translation safeguard: mouthing lyrics without visible translation evidence uses Lip Sync.')
+
+    # Quote is the content format when an attributed saying or quote card is the
+    # main visual. Reflection/Relationship may describe its meaning, but not
+    # replace the primary quote format.
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    quote_format = has([
+        r'(?:prominent|main|central|overlaid|on[- ]screen) (?:text )?(?:quote|quotation|saying)',
+        r'(?:on[- ]screen|onscreen|overlaid) text.{0,80}(?:quote|quotation|saying)',
+        r'(?:quote|quotation|saying).{0,80}(?:on[- ]screen|onscreen|overlaid) text',
+        r'(?:quote|quotation) (?:card|post|text|overlay)', r'standalone (?:quote|saying)',
+        r'(?:teacher|mother|father|friend|someone) once (?:said|told)',
+        r'(?:attributed|presented) (?:as|to).{0,35}(?:quote|saying)',
+        r'\b(?:wise|motivational|inspirational|emotional|relationship) (?:teacher )?(?:quote|saying)\b',
+        r"\b(?:teacher|mother|father|friend|someone)(?:'s)? (?:quote|saying)\b",
+        r'(?:quote|saying).{0,80}(?:displayed|shown|presented).{0,35}(?:on[- ]screen|overlay)',
+    ], observation)
+    if quote_format and not visible_lyrics and not drama_edit:
+        semantic = 'Relationship' if ('Relationship' in labels or has([r'romantic|relationship|partner|love'], evidence)) else None
+        desired = (['Carousel', 'Quotes'] if structural_carousel else ['Quotes'] + ([semantic] if semantic else []))
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.3 quote-format safeguard: an attributed or explicitly presented quote was prioritised over its emotional theme.')
+
+    # Literal POV framing in visible text is an explicit format cue, not merely
+    # a camera-angle inference. Keep at most one genuinely supported theme.
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    explicit_pov_prompt = has([
+        r'(?:on[- ]screen|onscreen|overlaid|overlay) text.{0,80}(?<![a-z0-9])pov(?![a-z0-9])',
+        r'\bpov\s*[:\-].{0,100}(?:scenario|caption|text|prompt|setup)',
+        r'(?:caption|text) (?:starts|begins|reads|says).{0,35}\bpov\b',
+    ], evidence)
+    if explicit_pov_prompt and not drama_edit:
+        keep = next((label for label in ['Comedy', 'Relationship', 'Dance', 'Beauty', 'Lip Sync'] if label in labels), None)
+        desired = ['POV'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.6 POV-text safeguard: literal visible POV framing was prioritised over incidental appearance or performance.')
+
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    fashion_format = has([
+        r'fit check', r'\bootd\b', r'outfit showcase', r'showcases? (?:her|his|their|an?) outfit',
+        r'full[- ](?:black|white|colour|color) (?:look|outfit)', r'mirror outfit check',
+    ], evidence)
+    if (
+        fashion_format
+        and not strong_dance
+        and not drama_edit
+        and not celebrity_edit
+        and not quote_format
+        and not explicit_pov_prompt
+    ):
+        keep = next((label for label in ['Beauty', 'Lip Sync'] if label in labels), None)
+        desired = ['Carousel', 'Fashion'] if structural_carousel else ['Fashion'] + ([keep] if keep else [])
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.3 fashion safeguard: explicit OOTD/fit-check evidence was prioritised over incidental performance.')
+
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    relationship_purpose = has([
+        r'relationship dynamics?', r'couple.s daily (?:interaction|interactions|life)',
+        r'couple.s relationship moments?', r'personal photos.{0,60}relationship moments?',
+        r'romantic couple.{0,45}(?:interaction|daily moment|affection)',
+    ])
+    if relationship_purpose and 'Relationship' not in labels and not drama_edit:
+        if structural_carousel:
+            desired = ['Carousel', 'Relationship']
+        elif strong_dance:
+            desired = ['Dance', 'Relationship']
+        else:
+            desired = ['Relationship']
+        commit(desired, 'V68.41.3 relationship safeguard: explicit couple/relationship dynamics were preserved as the content purpose.')
+
+    # Singapore CCA/school-life posts are ordinary shared student experiences,
+    # not generic relationship/reflection prompts. Keep this narrow so teacher
+    # quotes and genuinely instructional school content are not overwritten.
+    labels = [label for label in result.get('creative_type', []) if label in ALLOWED_SET]
+    sg_school_life = _row_market_code(row) == 'SG' and has([
+        r'\bcca\b', r'co[- ]curricular activit(?:y|ies)', r'\bschool[- ]life\b',
+        r'\bcampus[- ]life\b', r'relatable (?:school|student) experience',
+    ], evidence)
+    instructional_school = has([
+        r'step[- ]by[- ]step', r'teaches? (?:the )?(?:viewer|student)',
+        r'explains? how', r'instructional (?:guide|steps?)',
+    ], evidence)
+    if sg_school_life and not quote_format and not instructional_school and not drama_edit and not celebrity_edit:
+        desired = ['Carousel', 'Slice of Life'] if structural_carousel else ['Slice of Life']
+        if labels[:2] != desired:
+            commit(desired, 'V68.41.6 SG school-life safeguard: explicit CCA/campus-life wording was classified as an everyday student experience.')
+
+    return result
+
 def apply_post_guardrails(result, row=None):
     """Single post-processing path with market-aware guardrails."""
     result = coerce_gemini_result(result)
@@ -3682,6 +4050,7 @@ def apply_post_guardrails(result, row=None):
     result = apply_content_details_consistency_guardrail(result, row)
     result = apply_v66_semantic_consistency_guardrail(result, row)
     result = apply_v67_evidence_contradiction_guardrail(result, row)
+    result = apply_v68_41_3_general_accuracy_guardrail(result, row)
     result = apply_single_image_carousel_guardrail(result, row)
     result = coerce_gemini_result(result)
     final_labels = list(result.get('creative_type', []))
@@ -3704,17 +4073,19 @@ def build_prompt(row):
     music      = row.get('musicMeta.musicName','')
     music_auth = row.get('musicMeta.musicAuthor','')
     duration   = row.get('videoMeta.duration','')
-    location   = row.get('locationCreated','')
+    campaign_market = _kb_extract_market(row) or '(not provided)'
+    tiktok_location = _kb_norm_text(row.get('locationCreated', '')) or '(not reported)'
     play       = row.get('playCount', 0)
     likes      = row.get('diggCount', 0)
     shares     = row.get('shareCount', 0)
     saves      = row.get('collectCount', 0)
-    is_slide   = row.get('isSlideshow', False)
+    slideshow_flag = _kb_slideshow_flag(row)
+    is_slide = 'true' if slideshow_flag is True else ('false' if slideshow_flag is False else 'unknown')
     slide_count = _slideshow_image_count(row)
     slide_count_display = slide_count if slide_count is not None else 'unknown'
     allowed_str = '\n'.join(f'  - {t}' for t in ALLOWED_CREATIVE_TYPES)
     return f"""You are a senior TikTok UGC content analyst for Universal Music Group.
-Your task is to classify TikTok posts for music marketing analysis across Malaysia, Philippines, Singapore, Korea, Thailand, Vietnam and wider SEA markets.
+Your task is to classify TikTok posts for music marketing analysis across Southeast Asia and other markets.
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON.
 
@@ -3723,7 +4094,8 @@ Caption: {caption}
 Hashtags: {htag_str}
 Creator: {author}
 Music: {music} by {music_auth}
-Duration: {duration}s | Market: {location} | Is Slideshow: {is_slide} | Confirmed Slideshow Images: {slide_count_display}
+Campaign Market: {campaign_market} | TikTok-reported Location: {tiktok_location}
+Duration: {duration}s | Is Slideshow: {is_slide} | Confirmed Slideshow Images: {slide_count_display}
 Plays: {play:,} | Likes: {likes:,} | Shares: {shares:,} | Saves: {saves:,}
 Historical KB: {kb_hint}
 
@@ -3737,7 +4109,7 @@ Ask: "What type of TikTok content is this?" rather than "What objects appear in 
 
 Examples:
 - A person dancing in a mall is Dance, not Slice of Life.
-- Full-body choreography or synchronized movement is Dance, even if the caption is romantic or the creator mouths lyrics.
+- Full-body, upper-body or rhythmic hand/arm choreography is Dance, even if the creator is seated, framed close-up, mouths lyrics, or uses only a small repeated trend movement. Full-body framing is not required.
 - A person mouthing lyrics in a bedroom is Lip Sync only when mouth/face performance is the main action and there is little/no choreography.
 - A static or aesthetic video showing song lyrics/text as the central focus is Lyrics, not Dance.
 - A drama/anime/movie scene edit is Movie/Tv/Drama Edits, not Slice of Life.
@@ -3745,10 +4117,14 @@ Examples:
 - A makeup routine is Beauty, not Fashion, even if the outfit is nice.
 - Makeup advice, eye-shape guidance and cosmetic tips are Beauty even when presented as a photo carousel.
 - A supportive personal message is Reflection, not Lyrics, unless the text is explicitly identified as song lyrics.
+- When a prominent attributed saying or quote is the main visual format, use Quotes even if its meaning is reflective or romantic; Relationship can be secondary.
 - A question, viewer prompt or challenge is not POV by itself. POV requires explicit first-person, viewer-perspective or acted-scenario framing.
 - Celebrity Edits requires a real public figure. An AI-generated or fictional singer is not a celebrity edit; classify the musical performance as Cover when clearly shown.
+- A fan recording an original artist performing at a concert is not the fan's Cover. Cover requires the creator/featured performer to present their own rendition.
+- A casual commute, local road, sunset or rainbow capture is normally Slice of Life, not Travel, unless a trip, destination, tourism or journey is the central purpose.
 
 === OUTPUT RULES ===
+- Campaign Market is workflow context; TikTok-reported Location is platform metadata. Do not use either field as proof of content format, subject identity, or setting, and never substitute TikTok-reported Location for Campaign Market.
 - Creative Type: return 1 or 2 labels only.
 - Include Carousel only when the post has at least 2 confirmed slideshow images.
 - If Confirmed Slideshow Images is 1, do NOT use Carousel; classify the single image by its content.
@@ -3791,9 +4167,9 @@ Do not force narrative into one label like Relationship or Lifestyle if a more s
 1. Is this a slideshow/photo carousel? If yes, include Carousel.
 2. Is the main content from a movie, drama, TV show, anime, web series or fictional scene? Use Movie/Tv/Drama Edits. A polished montage of the same recurring couple/characters across multiple cinematic settings is normally a drama edit, not Dance or ordinary Relationship content.
 3. Is the main content a fan edit/montage of a real celebrity, idol, singer, actor, athlete, influencer or public figure? Use Celebrity Edits.
-4. Is visible choreography, repeated body movement, dance challenge, or synchronized/group movement the main focus? Use Dance.
+4. Is visible full-body, upper-body, rhythmic hand/arm choreography, repeated trend movement, dance challenge, or synchronized/group movement the main focus? Use Dance. The creator may be seated or close-up; full-body framing is not required.
 5. Is the creator mainly mouthing/singing lyrics with little/no choreography? Use Lip Sync. If choreography is visible, Dance wins over Lip Sync.
-6. Is the creator performing a cover, singing/playing an instrument as their own performance? Use Cover.
+6. Is the creator/featured performer singing or playing an instrument as their own rendition? Use Cover. Do not use Cover merely because a fan records the original artist's live concert.
 7. Is the main focus makeup, skincare, hair, nails or cosmetics? Use Beauty. A distinctive or deliberately showcased makeup look may combine Beauty + Lip Sync when the creator is also clearly mouthing the audio.
 8. Is the main focus clothing, outfit styling, OOTD, fit check or fashion haul? Use Fashion.
 9. Is the main message romantic love, longing, heartbreak, partner dynamics or affection for someone special? Use Relationship.
@@ -3801,10 +4177,10 @@ Do not force narrative into one label like Relationship or Lifestyle if a more s
 11. Is the main purpose humour, joke, meme, prank or comedic skit? Use Comedy.
 12. Are song words visibly displayed as the main content? Use Lyrics when the words stay in the song's original language. Use Lyrics Translation only when the post explicitly translates/explains those lyrics in another language, normally with both original and translated text visible. Ordinary captions, quotes and dialogue subtitles are not Lyrics.
 13. Is the post educational/informative/tutorial/review/news/tips/DIY/product recommendation? Use Media/Infotainment.
-14. Is the main visual focus destination/scenery/vacation/travel vlog? Use Travel.
+14. Is a trip, destination, tourism experience, vacation or travel vlog the central purpose? Use Travel. Ordinary local scenery, a commute, sunset, rainbow or city drive alone is Slice of Life.
 15. Is the main focus gameplay/game UI/game characters/game edit? Use Gaming.
 16. Is the main focus workout, gym, sport training, physique, exercise or flexing? Use Fitness.
-17. Is it mainly a quote card/text quote? Use Quotes.
+17. Is it mainly a quote card, attributed saying, teacher/friend "once said" line, or prominent prose presented as a quote? Use Quotes. Its romantic or reflective meaning may be the second label.
 18. Is it personal introspection, self-growth, emotional reflection or life lesson? Use Reflection.
 19. Is it ordinary daily life without a stronger specific label? Use Slice of Life.
 
@@ -3812,21 +4188,21 @@ Do not force narrative into one label like Relationship or Lifestyle if a more s
 
 1) Dance
 Definition: Dance performance or choreography is the dominant content format.
-Use for: dance challenge, choreography, hand gesture dance, group dance, idol dance challenge, dance tutorial, dance practice, dance trend.
+Use for: dance challenge, choreography, rhythmic/repeated hand-gesture dance, upper-body dance, group dance, idol dance challenge, dance tutorial, dance practice, dance trend.
 Do NOT confuse with:
 - Lip Sync: mouth movement/singing with no dominant choreography.
 - Slice of Life: everyday location does not matter if the main action is dancing.
 - Celebrity Edits: if the video is mainly an idol/celebrity montage, use Celebrity Edits; if it is a creator or group performing choreography, use Dance.
-Rule: If visible body movement/choreography is a major focus, classify as Dance even if captions are vague.
+Rule: If visible body, upper-body, or rhythmic/repeated/coordinated hand/arm choreography is a major focus, classify as Dance even if captions are vague. A seated or close-up creator can still be dancing.
 Priority rule: Dance OVERRIDES Lip Sync, Relationship and Slice of Life when the visual format is choreography/performance.
 Korea/K-pop rule: If idol/creator content shows a dance challenge, practice, choreography, performance stage, hand-gesture dance or synchronized group movement, choose Dance. Use Celebrity Edits only when it is mainly a fan montage/edit rather than the dance itself.
-Motion note: because only sampled frames may be available, look for progression across frames. If multiple frames show full-body poses, synchronized movement, dance formation or choreography, choose Dance even if the caption is romantic or the creator appears to be mouthing lyrics.
+Motion note: because only sampled frames may be available, look for progression across frames. If multiple frames show coordinated pose changes, repeated hand/arm sequences, upper-body movement, full-body poses, synchronized movement, dance formation or choreography, choose Dance even if the caption is romantic or the creator mouths lyrics.
 
 2) Lip Sync
 Definition: Creator mouths lyrics/dialogue or sings along to the audio.
 Use for: singing along, mouthing lyrics, emotional lip-sync performance, acting to lyrics/dialogue, close-up singing to camera.
-Do NOT use when: full-body choreography is dominant -> Dance.
-Rule: If the main performance is face/mouth expression rather than choreography, choose Lip Sync. If full-body movement/choreography is visible across frames, choose Dance instead of Lip Sync.
+Do NOT use when: rhythmic/repeated/coordinated choreography is dominant -> Dance; this includes hand-only and upper-body trends.
+Rule: If the main performance is face/mouth expression plus only generic, isolated gestures, choose Lip Sync. If a repeated or coordinated hand/arm, upper-body or full-body sequence is visible across frames, choose Dance instead.
 Do NOT classify as Lip Sync just because the creator's mouth is open or music has lyrics. Lip Sync requires mouth/face performance to be the dominant format.
 Talking, giving advice or making a personal announcement directly to camera is not Lip Sync unless the creator visibly mouths or sings along to the audio.
 
@@ -3834,6 +4210,7 @@ Talking, giving advice or making a personal announcement directly to camera is n
 Definition: Creator performs their own musical cover.
 Use for: singing cover, instrument cover, acoustic performance, piano/guitar/drum cover, vocal performance not just mouthing existing audio.
 Do NOT confuse with Lip Sync: Lip Sync = mouthing existing audio; Cover = creator performs the song.
+Do NOT use for an audience member's recording of the original artist's live concert; classify the recording by its actual format/purpose and route ambiguity to review.
 
 4) Movie/Tv/Drama Edits
 Definition: Edits or clips centered on fictional media.
@@ -3910,10 +4287,11 @@ Rule: Choose Lyrics Translation only with explicit translation/bilingual evidenc
 
 14) Quotes
 Definition: Standalone quote/saying is the main content.
-Use for: motivational quote, emotional quote, aesthetic quote card, relationship quote, short saying, text quote slideshow.
+Use for: motivational quote, emotional quote, aesthetic quote card, relationship quote, attributed saying, "my teacher once said" line, prominent prose presented as a quote, text quote slideshow.
 Do NOT confuse with Reflection:
 - Quotes = presenting a quote/line.
 - Reflection = personal introspection or life lesson.
+Priority: when quote presentation is the visible format, use Quotes first; Reflection or Relationship may describe the theme but should not replace Quotes.
 
 15) Reflection
 Definition: Personal introspection, self-growth, emotional reflection or life lesson.
@@ -3926,9 +4304,10 @@ Use for: news article, facts, explainer, how-to, DIY, tutorial, recipe/cake idea
 Do NOT confuse with Slice of Life: if it teaches/informs/recommends something, use Media/Infotainment.
 
 17) Travel
-Definition: Travel/destination/scenery is the main focus.
-Use for: beach, mountains, city view, vacation, tourism, trip vlog, landscape, destination montage, travel memory.
-Rule: If the visual focus is place/scenery/trip, choose Travel even if caption is emotional.
+Definition: A trip, destination, tourism experience or vacation is the main purpose.
+Use for: beach vacation, mountain trip, tourism, trip vlog, destination montage, travel memory.
+Do NOT use for a casual commute, ordinary local road, city drive, sunset, rainbow or scenic daily-life capture without trip/destination context; use Slice of Life instead.
+Rule: Scenery alone is insufficient. The post must frame the place or journey as travel.
 
 18) Gaming
 Definition: Game-related content is central.
@@ -3977,6 +4356,7 @@ For motion-heavy labels like Dance, Lip Sync, Fitness and Cover, lower confidenc
 
 === CONTENT DETAILS ===
 Write one concise sentence describing what happens visually, including setting, mood, objects, people and visual style.
+Always mention a clearly visible "POV" prefix or setup in the on-screen text. Also state explicitly when visible text is a quote, joke/meme, fanfiction about real public figures, school-life statement, or instructional step; these purpose cues must not be omitted from Content Details.
 
 === OUTPUT FORMAT ===
 {{"narrative": "<short theme phrase or NA>", "creative_type": ["<label1>", "<label2 optional>"], "content_details": "<one sentence>", "confidence": <float>, "reasoning": "<short reason for Creative Type>"}}"""
@@ -4007,8 +4387,9 @@ def call_gemini(contents, gemini_key, max_retries=2):
     last_error = ''
     for attempt in range(max_retries):
         try:
+            _throttle_gemini_request()
             response = client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=current_gemini_model(),
                 contents=contents,
                 config=types.GenerateContentConfig(response_mime_type='application/json')
             )
@@ -4048,26 +4429,31 @@ def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
     from google.genai import types
 
     client = genai.Client(api_key=gemini_key)
+    last_error = ''
     for attempt in range(max_retries):
         try:
+            _throttle_gemini_request()
             response = client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=current_gemini_model(),
                 contents=[prompt],
                 config=types.GenerateContentConfig(response_mime_type='application/json'),
             )
-            text = response.text.strip()
-            text = re.sub(r'^```json\s*', '', text)
-            text = re.sub(r'```$', '', text).strip()
-            return json.loads(text)
+            return _decode_gemini_json(response.text)
+        except json.JSONDecodeError as e:
+            last_error = f'Malformed verifier JSON: {e}'
+            if attempt + 1 < max_retries:
+                continue
+            return {'parse_error': True, 'reason': last_error}
         except Exception as e:
             err = str(e)
+            last_error = err
             if '429' in err or 'RESOURCE_EXHAUSTED' in err:
                 time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
             elif '503' in err or 'UNAVAILABLE' in err:
                 time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
             else:
                 return {'parse_error': True, 'reason': err}
-    return {'parse_error': True, 'reason': 'Targeted verifier retries exhausted'}
+    return {'parse_error': True, 'reason': last_error or 'Targeted verifier retries exhausted'}
 
 
 def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
@@ -4078,8 +4464,9 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
     client = genai.Client(api_key=gemini_key)
     for attempt in range(max_retries):
         try:
+            _throttle_gemini_request()
             response = client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=current_gemini_model(),
                 contents=contents,
                 config=types.GenerateContentConfig(response_mime_type='application/json'),
             )
@@ -4240,11 +4627,17 @@ def maybe_run_targeted_evidence_verifier(
 
     prompt = build_verifier_prompt(result, row, ALLOWED_CREATIVE_TYPES, reasons)
     call = verifier_call or call_targeted_evidence_verifier
+    primary_model = current_gemini_model()
+    verifier_model = primary_model
     try:
-        response = call(prompt, gemini_key)
+        # Verification uses the same explicitly selected model. This preserves
+        # predictable runtime/model attribution and avoids a hidden 3.5 call in
+        # an otherwise 3.1 Flash-Lite run.
+        with gemini_model_context(verifier_model):
+            response = call(prompt, gemini_key)
     except Exception as exc:
         response = {'parse_error': True, 'reason': str(exc)}
-    return apply_verifier_response(
+    verified = apply_verifier_response(
         result,
         response,
         row,
@@ -4252,6 +4645,10 @@ def maybe_run_targeted_evidence_verifier(
         reasons,
         route_errors_to_review=bool(resolvable_review_reasons(review_reasons)),
     )
+    verified['_verifier_model'] = verifier_model
+    verified['_verifier_fallback_used'] = verifier_model != primary_model
+    verified['_verifier_error_requires_review'] = bool(resolvable_review_reasons(review_reasons))
+    return verified
 
 def call_gemini_video_file(video_path, prompt, gemini_key, max_retries=3):
     """Send the full video file to Gemini as a final AI fallback.
@@ -4287,7 +4684,7 @@ FULL VIDEO FALLBACK:
 You are now given the full video, not just still frames.
 Focus on temporal motion and sequence of actions.
 For Dance vs Lip Sync:
-- Dance = full-body or upper-body choreography, repeated moves, synchronized/group movement, dance challenge, dance practice/performance.
+- Dance = full-body, upper-body, or rhythmic/repeated/coordinated hand/arm choreography, synchronized/group movement, dance challenge, dance practice/performance. Seated or close-up framing still counts; full-body framing is not required.
 - Lip Sync = mainly mouth/face performance to lyrics/dialogue, with little or no choreography.
 If choreography is visible across time, prioritise Dance over Lip Sync.
 Return the same JSON schema only.
@@ -4295,8 +4692,9 @@ Return the same JSON schema only.
 
         for attempt in range(max_retries):
             try:
+                _throttle_gemini_request()
                 response = client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=current_gemini_model(),
                     contents=[video_prompt, uploaded],
                     config=types.GenerateContentConfig(response_mime_type='application/json')
                 )
@@ -4445,7 +4843,8 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
         'comments':             _si(_get('commentCount', raw_record.get('commentCount', 0))),
         'music_name':           (_get('musicMeta.musicName') or (raw_record.get('musicMeta', {}).get('musicName', '') if isinstance(raw_record.get('musicMeta', {}), dict) else '')),
         'music_author':         (_get('musicMeta.musicAuthor') or (raw_record.get('musicMeta', {}).get('musicAuthor', '') if isinstance(raw_record.get('musicMeta', {}), dict) else '')),
-        'is_slideshow':         bool(_get('isSlideshow', raw_record.get('isSlideshow', False))),
+        'is_slideshow':         _kb_optional_bool(_get('isSlideshow', raw_record.get('isSlideshow', None))) is True,
+        'tiktok_reported_location': _kb_norm_text(_get('locationCreated', raw_record.get('locationCreated', ''))),
         'Narrative':            (', '.join(str(x).strip() for x in result.get('narrative', []) if str(x).strip()) if isinstance(result.get('narrative', ''), list) else str(result.get('narrative', '')).strip()),
         'Creative Type':        ', '.join(result.get('creative_type', [])),
         'Content Details':      result.get('content_details', ''),
@@ -4459,6 +4858,8 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
         'review_risk_reasons':  str(result.get('review_risk_reasons', '') or ''),
         'tier3_reason':         tier3_reason,
         'verifier_status':      str(result.get('_verifier_status', '') or 'not_run'),
+        'verifier_model':       str(result.get('_verifier_model', '') or ''),
+        'verifier_fallback_used': bool(result.get('_verifier_fallback_used', False)),
         'verifier_input_labels': ', '.join(result.get('_verifier_input_labels', []) or []),
         'verifier_output_labels': ', '.join(result.get('_verifier_output_labels', []) or []),
         'verifier_confidence':  result.get('_verifier_confidence', 0) or 0,
@@ -4496,24 +4897,28 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
 
         caption = str(row.get('text', '') if not pd.isna(row.get('text', '')) else '')[:60]
         log_list.append(f"[{i+1}/{len(df)}] {caption or raw_source.get('error', 'scraper error row')}...")
-        market = campaign_market or row.get('locationCreated', raw_source.get('locationCreated', 'UNKNOWN'))
-        try:
-            if pd.isna(market):
-                market = campaign_market or raw_source.get('locationCreated', 'UNKNOWN')
-        except Exception:
-            pass
+        campaign_market_text = _kb_norm_text(campaign_market)
+        if campaign_market_text:
+            market = _kb_extract_market({'_campaign_market': campaign_market_text})
+        else:
+            market = _kb_extract_market(row)
+        tiktok_location = (
+            _kb_norm_text(row.get('locationCreated', ''))
+            or _kb_norm_text(raw_source.get('locationCreated', ''))
+        )
 
-        # Pass source-report market/track context into the optional Creative KB.
-        # Use the Batch Filter country when available, because TikTok locationCreated
-        # may describe the creator/post origin rather than the UMG market being evaluated.
+        # Pass campaign context and platform location separately. TikTok's
+        # locationCreated must not activate campaign-market KB rules.
         try:
             row['_campaign_track'] = track
-            row['_campaign_market'] = campaign_market or market
+            row['_campaign_market'] = market
+            row['_tiktok_reported_location'] = tiktok_location
         except Exception:
             pass
         if isinstance(raw_source, dict):
-            raw_source.setdefault('_campaign_track', track)
-            raw_source.setdefault('_campaign_market', campaign_market or market)
+            raw_source['_campaign_track'] = track
+            raw_source['_campaign_market'] = market
+            raw_source['_tiktok_reported_location'] = tiktok_location
 
         # Special case: scraper failed / sensitive / unavailable post.
         # Important: pandas creates NaN for missing error columns; NaN is truthy in Python.
@@ -4787,7 +5192,7 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                         if should_refine_motion:
                             log_list.append("  → Tier 2B (adaptive 9-frame motion refinement)...")
                             frame_paths_9 = extract_frames(video_path, os.path.join(tmp, 'frames_9'), FRAME_POINTS_9)
-                            contents9 = [prompt + "\n\nMulti-frame refinement: analyse the full sequence carefully. Resolve movement (Dance vs Lip Sync vs Cover), text meaning (Lyrics vs Lyrics Translation vs Quotes), and source identity (real celebrity vs fictional scene). Do not rely on the cover frame or confidence alone."]
+                            contents9 = [prompt + "\n\nMulti-frame refinement: analyse the full sequence carefully. Resolve movement (Dance vs Lip Sync vs Cover), including repeated or coordinated hand/arm and upper-body choreography; a seated/close-up creator can be Dance and full-body framing is not required. Generic isolated gestures remain Lip Sync. Resolve text meaning (Lyrics vs Lyrics Translation vs Quotes), and source identity (real celebrity vs fictional scene). Do not rely on the cover frame or confidence alone."]
                             for fp in frame_paths_9:
                                 with open(fp, 'rb') as f:
                                     contents9.append(gtypes.Part.from_bytes(data=f.read(), mime_type='image/jpeg'))
@@ -4823,7 +5228,7 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                         )
                         if ENABLE_TIER2C_FULL_VIDEO_FALLBACK and unresolved_after_frames:
                             log_list.append("  → Tier 2C (full video fallback for unresolved ambiguity)...")
-                            video_prompt = prompt + "\n\nUse the full video to resolve remaining ambiguity. Check temporal movement, all visible text, and whether edited subjects are real public figures or fictional characters."
+                            video_prompt = prompt + "\n\nUse the full video to resolve remaining ambiguity. Check temporal movement, including repeated/coordinated hand or upper-body choreography even when seated or close-up; full-body framing is not required for Dance. Check all visible text and whether edited subjects are real public figures or fictional characters."
                             resultv = call_gemini_video_file(video_path, video_prompt, gemini_key)
                             resultv = apply_post_guardrails(resultv, row)
                             resultv['tier_used'] = 'tier2c_full_video'
@@ -4884,8 +5289,20 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 f"  → Evidence verifier {verifier_status}: "
                 + (' | '.join(triggers) if triggers else 'targeted cross-check')
             )
+            verifier_error_requires_review = bool(result.get('_verifier_error_requires_review'))
+            if (
+                verifier_status in {'confirmed', 'changed'}
+                or (verifier_status == 'error' and not verifier_error_requires_review)
+            ):
+                # Cover/frame review state is transient. Recompute it below
+                # from the accepted final labels instead of leaving a stale
+                # flag after a resolved or optional verifier call.
+                result.pop('needs_human_review', None)
+                result.pop('review_risk_reasons', None)
             status, score, issues = validate(result)
-            if verifier_status in {'review', 'error'}:
+            if verifier_status == 'review' or (
+                verifier_status == 'error' and verifier_error_requires_review
+            ):
                 status = 'review'
                 verifier_issue = str(
                     result.get('review_risk_reasons', '')

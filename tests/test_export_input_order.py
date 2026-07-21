@@ -2,6 +2,7 @@ import ast
 import io
 import re
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict
 from unittest.mock import patch
@@ -77,6 +78,11 @@ class ExportInputOrderTests(unittest.TestCase):
     def test_backend_grouping_restores_interleaved_input_order(self):
         class FakeBackend:
             @staticmethod
+            @contextmanager
+            def gemini_model_context(_model):
+                yield _model
+
+            @staticmethod
             def run_pipeline(records, *_args, **_kwargs):
                 return pd.DataFrame([
                     {
@@ -101,6 +107,7 @@ class ExportInputOrderTests(unittest.TestCase):
         with patch("final_update2_adapter.load_backend", return_value=FakeBackend()):
             tagged = tag_candidates(candidates, records, "key", "token")
         self.assertEqual(tagged["Link"].tolist(), candidates["Link"].tolist())
+        self.assertTrue((tagged["Gemini Model"] == "gemini-3.1-flash-lite").all())
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.15 is the current demo release. It preserves the accepted v41-style UI and the v68.14 General UGC tagging pipeline, adds reconnect recovery for non-secret workflow data, and presents the Summary in a clearer marketing sequence: Market, Track, then Creative Type.
+v68.41.6 is the current isolated final-validation candidate. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
 
 The verifier checks consistency between existing Narrative, Content Details and labels; it is not an independent second view of the original media and must not be presented as a proven accuracy lift until a fresh locked holdout is scored.
 

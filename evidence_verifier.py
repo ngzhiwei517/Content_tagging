@@ -44,6 +44,9 @@ STRONG_LABEL_PATTERNS = {
         r"synchroni[sz]ed (?:dance|movement)", r"coordinated dance",
         r"rhythmic body movements?", r"performs? (?:a |the )?dance",
         r"dance[- ]like (?:motion|movement)",
+        r"(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?",
+        r"(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)",
+        r"hand[- ]gesture dance", r"hand choreography", r"upper[- ]body choreography",
         r"rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)",
         r"moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))",
     ),
@@ -57,8 +60,10 @@ STRONG_LABEL_PATTERNS = {
         r"sport training", r"training drill",
     ),
     "Fashion": (
-        r"outfit", r"\bootd\b", r"fit check", r"clothing", r"lookbook",
+        r"\bootd\b", r"fit check", r"lookbook", r"outfit showcase",
         r"fashion showcase", r"styling (?:tips|showcase)", r"trying on (?:clothes|layers)",
+        r"(?:focus(?:es|ing)? on|showcases?|displays?|presents?).{0,35}(?:the |an? )?(?:full )?outfit",
+        r"full[- ]outfit (?:display|showcase|transition)", r"outfit transition",
     ),
     "Beauty": (
         r"makeup (?:routine|tutorial|transformation|makeover|advice|tips)",
@@ -67,7 +72,7 @@ STRONG_LABEL_PATTERNS = {
     ),
     "Travel": (
         r"vacation", r"travel (?:destination|vlog|memory)", r"tourist destination",
-        r"destination montage", r"tropical beach", r"scenic (?:landscape|view)",
+        r"destination montage", r"tropical beach", r"tourism experience", r"trip vlog",
     ),
     "Relationship": (
         r"romantic couple", r"bride and groom", r"wedding (?:photo|photoshoot|portrait|interaction)",
@@ -80,7 +85,8 @@ STRONG_LABEL_PATTERNS = {
     ),
     "Comedy": (
         r"\bfunny\b", r"humorous", r"comedic", r"\bjoke\b", r"\bmeme\b", r"\bprank\b",
-        r"exaggerated reaction", r"playful and humorous",
+        r"exaggerated reaction", r"playful and humorous", r"mock kiss", r"punchline",
+        r"funny (?:personal )?(?:anecdote|story|incident|moment|interaction)",
     ),
     "Gaming": (
         r"gameplay", r"game (?:ui|interface|screen|character|characters)", r"video game",
@@ -94,18 +100,25 @@ STRONG_LABEL_PATTERNS = {
         r"celebrity (?:edit|montage)", r"idol (?:fan )?edit", r"k[- ]?pop idol",
         r"real (?:public figure|celebrity|actor|artist|athlete)", r"contestant (?:edit|montage)",
         r"fancam", r"fan[- ]created (?:video|montage)",
+        r"(?:fanfiction|fan fiction|fictional (?:story|conversation|narrative)).{0,110}(?:k[- ]?pop|idols?|celebrit(?:y|ies)|public figures?)",
+        r"(?:k[- ]?pop|idols?|celebrit(?:y|ies)|public figures?).{0,110}(?:fanfiction|fan fiction|fictional (?:story|conversation|narrative))",
     ),
     "Media/Infotainment": (
-        r"tutorial", r"step[- ]by[- ]step", r"explains? how", r"demonstrates? how",
+        r"(?<!dance )\btutorial\b", r"step[- ]by[- ]step", r"explains? how", r"demonstrates? how",
         r"product review", r"recommendation", r"educational", r"informational",
         r"tips (?:for|on|about)",
     ),
     "POV": (
-        r"\bpov\s*[:\-]", r"point of view", r"first[- ]person (?:perspective|view|camera|shot|footage)",
+        r"(?:on[- ]screen|onscreen|overlaid|overlay) text.{0,80}(?<![a-z0-9])pov(?![a-z0-9])",
+        r"\bpov\s*[:\-]", r"point of view", r"first[- ]person (?:perspective|view|journey|experience|scenario|roleplay)",
         r"viewer(?:'s)? perspective",
     ),
     "Quotes": (
-        r"quote (?:card|text|post)", r"standalone quote", r"motivational quote", r"short saying",
+        r"quote (?:card|text|post|overlay)", r"standalone (?:quote|saying)", r"motivational quote", r"short saying",
+        r"(?:teacher|mother|father|friend|someone) once (?:said|told)",
+        r"(?:attributed|presented) (?:as|to).{0,35}(?:quote|saying)",
+        r"(?:on[- ]screen|onscreen|overlaid) text.{0,80}(?:quote|quotation|saying)",
+        r"(?:quote|quotation|saying).{0,80}(?:on[- ]screen|onscreen|overlaid) text",
     ),
     "Lyrics": (
         r"(?:visible|displayed|written|overlaid|on[- ]screen|onscreen).{0,35}(?:song )?lyrics?",
@@ -175,6 +188,10 @@ EXPLICIT_CONTRADICTION_PATTERNS = {
     "Media/Infotainment": (
         r"no (?:educational|informational|tutorial|review) purpose",
         r"pure (?:performance|entertainment)",
+    ),
+    "Cover": (
+        r"audience (?:recording|captures?|films?).{0,55}(?:original|live) (?:artist|performer)|"
+        r"filmed from (?:the )?audience.{0,50}(?:concert|stage|performance)",
     ),
 }
 
@@ -327,18 +344,15 @@ def targeted_verifier_reasons(
     reasons: List[str] = []
     reasons.extend(resolvable_review_reasons(review_reasons))
 
-    if result.get("_guardrail_changed_primary"):
-        reasons.append("Primary label changed during automated guardrails")
-
     label_set = set(labels)
-    for pair in HIGH_CONFUSION_PAIRS:
-        if pair.issubset(label_set):
-            reasons.append("High-confusion label pair: " + " vs ".join(sorted(pair)))
 
     for candidate in STRONG_LABEL_PATTERNS:
         if candidate not in label_set and label_has_explicit_evidence(candidate, result, row):
             reasons.append(f"Strong {candidate} evidence is absent from the selected labels")
 
+    # A guardrail change or a known-confusion pair is not enough by itself to
+    # spend another model call. Deterministic conflict/missing-evidence reasons
+    # and strong absent-label evidence above remain eligible.
     return list(dict.fromkeys(reasons))
 
 
@@ -374,11 +388,14 @@ For a change:
 - unsupported_labels must be a subset of current_labels.
 - add_labels must contain only strongly evidenced allowed labels.
 - preserve unrelated current labels.
-- Dance requires explicit choreography or coordinated/repeated rhythmic movement.
+- Dance requires explicit choreography or coordinated/repeated rhythmic movement. Rhythmic hand/arm or upper-body choreography counts even when the creator is seated or close-up; full-body framing is not required. Generic isolated gestures do not count.
 - Lip Sync requires explicit mouthing/lip-sync evidence.
 - Lyrics requires explicitly visible song-lyric text.
 - Lyrics Translation requires explicit bilingual or translated lyric evidence.
 - Carousel requires confirmed photo/slideshow metadata with at least two images.
+- Quotes should lead when an attributed saying or quote presentation is the main format; Reflection or Relationship may be secondary themes.
+- Travel requires trip, destination, tourism or vacation purpose; an ordinary commute, local road, sunset or rainbow is not enough.
+- A fan/audience recording of the original live artist is not the fan's Cover.
 
 Return only JSON using this schema:
 {{"decision":"confirm|change|review","unsupported_labels":[],"add_labels":[],"confidence":0.0,"evidence":[],"reason":""}}

@@ -66,6 +66,32 @@ class TargetedEvidenceVerifierTests(unittest.TestCase):
         }
         self.assertEqual(targeted_verifier_reasons(result, row, ALLOWED), [])
 
+    def test_incidental_outfit_mention_is_not_strong_fashion_evidence(self):
+        result = {
+            "creative_type": ["Lip Sync"],
+            "narrative": "Girl lip syncing",
+            "content_details": "A creator in a beige outfit mouths the audio outdoors.",
+            "confidence": 0.94,
+        }
+        reasons = targeted_verifier_reasons(result, {}, ALLOWED)
+        self.assertNotIn(
+            "Strong Fashion evidence is absent from the selected labels",
+            reasons,
+        )
+
+    def test_explicit_fit_check_is_strong_fashion_evidence(self):
+        result = {
+            "creative_type": ["Lip Sync"],
+            "narrative": "Fit check",
+            "content_details": "A creator presents a full-outfit fit check in a mirror.",
+            "confidence": 0.94,
+        }
+        reasons = targeted_verifier_reasons(result, {}, ALLOWED)
+        self.assertIn(
+            "Strong Fashion evidence is absent from the selected labels",
+            reasons,
+        )
+
     def test_unsupported_secondary_dance_is_removed(self):
         result = {
             "creative_type": ["Fashion", "Dance"],
@@ -386,7 +412,11 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
             "confidence": 0.93,
         }
         output = self.backend.maybe_run_targeted_evidence_verifier(
-            result, {}, "test-key", review_reasons=[], verifier_call=verifier_call
+            result,
+            {},
+            "test-key",
+            review_reasons=["Secondary Dance label lacks explicit choreography evidence"],
+            verifier_call=verifier_call,
         )
         self.assertEqual(len(calls), 1)
         self.assertEqual(output["creative_type"], ["Fashion"])
@@ -394,9 +424,9 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
 
     def test_optional_verifier_outage_fails_open(self):
         result = {
-            "creative_type": ["Dance", "Lip Sync"],
-            "narrative": "Creator performance",
-            "content_details": "A creator performs synchronized choreography while lip-syncing.",
+            "creative_type": ["Celebrity Edits"],
+            "narrative": "Contestant montage",
+            "content_details": "A contestant flexes his biceps during a workout challenge.",
             "confidence": 0.94,
         }
         output = self.backend.maybe_run_targeted_evidence_verifier(
@@ -406,9 +436,36 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
             review_reasons=[],
             verifier_call=lambda prompt, key: {"parse_error": True, "reason": "quota"},
         )
-        self.assertEqual(output["creative_type"], ["Dance", "Lip Sync"])
+        self.assertEqual(output["creative_type"], ["Celebrity Edits"])
         self.assertEqual(output["_verifier_status"], "error")
+        self.assertFalse(output["_verifier_error_requires_review"])
         self.assertFalse(output.get("needs_human_review", False))
+
+    def test_hard_verifier_outage_keeps_review_requirement(self):
+        result = {
+            "creative_type": ["Lip Sync"],
+            "narrative": "Funny personal anecdote",
+            "content_details": "On-screen text shares a funny story while the creator mouths audio.",
+            "confidence": 0.94,
+        }
+        output = self.backend.maybe_run_targeted_evidence_verifier(
+            result,
+            {},
+            "test-key",
+            review_reasons=["Explicit joke, meme or comedic evidence is missing the Comedy label"],
+            verifier_call=lambda prompt, key: {"parse_error": True, "reason": "quota"},
+        )
+        self.assertEqual(output["_verifier_status"], "error")
+        self.assertTrue(output["_verifier_error_requires_review"])
+        self.assertTrue(output.get("needs_human_review", False))
+
+    def test_pipeline_distinguishes_soft_verifier_error_and_clears_stale_state(self):
+        source = Path(__file__).resolve().parents[1].joinpath(
+            "final_update2_backend_source.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("verifier_status == 'error' and not verifier_error_requires_review", source)
+        self.assertIn("result.pop('needs_human_review', None)", source)
+        self.assertIn("verifier_status == 'error' and verifier_error_requires_review", source)
 
     def test_changed_labels_are_rechecked_by_post_guardrails(self):
         source = Path(__file__).resolve().parents[1].joinpath(
@@ -434,6 +491,79 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(guarded["creative_type"], ["Carousel", "Beauty"])
+
+    def test_confirm_threshold_boundaries(self):
+        for confidence, expected_status in [
+            (0.79, "review"),
+            (0.80, "confirmed"),
+            (0.81, "confirmed"),
+        ]:
+            with self.subTest(confidence=confidence):
+                result = {
+                    "creative_type": ["Fashion"],
+                    "narrative": "Outfit showcase",
+                    "content_details": "A creator poses to display a winter outfit.",
+                    "confidence": 0.94,
+                }
+                response = {
+                    "decision": "confirm",
+                    "unsupported_labels": [],
+                    "add_labels": [],
+                    "confidence": confidence,
+                    "evidence": ["The outfit showcase is explicit."],
+                    "reason": "The selected label is directly supported.",
+                }
+                output = apply_verifier_response(
+                    result,
+                    response,
+                    {},
+                    ALLOWED,
+                    ["confirmation boundary"],
+                )
+                self.assertEqual(output["creative_type"], ["Fashion"])
+                self.assertEqual(output["_verifier_status"], expected_status)
+                self.assertEqual(
+                    bool(output.get("needs_human_review", False)),
+                    expected_status == "review",
+                )
+
+    def test_change_threshold_boundaries(self):
+        for confidence, expected_status in [
+            (0.85, "review"),
+            (0.86, "changed"),
+            (0.87, "changed"),
+        ]:
+            with self.subTest(confidence=confidence):
+                result = {
+                    "creative_type": ["Fashion", "Dance"],
+                    "narrative": "Outfit showcase",
+                    "content_details": (
+                        "A creator poses and walks forward to display a winter outfit."
+                    ),
+                    "confidence": 0.94,
+                }
+                response = {
+                    "decision": "change",
+                    "unsupported_labels": ["Dance"],
+                    "add_labels": [],
+                    "confidence": confidence,
+                    "evidence": ["The description only shows posing and an outfit showcase."],
+                    "reason": "No choreography is described.",
+                }
+                output = apply_verifier_response(
+                    result,
+                    response,
+                    {},
+                    ALLOWED,
+                    ["change boundary"],
+                )
+                self.assertEqual(output["_verifier_status"], expected_status)
+                if expected_status == "review":
+                    self.assertEqual(output["creative_type"], ["Fashion", "Dance"])
+                    self.assertTrue(output["needs_human_review"])
+                else:
+                    self.assertEqual(output["creative_type"], ["Fashion"])
+                    self.assertFalse(output.get("needs_human_review", False))
 
 
 if __name__ == "__main__":

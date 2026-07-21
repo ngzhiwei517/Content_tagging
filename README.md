@@ -2,7 +2,7 @@
 
 An AI-assisted Streamlit application for selecting, tagging, reviewing and reporting TikTok user-generated content for music marketing.
 
-[Open the live Streamlit app](https://umgcontenttag.streamlit.app/)
+[Open the stable live Streamlit demo](https://umgcontenttag.streamlit.app/) — this v68.41.6 final-validation candidate runs locally and does not replace that demo.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Web_App-red)
@@ -24,6 +24,15 @@ It can:
 - summarize performance and export tagged campaign data.
 
 ## Main features
+
+### Balanced model setup
+
+This v68.41.6 package uses Gemini 3.1 Flash-Lite by default because the completed 24-post diagnostic showed a much better speed/review balance. Gemini 3.5 Flash remains available under **Analysis model (optional)** for smaller batches where a slower run is acceptable. Targeted verification stays on the model selected for the run, so a 3.1 run is no longer silently converted into a slower hybrid run.
+
+- Gemini 3.1 Flash-Lite (recommended default)
+- Gemini 3.5 Flash (slower, deeper analysis)
+
+The targeted evidence verifier is deliberately narrow and uses the same model selected for the run. It is called only for explicit cross-field contradictions or strong missing-label evidence—not merely because a guardrail changed a label or because a known-confusion pair is present. Its decision is recorded in the internal QA report. It is not a second view of the original media, so genuinely unresolved cases still go to human review.
 
 ### Post selection
 
@@ -125,7 +134,7 @@ python3 -m venv .venv
 ## Tests
 
 ```bash
-python -m py_compile app.py
+python -m py_compile app.py final_update2_adapter.py final_update2_backend.py final_update2_backend_source.py model_comparison.py review_routing.py
 python -m unittest discover -s tests -v
 ```
 

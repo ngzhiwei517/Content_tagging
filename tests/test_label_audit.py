@@ -21,7 +21,7 @@ class LabelAuditTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(row["App Version"], "v68.39")
+        self.assertEqual(row["App Version"], "v68.41.6")
         self.assertEqual(row["Original AI Labels"], "Fashion, Dance")
         self.assertEqual(row["Final Labels"], "Fashion, Dance")
         self.assertFalse(row["Human Reviewed"])
@@ -38,6 +38,8 @@ class LabelAuditTests(unittest.TestCase):
                 "tier_used": "tier2a_3frames",
                 "validation_status": "pass",
                 "verifier_status": "changed",
+                "verifier_model": "gemini-3.5-flash",
+                "verifier_fallback_used": True,
                 "verifier_input_labels": "Fashion, Dance",
                 "verifier_output_labels": "Fashion",
                 "verifier_confidence": 0.96,
@@ -51,6 +53,8 @@ class LabelAuditTests(unittest.TestCase):
         self.assertEqual(row["Final Labels"], "Fashion")
         self.assertEqual(row["Verifier Input Labels"], "Fashion, Dance")
         self.assertEqual(row["Verifier Status"], "changed")
+        self.assertEqual(row["Verifier Model"], "gemini-3.5-flash")
+        self.assertTrue(row["Verifier Fallback Used"])
         self.assertFalse(row["Human Reviewed"])
         history = json.loads(row["Label History"])
         self.assertEqual(history[0]["stage"], "automated_pre_verifier")
