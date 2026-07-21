@@ -1529,6 +1529,43 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     }
 
 
+def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
+    """Extract campaign track and artist from common Instagram export names.
+
+    Supported example:
+    ``2026-07-20_TheOneThatGotAway_KatyPerry_posts_instagram (1).csv``.
+    This is only a fallback for exports whose ``Sound`` column is an opaque
+    numeric Instagram audio identifier; explicit descriptive track/artist
+    columns continue to win.
+    """
+    basename = re.split(r"[\\/]", safe_str(source_name))[-1]
+    stem = re.sub(r"\.(?:csv|xlsx?|xls)$", "", basename, flags=re.I)
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
+    match = re.match(
+        r"^\d{4}-\d{2}-\d{2}_(.+)_posts_instagram$",
+        stem,
+        flags=re.I,
+    )
+    if not match or "_" not in match.group(1):
+        return "", ""
+
+    track_token, artist_token = match.group(1).rsplit("_", 1)
+
+    def humanize(token: str) -> str:
+        text = re.sub(r"[_-]+", " ", safe_str(token))
+        text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
+        text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+        return " ".join(text.split())
+
+    return humanize(track_token), humanize(artist_token)
+
+
+def is_opaque_instagram_sound_id(value) -> bool:
+    """Return True for numeric Instagram audio IDs that are not track names."""
+    text = safe_str(value).replace(",", "").strip()
+    return bool(re.fullmatch(r"\d+(?:\.0+)?(?:[eE][+-]?\d+)?", text))
+
+
 def standardize_file_rows(
     df: pd.DataFrame,
     source_name: str,
@@ -1538,12 +1575,20 @@ def standardize_file_rows(
     link_col = cols.get("link")
     if not link_col:
         return pd.DataFrame(), cols
+    filename_track, filename_artist = instagram_export_campaign_context(source_name)
     rows = []
     for _, r in df.iterrows():
         link = safe_str(r.get(link_col))
         detected_platform = post_platform(link)
         if not detected_platform or (platform and detected_platform != platform):
             continue
+        track = safe_str(r.get(cols["track"])) if cols.get("track") else ""
+        artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
+        if detected_platform == INSTAGRAM_REELS:
+            if is_opaque_instagram_sound_id(track):
+                track = filename_track
+            if not artist:
+                artist = filename_artist
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
         shares = clean_num(r.get(cols["shares"])) if cols.get("shares") else 0
@@ -1555,8 +1600,8 @@ def standardize_file_rows(
             "Input Type": "CSV/XLSX",
             "Link": link,
             "Market": normalize_market(r.get(cols["market"])) if cols.get("market") else "",
-            "Track": safe_str(r.get(cols["track"])) if cols.get("track") else "",
-            "Campaign Artist": safe_str(r.get(cols["artist"])) if cols.get("artist") else "",
+            "Track": track,
+            "Campaign Artist": artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),

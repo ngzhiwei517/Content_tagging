@@ -9,6 +9,9 @@
 - The same General UGC creative types, guardrails, review actions, summary, CSV, grouped XLSX, and QA workbook used by TikTok.
 - A `Platform` field across Current Batch, Review, Summary, Final Output, Links Only, and QA exports.
 - A `Metrics Unavailable` field when Instagram does not expose shares or saves.
+- Campaign track and artist fallback from the standard
+  `YYYY-MM-DD_Track_Artist_posts_instagram.csv` filename when Instagram's
+  `Sound` column contains only an opaque numeric audio ID.
 
 ## TikTok regression boundary
 
@@ -28,3 +31,5 @@
 - Private, deleted, login-restricted, or unavailable posts are auto-removed using the same workflow rule as TikTok.
 - CDN media URLs are temporary and are used only during the current tagging run.
 - Instagram carousel analysis currently follows the existing shared cover-first pipeline; multi-image accuracy needs separate validation.
+- Filename-derived track/artist values are fallback metadata only; an explicit
+  descriptive Track or Campaign Artist column always takes precedence.

@@ -89,6 +89,8 @@ class CsvCompatibilityTests(unittest.TestCase):
             "norm_col",
             "detect_col",
             "detect_columns",
+            "instagram_export_campaign_context",
+            "is_opaque_instagram_sound_id",
             "coalesce_duplicate_batch_rows",
         ]:
             namespace[name] = load_function(name, namespace)
@@ -129,6 +131,31 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Platform"], INSTAGRAM_REELS)
         self.assertEqual(rows.loc[0, "Market"], "SG")
         self.assertEqual(rows.loc[0, "Track"], "Track IG")
+
+    def test_instagram_numeric_sound_id_uses_campaign_context_from_filename(self):
+        text = (
+            "Impact Ranking,Sound,Username,Link,Views,Likes,Comments\n"
+            "1,2422397121605345,arianagrande,https://www.instagram.com/reel/DExampleAbC1,5000,250,12\n"
+        )
+        rows, columns = self.parse(
+            text,
+            name="2026-07-20_HateThatIMadeYouLoveMe_ArianaGrande_posts_instagram.csv",
+        )
+        self.assertEqual(columns["track"], "Sound")
+        self.assertEqual(rows.loc[0, "Track"], "Hate That I Made You Love Me")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Ariana Grande")
+
+    def test_instagram_descriptive_sound_name_beats_filename_fallback(self):
+        text = (
+            "Sound,Link\n"
+            "Original audio,https://www.instagram.com/reel/DExampleAbC2\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="2026-07-20_ExampleTrack_ExampleArtist_posts_instagram.csv",
+        )
+        self.assertEqual(rows.loc[0, "Track"], "Original audio")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Example Artist")
 
     def test_indonesia_market_name_normalizes_to_id(self):
         self.assertIn("ID", self.markets)
