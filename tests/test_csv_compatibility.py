@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+from instagram_reels_adapter import (
+    INSTAGRAM_REELS,
+    TIKTOK,
+    creator_from_url as platform_creator_from_url,
+    detect_platform as platform_for_url,
+    is_instagram_post_url,
+    is_supported_post_url,
+)
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -57,11 +65,20 @@ class CsvCompatibilityTests(unittest.TestCase):
             "Optional": Optional,
             "Tuple": Tuple,
             "MARKETS": cls.markets,
+            "TIKTOK": TIKTOK,
+            "INSTAGRAM_REELS": INSTAGRAM_REELS,
+            "platform_for_url": platform_for_url,
+            "platform_creator_from_url": platform_creator_from_url,
+            "is_instagram_post_url": is_instagram_post_url,
+            "is_supported_post_url": is_supported_post_url,
         }
         for name in [
             "safe_str",
             "clean_num",
             "is_tiktok_link",
+            "is_instagram_link",
+            "post_platform",
+            "is_supported_link",
             "extract_creator",
             "display_market",
             "kol_size_for_market",
@@ -100,6 +117,18 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Market"], "MY")
         self.assertEqual(rows.loc[0, "Track"], "Track A")
         self.assertEqual(rows.loc[0, "Views"], 1234)
+
+    def test_instagram_reel_file_uses_the_same_canonical_schema(self):
+        text = (
+            "Instagram Reel URL,Market,Track Name,View Count,Like Count\n"
+            "https://www.instagram.com/reel/DExampleAbC1/?utm_source=test,SG,Track IG,5000,250\n"
+        )
+        rows, columns = self.parse(text, name="instagram.csv")
+        self.assertEqual(columns["link"], "Instagram Reel URL")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows.loc[0, "Platform"], INSTAGRAM_REELS)
+        self.assertEqual(rows.loc[0, "Market"], "SG")
+        self.assertEqual(rows.loc[0, "Track"], "Track IG")
 
     def test_indonesia_market_name_normalizes_to_id(self):
         self.assertIn("ID", self.markets)

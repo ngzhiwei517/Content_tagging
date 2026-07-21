@@ -11,6 +11,15 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 from final_update2_backend import load_backend
+from instagram_reels_adapter import (
+    INSTAGRAM_REELS,
+    TIKTOK,
+    detect_platform,
+    normalize_post_url,
+    platform_for_record,
+    post_identifier,
+    scrape_instagram_posts,
+)
 from model_comparison import DEFAULT_GEMINI_MODEL, normalize_gemini_model
 from drama_analysis import (
     DRAMA_EXPORT_COLUMNS,
@@ -46,8 +55,8 @@ CAMPAIGN_MARKET_MISSING = {
 
 
 MARKETING_EXPORT_COLUMNS = [
-    "Source", "Link", "Market", "Track", "Campaign Artist", "Creator", "Followers", "KOL Size",
-    "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement",
+    "Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Creator", "Followers", "KOL Size",
+    "Views", "Likes", "Comments", "Shares", "Saves", "Metrics Unavailable", "Total Engagement",
     "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate",
     # Detailed drama fields are deliberately consolidated into Content Details
     # so the marketing export remains one clean, readable table.
@@ -275,7 +284,7 @@ def video_id(url: str) -> str:
 
 
 def normalize_url(url: str) -> str:
-    return _text(url).split("?")[0].rstrip("/").lower()
+    return normalize_post_url(_text(url))
 
 
 def record_url(record: Dict) -> str:
@@ -294,9 +303,12 @@ def index_records(records: Iterable[Dict]) -> Tuple[Dict[str, Dict], Dict[str, D
         if not isinstance(record, dict):
             continue
         url = record_url(record)
-        post_id = _text(record.get("id")) or video_id(url)
-        if post_id:
-            by_id[post_id] = record
+        raw_id = _text(record.get("id"))
+        stable_id = post_identifier(url)
+        legacy_tiktok_id = video_id(url)
+        for post_id in (raw_id, stable_id, legacy_tiktok_id):
+            if post_id:
+                by_id[post_id] = record
         if url:
             by_url[normalize_url(url)] = record
     return by_id, by_url
@@ -304,8 +316,13 @@ def index_records(records: Iterable[Dict]) -> Tuple[Dict[str, Dict], Dict[str, D
 
 def match_record(row, by_id: Dict[str, Dict], by_url: Dict[str, Dict]) -> Optional[Dict]:
     link = _text(row.get("Link"))
-    post_id = video_id(link)
-    return by_id.get(post_id) if post_id else by_url.get(normalize_url(link))
+    stable_id = post_identifier(link)
+    legacy_tiktok_id = video_id(link)
+    return (
+        by_id.get(stable_id)
+        or by_id.get(legacy_tiktok_id)
+        or by_url.get(normalize_url(link))
+    )
 
 
 def review_cache(records: Iterable[Dict]) -> Dict[str, Dict]:
@@ -459,8 +476,20 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     )
 
     campaign_market = normalize_campaign_market(original_dict.get("Market"))
+    platform = (
+        _text(original_dict.get("Platform"))
+        or _text(tagged_dict.get("platform"))
+        or platform_for_record(raw_record, _text(original_dict.get("Link")))
+        or TIKTOK
+    )
+    music_name = _text(tagged_dict.get("music_name")) or _record_music_name(raw_record)
+    music_author = _text(tagged_dict.get("music_author"))
+    unavailable_metrics = raw_record.get("instagramMetricsUnavailable", [])
+    if not isinstance(unavailable_metrics, list):
+        unavailable_metrics = []
     output.update({
-        "App Version": "v68.41.6",
+        "App Version": "v68.42.0",
+        "Platform": platform,
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to
         # TikTok/Apify locationCreated, which describes post or creator origin.
@@ -469,8 +498,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Track": (
             _text(original_dict.get("Track"))
             or _text(tagged_dict.get("track"))
-            or _text(tagged_dict.get("music_name"))
-            or _record_music_name(raw_record)
+            or music_name
         ),
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
         "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
@@ -482,8 +510,11 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Comments": _number(tagged_dict.get("comments")),
         "Shares": _number(tagged_dict.get("shares")),
         "Saves": _number(tagged_dict.get("saves")),
-        "Track From TikTok": _text(tagged_dict.get("music_name")),
-        "Artist From TikTok": _text(tagged_dict.get("music_author")),
+        "Audio From Platform": music_name,
+        "Audio Artist From Platform": music_author,
+        "Track From TikTok": music_name if platform == TIKTOK else "",
+        "Artist From TikTok": music_author if platform == TIKTOK else "",
+        "Metrics Unavailable": ", ".join(_text(name) for name in unavailable_metrics if _text(name)),
         "Is Slideshow": _truthy(tagged_dict.get("is_slideshow")),
         "Cover URL": _text(tagged_dict.get("cover_url")),
         "Video URL": _text(tagged_dict.get("video_url")),
@@ -551,8 +582,21 @@ def enrich_review_drama(
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
+    """Route each supported post URL to its platform-specific Apify adapter."""
     backend = load_backend()
-    return list(backend.run_apify_tiktok_scraper_api(links, apify_token))
+    tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
+    instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
+    records: List[Dict] = []
+    if tiktok_links:
+        tiktok_records = list(backend.run_apify_tiktok_scraper_api(tiktok_links, apify_token))
+        for record in tiktok_records:
+            if isinstance(record, dict):
+                record.setdefault("_platform", TIKTOK)
+                record.setdefault("platform", TIKTOK)
+        records.extend(tiktok_records)
+    if instagram_links:
+        records.extend(scrape_instagram_posts(instagram_links, apify_token))
+    return records
 
 
 def tag_candidates(
@@ -577,9 +621,12 @@ def tag_candidates(
         record = match_record(row, by_id, by_url)
         if not isinstance(record, dict):
             link = _text(row.get("Link"))
+            platform = _text(row.get("Platform")) or detect_platform(link) or TIKTOK
             record = {
                 "url": link,
                 "submittedVideoUrl": link,
+                "_platform": platform,
+                "platform": platform,
                 "error": "POST_NOT_FOUND",
                 "errorCode": "POST_NOT_FOUND",
             }
