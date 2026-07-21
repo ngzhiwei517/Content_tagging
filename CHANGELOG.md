@@ -1,5 +1,45 @@
 # Changelog
 
+## v68.41.6 — Final unseen-validation candidate
+
+- Kept targeted verification on the explicitly selected Gemini model; 3.1 Flash-Lite runs no longer invoke hidden 3.5 calls.
+- Reused the robust Gemini JSON decoder for verifier responses and retained the final parse error when retries fail.
+- Removed verifier calls caused only by primary-guardrail changes or label-pair membership, allowed optional verifier failures to fail open, and recomputed stale review state after safe outcomes.
+- Added reusable high-signal safeguards for flexible on-screen quote wording, explicit humorous-story purpose, public-figure fanfiction and literal visible POV setups.
+- Added narrow SG CCA/school-life handling and stopped incidental outfit mentions from counting as strong Fashion evidence.
+- Removed false review triggers for performance-only "Dance tutorial" wording and valid Dance + Beauty combinations.
+- Preserved ambiguous local humour and motion cases for human review rather than learning exact URLs.
+
+## v68.41.5 — Balanced Flash-model validation candidate
+
+- Kept Gemini 3.1 Flash-Lite as the recommended default after the completed 24-post comparison.
+- Removed Gemini 3.1 Pro Preview from the app; Gemini 3.5 Flash remains an optional slower model.
+- Used Gemini 3.5 Flash only for the existing targeted evidence verifier when a 3.1 result already has a suspicious cross-field conflict.
+- Added Verifier Model and Verifier Fallback Used to the internal QA export.
+- Strengthened the reusable quote-format rule when Narrative and Content Details clearly describe an on-screen teacher or attributed quote.
+- Routed public-figure fanfiction versus Celebrity Edits purpose conflicts for human adjudication instead of forcing a disputed source label.
+- Preserved the v41-style UI, General UGC scope, drama boundary and stable live demo.
+
+## v68.41.4 — Isolated Gemini model comparison
+
+- Added a run-level choice between Gemini 3.1 Flash-Lite, Gemini 3.5 Flash and Gemini 3.1 Pro Preview without changing the tagging prompt, guardrails or fallback order.
+- Routed every Gemini call in a run through the selected model using an isolated execution context.
+- Added selected-model, run-ID, start-time and elapsed-time fields to the internal QA report, with model-specific download filenames.
+- Added a clear comparison-review instruction so testers skip flagged rows and preserve untouched AI outputs for scoring.
+- Added a direct no-edit path from Review to Summary, reset run-specific Review widgets between models, and paced Pro requests for the comparison project's 25 RPM limit.
+- Kept the stable v68.41.3 candidate and the existing Streamlit demo untouched.
+
+## v68.41.3 — Cross-market Creative Type accuracy hardening
+
+- Recognized rhythmic, repeated or coordinated hand/arm and upper-body choreography as Dance even when creators are seated or framed close-up; full-body framing is no longer required.
+- Kept generic isolated hand gestures as Lip Sync evidence rather than automatically converting every gesture into Dance.
+- Prioritized attributed quote presentation over Reflection/Fashion while preserving Relationship as an optional secondary theme.
+- Added high-signal consistency rules for genuine lyric translation, explicit drama/celebrity edits, fit checks and relationship-purpose posts.
+- Tightened prompt guidance for Travel and Cover: everyday scenery is not automatically travel, and audience recordings of the original live artist are not Cover.
+- Expanded conservative review routing for ambiguous local comedy, everyday scenery, camera-angle-only POV, audience concert recordings and disputed edit/source cases.
+- Added 16 reusable regression tests; no exact TikTok URL, creator or one-off track answer was added to prediction memory.
+- Kept detailed drama classification and the established v41-style user flow unchanged.
+
 ## v68.15 — Session resume and clearer marketing Summary
 
 - Added non-secret workflow checkpoints and URL-based batch IDs so an inactive reconnect can restore the current step and data instead of returning to API Keys.

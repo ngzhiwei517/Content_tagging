@@ -11,6 +11,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 from final_update2_backend import load_backend
+from model_comparison import DEFAULT_GEMINI_MODEL, normalize_gemini_model
 from drama_analysis import (
     DRAMA_EXPORT_COLUMNS,
     DRAMA_REVIEW_OPTIONS,
@@ -21,6 +22,27 @@ from drama_analysis import (
 
 
 ProgressCallback = Callable[[int, int, str], None]
+
+
+CAMPAIGN_MARKETS = {"PH", "MY", "ID", "KR", "SG", "VN", "TH"}
+CAMPAIGN_MARKET_ALIASES = {
+    "PHILIPPINES": "PH",
+    "PHILIPPINE": "PH",
+    "MALAYSIA": "MY",
+    "INDONESIA": "ID",
+    "INDONESIAN": "ID",
+    "IDN": "ID",
+    "KOREA": "KR",
+    "SOUTH KOREA": "KR",
+    "SINGAPORE": "SG",
+    "VIETNAM": "VN",
+    "VIET NAM": "VN",
+    "THAILAND": "TH",
+}
+CAMPAIGN_MARKET_MISSING = {
+    "", "OTHER", "OTHER / NO MARKET", "OTHER/NO MARKET", "NO MARKET",
+    "UNKNOWN", "NOT SPECIFIED", "N/A", "NA", "NONE", "NULL", "NAN",
+}
 
 
 MARKETING_EXPORT_COLUMNS = [
@@ -34,7 +56,8 @@ MARKETING_EXPORT_COLUMNS = [
 
 QA_AUDIT_COLUMNS = [
     "Original AI Labels", "Final Labels", "Human Reviewed", "Human Edited",
-    "Label History", "Verifier Status", "Verifier Input Labels",
+    "Label History", "Verifier Status", "Verifier Model", "Verifier Fallback Used",
+    "Verifier Input Labels",
     "Verifier Output Labels", "Verifier Confidence", "Verifier Reason",
     "Verifier Evidence", "Verifier Triggers",
 ]
@@ -50,6 +73,16 @@ def _text(value) -> str:
         return ""
     text = str(value).strip()
     return "" if text.lower() in {"nan", "none", "null"} else text
+
+
+def normalize_campaign_market(value) -> str:
+    """Canonicalize user-supplied campaign market without using TikTok location."""
+    raw = re.sub(r"\s+", " ", _text(value)).strip().upper()
+    if raw in CAMPAIGN_MARKET_MISSING:
+        return ""
+    if raw in CAMPAIGN_MARKETS:
+        return raw
+    return CAMPAIGN_MARKET_ALIASES.get(raw, "")
 
 
 def _number(value) -> int:
@@ -425,13 +458,14 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         ] if value
     )
 
+    campaign_market = normalize_campaign_market(original_dict.get("Market"))
     output.update({
-        "App Version": "v68.39",
+        "App Version": "v68.41.6",
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to
         # TikTok/Apify locationCreated, which describes post or creator origin.
-        "Market": _text(original_dict.get("Market")),
-        "Market Source": "Uploaded file / user input" if _text(original_dict.get("Market")) else "Not provided",
+        "Market": campaign_market,
+        "Market Source": "Uploaded file / user input" if campaign_market else "Not provided",
         "Track": (
             _text(original_dict.get("Track"))
             or _text(tagged_dict.get("track"))
@@ -468,6 +502,8 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         "Validation Status": validation_status,
         "Validation Score": tagged_dict.get("validation_score", 0),
         "Verifier Status": _text(tagged_dict.get("verifier_status")) or "not_run",
+        "Verifier Model": _text(tagged_dict.get("verifier_model")),
+        "Verifier Fallback Used": _truthy(tagged_dict.get("verifier_fallback_used")),
         "Verifier Input Labels": _text(tagged_dict.get("verifier_input_labels")),
         "Verifier Output Labels": _text(tagged_dict.get("verifier_output_labels")),
         "Verifier Confidence": _float(tagged_dict.get("verifier_confidence")),
@@ -526,11 +562,13 @@ def tag_candidates(
     apify_token: str,
     logs: Optional[List[str]] = None,
     on_progress: Optional[ProgressCallback] = None,
+    gemini_model: str = DEFAULT_GEMINI_MODEL,
 ) -> pd.DataFrame:
     """Run final_update_2 by source/market/track and return the current UI schema."""
     if candidates.empty:
         return pd.DataFrame()
     backend = load_backend()
+    selected_model = normalize_gemini_model(gemini_model)
     logs = logs if logs is not None else []
     by_id, by_url = index_records(records)
 
@@ -546,51 +584,60 @@ def tag_candidates(
                 "errorCode": "POST_NOT_FOUND",
             }
         resolved_track = _resolved_campaign_track(row, record)
-        key = (_text(row.get("Source")), _text(row.get("Market")), resolved_track)
+        campaign_market = normalize_campaign_market(row.get("Market"))
+        key = (_text(row.get("Source")), campaign_market, resolved_track)
         groups.setdefault(key, []).append((input_position, row, record))
 
     converted: List[Tuple[int, Dict]] = []
     completed = 0
     total = len(candidates)
-    for (source, market, track), pairs in groups.items():
-        group_records = [record for _, _, record in pairs]
+    # One context spans every source/market/track group in the run. Besides
+    # isolating the model selection, this preserves Pro request pacing across
+    # group boundaries instead of resetting the rate limiter for each group.
+    with backend.gemini_model_context(selected_model):
+        for (source, market, track), pairs in groups.items():
+            group_records = [record for _, _, record in pairs]
 
-        def row_done(_done, _group_total, output, tier):
-            nonlocal completed
-            completed += 1
-            if on_progress:
-                on_progress(completed, total, _text(tier))
-
-        tagged_group = backend.run_pipeline(
-            group_records,
-            track,
-            gemini_key,
-            apify_token,
-            logs,
-            delay_seconds=0,
-            on_row_done=row_done,
-            source_file=source,
-            # A non-market sentinel prevents the legacy pipeline from falling
-            # back to TikTok locationCreated when campaign Market is missing.
-            campaign_market=market or "UNKNOWN",
-        )
-        tagged_rows = [row for _, row in tagged_group.iterrows()]
-        for position, (input_position, original, raw_record) in enumerate(pairs):
-            if position < len(tagged_rows):
-                converted.append((input_position, _to_ui_row(original, tagged_rows[position], raw_record)))
-            else:
-                converted.append((input_position, _to_ui_row(original, {
-                    "Creative Type": "",
-                    "confidence": 0,
-                    "needs_human_review": True,
-                    "validation_status": "review",
-                    "validation_issues": "Backend returned no output row.",
-                }, raw_record)))
+            def row_done(_done, _group_total, output, tier):
+                nonlocal completed
                 completed += 1
                 if on_progress:
-                    on_progress(completed, total, "missing_output")
+                    on_progress(completed, total, _text(tier))
+
+            tagged_group = backend.run_pipeline(
+                group_records,
+                track,
+                gemini_key,
+                apify_token,
+                logs,
+                delay_seconds=0,
+                on_row_done=row_done,
+                source_file=source,
+                # A non-market sentinel prevents the legacy pipeline from falling
+                # back to TikTok locationCreated when campaign Market is missing.
+                campaign_market=market or "UNKNOWN",
+            )
+            tagged_rows = [row for _, row in tagged_group.iterrows()]
+            for position, (input_position, original, raw_record) in enumerate(pairs):
+                if position < len(tagged_rows):
+                    converted.append((input_position, _to_ui_row(original, tagged_rows[position], raw_record)))
+                else:
+                    converted.append((input_position, _to_ui_row(original, {
+                        "Creative Type": "",
+                        "confidence": 0,
+                        "needs_human_review": True,
+                        "validation_status": "review",
+                        "validation_issues": "Backend returned no output row.",
+                    }, raw_record)))
+                    completed += 1
+                    if on_progress:
+                        on_progress(completed, total, "missing_output")
 
     # Source/market/track grouping is an implementation detail. Restore the
     # exact upload/paste sequence before handing rows back to the UI.
     converted.sort(key=lambda item: item[0])
-    return pd.DataFrame([row for _, row in converted]).reset_index(drop=True)
+    output = pd.DataFrame([row for _, row in converted]).reset_index(drop=True)
+    output["Gemini Model"] = selected_model
+    tier_used = output.get("Tier Used", pd.Series("", index=output.index)).fillna("").astype(str).str.lower()
+    output["Gemini Called"] = ~tier_used.isin({"auto_removed_unavailable", "sensitive_human_review"})
+    return output

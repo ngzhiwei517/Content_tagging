@@ -21,6 +21,13 @@ import pandas as pd
 import streamlit as st
 
 from drama_analysis import campaign_track_catalog_status
+from model_comparison import (
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_MODEL_OPTIONS,
+    gemini_model_label,
+    gemini_model_slug,
+    normalize_gemini_model,
+)
 
 from final_update2_adapter import (
     DRAMA_REVIEW_OPTIONS,
@@ -821,14 +828,26 @@ DEFAULT_STATE = {
     "tagged_df": pd.DataFrame(),
     "last_message": "",
     "review_pointer": 0,
-    "enable_full_video_fallback_v46": False,
+    "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
     "track_date_settings_v68": {},
+    "qa_gemini_model_v68_41_4": DEFAULT_GEMINI_MODEL,
+    "comparison_run_id_v68_41_4": "",
+    "comparison_run_started_utc_v68_41_4": "",
+    "comparison_run_elapsed_v68_41_4": 0.0,
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+
+def reset_review_state_for_new_tagging_run() -> None:
+    """Prevent one comparison run's review widgets leaking into the next."""
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("review_"):
+            st.session_state.pop(key, None)
+    st.session_state.review_pointer = 0
 
 # -----------------------------
 # Helpers
@@ -874,6 +893,10 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "date_window",
     "viral_date",
     "replace_unavailable_posts",
+    "qa_gemini_model_v68_41_4",
+    "comparison_run_id_v68_41_4",
+    "comparison_run_started_utc_v68_41_4",
+    "comparison_run_elapsed_v68_41_4",
 )
 RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
 
@@ -954,7 +977,7 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         else:
             state_payload[key] = value
     payload = {
-        "version": "v68.39",
+        "version": "v68.41.6",
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
@@ -1355,7 +1378,12 @@ def parse_links(text: str) -> List[str]:
 
 
 def normalize_market(v: str) -> str:
-    s = safe_str(v).upper()
+    s = re.sub(r"\s+", " ", safe_str(v)).strip().upper()
+    if s in {
+        "", "OTHER", "OTHER / NO MARKET", "OTHER/NO MARKET", "NO MARKET",
+        "UNKNOWN", "NOT SPECIFIED", "N/A", "NA", "NONE", "NULL", "NAN",
+    }:
+        return ""
     if s in MARKETS:
         return s
     mapping = {
@@ -1363,7 +1391,9 @@ def normalize_market(v: str) -> str:
         "SOUTH KOREA": "KR", "INDONESIA": "ID", "INDONESIAN": "ID", "IDN": "ID",
         "SINGAPORE": "SG", "VIETNAM": "VN", "VIET NAM": "VN", "THAILAND": "TH",
     }
-    return mapping.get(s, s if s else "")
+    # Market is optional campaign context. Unsupported country/location values
+    # must stay blank rather than being treated as a campaign market.
+    return mapping.get(s, "")
 
 
 def unique_columns(cols: List[str]) -> List[str]:
@@ -1442,7 +1472,9 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
             "Share URL", "webVideoUrl", "submittedVideoUrl", "itemWebUrl",
             "item_web_url", "tiktok_url",
         ]),
-        "market": detect_col(df, ["Country", "Country Code", "Market", "Market Code", "Region", "Locale"]),
+        # Prefer explicit campaign-market fields. Country remains a compatibility
+        # fallback for exports that do not provide Market/Market Code.
+        "market": detect_col(df, ["Market", "Market Code", "Country", "Country Code", "Region", "Locale"]),
         "track": detect_col(df, [
             "Artist - Sound", "Artist-Sound", "Artist / Sound", "Track", "Sound",
             "Song", "Music", "Track Name", "Track Title", "Song Name",
@@ -1527,6 +1559,8 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
                 return True
         except Exception:
             pass
+        if column == "Market":
+            return normalize_market(value) == ""
         if isinstance(value, str):
             return value.strip().casefold() in {"", "nan", "none", "null", "unknown", "not specified"}
         if column in {"Followers", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement"}:
@@ -1544,7 +1578,9 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
                 if column not in frame.columns:
                     continue
                 if missing(merged.get(column), column) and not missing(candidate.get(column), column):
-                    merged[column] = candidate[column]
+                    merged[column] = normalize_market(candidate[column]) if column == "Market" else candidate[column]
+        if "Market" in frame.columns:
+            merged["Market"] = normalize_market(merged.get("Market"))
         merged_rows.append(merged)
     return pd.DataFrame(merged_rows, columns=frame.columns).reset_index(drop=True)
 
@@ -2091,15 +2127,19 @@ Allowed Creative Type labels: {labels}
 Rules:
 - Use 1 or 2 labels only.
 - If it is a slideshow/photo carousel, include Carousel.
-- Dance requires choreography/body movement.
-- Lip Sync is mouthing/singing to audio with little choreography.
+- Dance requires visible choreography or rhythmic/repeated/coordinated movement. Hand/arm or upper-body choreography counts even when the creator is seated or close-up; full-body framing is not required. Generic isolated gestures do not count.
+- Lip Sync is mouthing/singing to audio with little choreography. Dance wins when a repeated/coordinated hand, upper-body or full-body sequence is visible.
 - Lyrics requires visible lyric text as the main content.
+- Lyrics Translation additionally requires explicit bilingual/translated lyric evidence; mouthing or plain lyrics are not translation.
 - Beauty is makeup/skincare/hair/nails.
 - Fashion is outfit/clothing styling.
+- Quotes leads when an attributed saying or quote presentation is the main format; Reflection or Relationship can be secondary themes.
 - Relationship is romance/partner/love/heartbreak.
+- Travel requires a trip, destination, tourism or vacation purpose. A commute, ordinary local road, sunset or rainbow alone is Slice of Life.
 - Media/Infotainment is informative, news, tutorial, review, explainer.
 - Movie/Tv/Drama Edits is fictional drama/movie/anime/series scenes.
 - Celebrity Edits is real idol/celebrity/public figure edits.
+- Cover is the creator/featured performer's own rendition, not a fan's audience recording of the original live artist.
 - If unsure, use Others with low confidence.
 
 Post metadata:
@@ -2335,7 +2375,7 @@ def _apply_consistency_soft_audit_v46(ai: Dict, meta: Dict) -> Dict:
     labels = _labels_from_ai_v44(ai)
     blob = _row_text_blob_v44(ai, meta)
     issues = []
-    dance_cues = ["dance", "dancing", "choreo", "choreography", "dance challenge", "body movement", "full-body", "full body", "synchronized", "routine"]
+    dance_cues = ["dance", "dancing", "choreo", "choreography", "dance challenge", "body movement", "full-body", "full body", "upper-body", "upper body", "synchronized", "routine", "hand choreography", "rhythmic hand", "repeated hand", "coordinated hand"]
     non_dance_cues = ["skincare", "makeup", "lashes", "eyelash", "outfit", "fit check", "static text", "text card", "quote", "lyrics", "lyric", "caption idea", "meme", "rant", "annoyed", "frustration"]
     if "Dance" in labels and not _has_any_v44(blob, dance_cues) and _has_any_v44(blob, non_dance_cues):
         issues.append("Dance label has weak choreography support while description suggests non-dance content.")
@@ -2361,7 +2401,7 @@ def _apply_guardrails_and_kb_v44(ai: Dict, meta: Dict) -> Dict:
     blob = _row_text_blob_v44(ai, meta)
 
     lyric_cues = ["lyrics", "lyric", "karaoke", "spotify lyrics", "on-screen text", "onscreen text", "lyric text", "translated lyrics", "bilingual lyrics"]
-    dance_cues = ["dance", "dancing", "choreo", "choreography", "dance challenge", "routine", "synchronized", "body movement", "hand gesture", "full-body", "full body"]
+    dance_cues = ["dance", "dancing", "choreo", "choreography", "dance challenge", "routine", "synchronized", "body movement", "hand choreography", "rhythmic hand", "repeated hand", "coordinated hand", "upper-body", "upper body", "full-body", "full body"]
     beauty_cues = ["skincare", "makeup", "cosmetic", "lashes", "eyelash", "hair", "nail", "lipstick", "beauty routine"]
     fashion_cues = ["outfit", "ootd", "fit check", "clothing", "fashion", "dress", "styling", "lookbook"]
     comedy_cues = ["funny", "joke", "meme", "comedy", "frustration", "annoyed", "annoyance", "rant", "skit", "relatable"]
@@ -2614,7 +2654,7 @@ def _call_gemini_full_video_v46(video_path: str, prompt: str, gemini_key: str) -
             except Exception:
                 break
             time.sleep(1.5)
-        contents = [prompt + "\n\nFull-video fallback: use temporal motion over the whole video. Choose Dance only when choreography/body movement is clearly visible over time.", uploaded]
+        contents = [prompt + "\n\nFull-video fallback: use temporal motion over the whole video. Choose Dance when full-body, upper-body, or rhythmic/repeated/coordinated hand/arm choreography is visible over time. Seated or close-up framing still counts; full-body framing is not required. Generic isolated gestures remain Lip Sync.", uploaded]
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=contents,
@@ -2681,7 +2721,7 @@ def _maybe_tier2_frames_v44(ai: Dict, merged: Dict, rec: Dict, gemini_key: str, 
         if should_9:
             frame_paths9 = _extract_frames_v44(video_path, os.path.join(tmp, "frames_9"), [0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90])
             if frame_paths9:
-                motion_prompt = prompt + "\n\nMotion refinement: compare all frames as a sequence. Use Dance only if choreography/body movement is clearly visible across frames; use Lip Sync if mouth/face performance is the main action."
+                motion_prompt = prompt + "\n\nMotion refinement: compare all frames as a sequence. Use Dance when full-body, upper-body, or rhythmic/repeated/coordinated hand/arm choreography is visible across frames. Seated or close-up framing still counts; full-body framing is not required. Use Lip Sync when mouth/face performance plus only generic isolated gestures is the main action."
                 result9 = _call_gemini_frames_v44(motion_prompt, frame_paths9, gemini_key)
                 ai9 = _normalize_ai_result_v43(result9)
                 ai9 = _apply_guardrails_and_kb_v44(ai9, merged)
@@ -2999,6 +3039,15 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
         st.error("No valid TikTok links were selected for tagging.")
         return pd.DataFrame()
 
+    comparison_model = normalize_gemini_model(
+        st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
+    )
+    comparison_started_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    comparison_run_id = f"{gemini_model_slug(comparison_model)}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    comparison_timer = time.perf_counter()
+    st.session_state.comparison_run_id_v68_41_4 = comparison_run_id
+    st.session_state.comparison_run_started_utc_v68_41_4 = comparison_started_utc
+
     replace_unavailable = bool(st.session_state.get("replace_unavailable_posts", True))
     replace_unavailable = replace_unavailable and st.session_state.get("selection_mode", "Top posts") == "Top posts"
     candidate_pool = _all_ranked_candidates_v56(st.session_state.get("batch_df", pd.DataFrame()))
@@ -3023,7 +3072,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
     while not pending.empty:
         links = [safe_str(link) for link in pending["Link"].tolist() if is_tiktok_link(link)]
         status.markdown(
-            f"<div class='good-note'>Scraping and tagging {len(links)} post(s) with the final_update_2 pipeline...</div>",
+            f"<div class='good-note'>Scraping and tagging {len(links)} post(s) with {esc(gemini_model_label(comparison_model))}...</div>",
             unsafe_allow_html=True,
         )
         try:
@@ -3041,6 +3090,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
                 apify_token,
                 logs=logs,
                 on_progress=on_progress,
+                gemini_model=comparison_model,
             )
 
             # Sensitive posts are never sent to Review or final exports. Top posts
@@ -3098,6 +3148,13 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
     progress.progress(1.0)
     output = pd.concat(result_batches, ignore_index=True) if result_batches else pd.DataFrame()
     output = add_performance_fields(output)
+    elapsed_seconds = round(time.perf_counter() - comparison_timer, 2)
+    st.session_state.comparison_run_elapsed_v68_41_4 = elapsed_seconds
+    if not output.empty:
+        output["Gemini Model"] = comparison_model
+        output["Comparison Run ID"] = comparison_run_id
+        output["Run Started UTC"] = comparison_started_utc
+        output["Run Elapsed Seconds"] = elapsed_seconds
     if replacement_count:
         st.success(f"Used {replacement_count} next-ranked candidate(s) to replace unavailable or sensitive posts where possible.")
     return output
@@ -3121,12 +3178,17 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
         except Exception as exc:
             return {"parse_error": True, "raw_response": f"Apify failed during AI Suggest: {exc}"}
     try:
+        comparison_model = normalize_gemini_model(
+            row_dict.get("Gemini Model")
+            or st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
+        )
         suggested = final_update2_tag_candidates(
             pd.DataFrame([row_dict]),
             records,
             gemini_key,
             apify_token,
             logs=[],
+            gemini_model=comparison_model,
         )
     except Exception as exc:
         return {"parse_error": True, "raw_response": str(exc)}
@@ -3635,7 +3697,7 @@ elif st.session_state.step == 2:
         c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
         with c1:
             paste_track = st.text_input(
-                "Campaign track / sound name",
+                "Campaign track / sound name (optional)",
                 placeholder="Song title",
                 help="Enter the song title. If left blank, the app will use the detected TikTok audio name.",
                 key="pasted_campaign_track_v68_39",
@@ -4042,8 +4104,21 @@ elif st.session_state.step == 4:
         ("Selection", st.session_state.get("selection_mode", "Top posts"), "Method"),
     ]), unsafe_allow_html=True)
     st.markdown(render_table(selected, max_rows=10, cols=["Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
-    # Full-video fallback is kept disabled in the marketing-facing app for speed/quota stability.
-    st.session_state.enable_full_video_fallback_v46 = False
+    with st.expander("Analysis model (optional)", expanded=False):
+        st.selectbox(
+            "Gemini model for this run",
+            options=list(GEMINI_MODEL_OPTIONS.keys()),
+            format_func=gemini_model_label,
+            key="qa_gemini_model_v68_41_4",
+            help="3.1 Flash-Lite is recommended for routine batches. 3.5 Flash is slower and is available for smaller ambiguous batches.",
+        )
+        st.caption(
+            "The recommended model is faster. The slower option may improve a small number of ambiguous comedy or motion cases."
+        )
+    # Keep the same escalation path for either approved model. The active
+    # backend only reaches full-video analysis when cover, 3-frame and 9-frame
+    # evidence remain unresolved.
+    st.session_state.enable_full_video_fallback_v46 = True
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back", width="stretch"):
@@ -4052,6 +4127,7 @@ elif st.session_state.step == 4:
         if st.button("Start tagging", type="primary", width="stretch"):
             tagged_result = run_real_tagging_backend(selected)
             if tagged_result is not None and not tagged_result.empty:
+                reset_review_state_for_new_tagging_run()
                 st.session_state.tagged_df = tagged_result
                 go(5)
             else:
@@ -4063,6 +4139,11 @@ elif st.session_state.step == 4:
 elif st.session_state.step == 5:
     tagged = st.session_state.tagged_df
     st.markdown("<div class='card page-heading'><h2>Review</h2><p class='sub'>Check posts that need a human decision.</p></div>", unsafe_allow_html=True)
+    comparison_model_display = ""
+    if not tagged.empty and "Gemini Model" in tagged.columns:
+        comparison_model_display = safe_str(tagged.iloc[0].get("Gemini Model"))
+    if comparison_model_display:
+        st.caption(f"Analysis model: {gemini_model_label(comparison_model_display)}")
 
     if tagged.empty:
         st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)
@@ -4682,7 +4763,8 @@ elif st.session_state.step == 6:
     final_df = export_base_df[[c for c in MARKETING_EXPORT_COLUMNS if c in export_base_df.columns]].copy().reset_index(drop=True)
     qa_df = qa_all_rows.copy()
     qa_front = [
-        "App Version", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
+        "App Version", "Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds",
+        "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
         "Needs Review", "Review Action", "Review Note", "Review Risk",
         "Tier Used", "Validation Status", "Validation Score",
@@ -4691,7 +4773,11 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.39",
+            "App Version": "v68.41.6",
+            "Gemini Model": safe_str(qa_df.iloc[0].get("Gemini Model")) if not qa_df.empty else normalize_gemini_model(st.session_state.get("qa_gemini_model_v68_41_4")),
+            "Comparison Run ID": safe_str(qa_df.iloc[0].get("Comparison Run ID")) if not qa_df.empty else st.session_state.get("comparison_run_id_v68_41_4", ""),
+            "Run Started UTC": safe_str(qa_df.iloc[0].get("Run Started UTC")) if not qa_df.empty else st.session_state.get("comparison_run_started_utc_v68_41_4", ""),
+            "Run Elapsed Seconds": qa_df.iloc[0].get("Run Elapsed Seconds", 0) if not qa_df.empty else st.session_state.get("comparison_run_elapsed_v68_41_4", 0),
             "Posts": len(filtered),
             "Views": total_views,
             "Average Engagements": int(round(avg_engagements)) if has_metrics else "Metrics unavailable",
@@ -4709,6 +4795,10 @@ elif st.session_state.step == 6:
         "Rows To Review": qa_df[qa_df.get("Needs Review", False) == True] if "Needs Review" in qa_df.columns else pd.DataFrame(),
         "All Rows": qa_df,
     }
+    export_model = normalize_gemini_model(
+        qa_df.iloc[0].get("Gemini Model") if not qa_df.empty else st.session_state.get("qa_gemini_model_v68_41_4")
+    )
+    export_model_slug = gemini_model_slug(export_model)
     st.markdown("""
     <div class='download-grid'>
       <div class='download-card'><strong>Final CSV</strong><span>Clean output in the same order as the uploaded or pasted posts.</span></div>
@@ -4718,11 +4808,11 @@ elif st.session_state.step == 6:
     """, unsafe_allow_html=True)
     d1, d2, d3 = st.columns(3)
     with d1:
-        st.download_button("Download Final CSV", final_df.to_csv(index=False).encode("utf-8-sig"), "tagged_posts_final_grouped.csv", "text/csv", width="stretch")
+        st.download_button("Download Final CSV", final_df.to_csv(index=False).encode("utf-8-sig"), f"tagged_posts_{export_model_slug}.csv", "text/csv", width="stretch")
     with d2:
-        st.download_button("Download Grouped XLSX", grouped_excel_bytes(final_df), "tagged_posts_grouped_by_market.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        st.download_button("Download Grouped XLSX", grouped_excel_bytes(final_df), f"tagged_posts_grouped_{export_model_slug}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     with d3:
-        st.download_button("Download Review / QA Report", to_excel_bytes(report), "review_qa_report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        st.download_button("Download Review / QA Report", to_excel_bytes(report), f"review_qa_report_{export_model_slug}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)

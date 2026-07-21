@@ -81,6 +81,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.standardize_file_rows = staticmethod(namespace["standardize_file_rows"])
         cls.kol_size_for_market = staticmethod(namespace["kol_size_for_market"])
         cls.display_market = staticmethod(namespace["display_market"])
+        cls.normalize_market = staticmethod(namespace["normalize_market"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
 
     def parse(self, text: str, *, encoding: str = "utf-8", name: str = "test.csv"):
@@ -114,6 +115,25 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows.loc[0, "Market"], "ID")
         self.assertEqual(rows.loc[0, "Track"], "Track ID")
+
+    def test_explicit_market_column_wins_over_conflicting_country(self):
+        text = (
+            "TikTok Link,Country,Market,Track Name\n"
+            "https://www.tiktok.com/@indo/video/7600000000000000097,KR,ID,Track ID\n"
+        )
+        rows, columns = self.parse(text, name="market_precedence.csv")
+        self.assertEqual(columns["market"], "Market")
+        self.assertEqual(rows.loc[0, "Market"], "ID")
+
+    def test_all_indonesia_aliases_normalize_to_id(self):
+        for alias in ["Indonesia", "Indonesian", "IDN"]:
+            with self.subTest(alias=alias):
+                self.assertEqual(self.normalize_market(alias), "ID")
+
+    def test_other_and_unsupported_market_values_remain_blank(self):
+        for value in ["Other / no market", "Unknown", "Atlantis", "XX"]:
+            with self.subTest(value=value):
+                self.assertEqual(self.normalize_market(value), "")
 
     def test_indonesia_uses_its_market_specific_kol_thresholds(self):
         self.assertEqual(self.display_market("Indonesia"), "ID")
@@ -217,6 +237,33 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "Source"], "upload.csv")
         self.assertEqual(merged.loc[0, "Track"], "Example Song")
         self.assertEqual(merged.loc[0, "Market"], "VN")
+        self.assertEqual(merged.loc[0, "Views"], 125)
+
+    def test_duplicate_row_backfills_canonical_indonesia_market(self):
+        link = "https://www.tiktok.com/@audio/video/7600000000000000098"
+        combined = pd.DataFrame([
+            {
+                "Source": "upload.csv",
+                "Input Type": "CSV/XLSX",
+                "Link": link,
+                "Track": "Example Song",
+                "Market": "Other / no market",
+                "Views": 0,
+            },
+            {
+                "Source": "Pasted links",
+                "Input Type": "Pasted",
+                "Link": link,
+                "Track": "",
+                "Market": "Indonesian",
+                "Views": 125,
+            },
+        ])
+        combined["_link_key"] = combined["Link"]
+        merged = self.coalesce_duplicate_batch_rows(combined)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged.loc[0, "Source"], "upload.csv")
+        self.assertEqual(merged.loc[0, "Market"], "ID")
         self.assertEqual(merged.loc[0, "Views"], 125)
 
 

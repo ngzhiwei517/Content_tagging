@@ -72,6 +72,9 @@ def _has_positive_motion_evidence(blob: str) -> bool:
         r"choreograph(?:y|ed|ic)", r"dance routine", r"dance challenge",
         r"synchroni[sz]ed", r"\bdancing\b", r"body movement",
         r"dance[- ]like (?:motion|movement)",
+        r"(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?",
+        r"(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)",
+        r"hand[- ]gesture dance", r"hand choreography", r"upper[- ]body choreography",
         r"rhythmic (?:paw|paws|leg|legs|limb|limbs|body|movement).{0,45}(?:music|beat|rhythm)",
         r"moves? (?:its |their )?(?:paw|paws|leg|legs|limb|limbs|body).{0,45}(?:rhythmic|music|beat)",
         r"\bmouthing\b", r"mouths? the lyrics", r"lip[ -]?sync",
@@ -254,7 +257,12 @@ def visual_escalation_reasons(
         if labels & motion_labels and not motion_evidence:
             reasons.append("Motion label still lacks explicit motion evidence")
         full_video_resolved_non_motion = result.get("tier_used") == "tier2c_full_video" and not motion_evidence
-        if creator_performance and labels & performance_alternatives and not full_video_resolved_non_motion:
+        if (
+            creator_performance
+            and labels & performance_alternatives
+            and not labels & motion_labels
+            and not full_video_resolved_non_motion
+        ):
             if motion_evidence:
                 reasons.append("Observed motion still conflicts with the selected non-motion label")
             else:
@@ -335,6 +343,9 @@ def review_risk_reasons(
         r"synchroni[sz]ed (?:dance|movement)|coordinated dance|"
         r"perform(?:s|ing)? (?:a |the )?(?:rhythmic )?dance|hand[- ]gesture dance|"
         r"dance[- ]like (?:motion|movement)|"
+        r"(?:rhythmic|repeated|coordinated|synchroni[sz]ed) (?:hand|arm) (?:gesture|movement|motion|move)s?|"
+        r"(?:hand|arm) (?:gesture|movement|motion|move)s?.{0,40}(?:in sync|to the (?:beat|music|song)|choreograph)|"
+        r"hand choreography|upper[- ]body choreography|"
         r"rhythmic.{0,28}(?:paws?|legs?|limbs?|body|movement).{0,24}(?:music|beat|rhythm)|"
         r"moves? (?:its |their |his |her )?(?:paws?|legs?|limbs?|body).{0,35}(?:rhythmic|to the (?:music|beat))",
         visual_blob,
@@ -356,7 +367,13 @@ def review_risk_reasons(
         visual_blob,
         flags=re.I,
     ))
-    fashion = _has(visual_blob, ["outfit", "clothing", "fashion", "ootd", "fit check", "styling showcase", "trying on layers", "knitwear"])
+    fashion = bool(re.search(
+        r"\bootd\b|fit check|lookbook|outfit showcase|fashion showcase|styling showcase|"
+        r"trying on (?:clothes|layers)|full[- ]outfit (?:display|showcase|transition)|"
+        r"outfit transition|(?:focus(?:es|ing)? on|showcases?|displays?|presents?).{0,35}(?:the |an? )?(?:full )?outfit",
+        visual_blob,
+        flags=re.I,
+    ))
     lyrics = bool(re.search(
         r"(?:visible|displayed|written|overlaid|on[- ]screen|onscreen|spotify[- ]style).{0,35}lyrics?|"
         r"lyrics?.{0,35}(?:visible|displayed|written|overlaid|on[- ]screen|onscreen)|lyric (?:video|text|card)",
@@ -364,7 +381,25 @@ def review_risk_reasons(
         flags=re.I,
     ))
     carousel = _has(visual_blob, ["slideshow", "photo carousel", "series of photos", "series of images", "multiple photos"])
-    tutorial = _has(visual_blob, ["tutorial", "demonstrates how", "step-by-step", "step by step", "explains how", "pricing information", "clinic recommendation"])
+    tutorial = _has(visual_blob, [
+        "tutorial", "demonstrates how", "step-by-step", "step by step",
+        "explains how", "teaches how", "instructional steps",
+        "pricing information", "clinic recommendation",
+    ])
+    # A short model-generated narrative such as "Dance tutorial" often names a
+    # dance trend rather than an instructional post. Require actual teaching or
+    # step evidence before routing a clearly described dance performance to
+    # Media/Infotainment review.
+    if (
+        tutorial
+        and dance
+        and re.search(r"\bdance tutorial\b", visual_blob, flags=re.I)
+        and not _has(visual_blob, [
+            "demonstrates how", "step-by-step", "step by step", "explains how",
+            "teaches how", "instructional steps", "breaks down the moves",
+        ])
+    ):
+        tutorial = False
     relationship = any(re.search(pattern, evidence_blob, flags=re.I) for pattern in [
         r"wedding (?:photo|photos|photoshoot|photo shoot|portrait|portraits|attire)",
         r"pre[- ]wedding", r"bride and groom", r"romantic couple",
@@ -398,6 +433,19 @@ def review_risk_reasons(
         visual_blob,
         flags=re.I,
     ))
+    quote_format = bool(re.search(
+        r"(?:prominent|main|central|overlaid|on[- ]screen) (?:text )?(?:quote|quotation|saying)|"
+        r"(?:on[- ]screen|onscreen|overlaid) text.{0,80}(?:quote|quotation|saying)|"
+        r"(?:quote|quotation|saying).{0,80}(?:on[- ]screen|onscreen|overlaid) text|"
+        r"(?:quote|quotation) (?:card|post|text|overlay)|standalone (?:quote|saying)|"
+        r"(?:teacher|mother|father|friend|someone) once (?:said|told)|"
+        r"(?:attributed|presented) (?:as|to).{0,35}(?:quote|saying)|"
+        r"\b(?:wise|motivational|inspirational|emotional|relationship) (?:teacher )?(?:quote|saying)\b|"
+        r"\b(?:teacher|mother|father|friend|someone)(?:'s)? (?:quote|saying)\b|"
+        r"(?:quote|saying).{0,80}(?:displayed|shown|presented).{0,35}(?:on[- ]screen|overlay)",
+        visual_blob,
+        flags=re.I,
+    ))
 
     if primary == "Dance" and not dance and _has(visual_blob, [
         "fitness flex", "showcase his muscular physique", "showcase her muscular physique",
@@ -405,7 +453,7 @@ def review_risk_reasons(
         "static quote", "lyrics displayed", "outfit showcase", "trying on layers", "knitwear",
     ]):
         reasons.append("Dance label conflicts with the AI's own visual description")
-    if primary == "Lip Sync" and dance and not lip_sync:
+    if primary == "Lip Sync" and dance:
         reasons.append("Lip Sync label conflicts with visible choreography cues")
     if "Dance" in labels and primary != "Dance" and not dance:
         reasons.append("Secondary Dance label lacks explicit choreography evidence")
@@ -423,6 +471,10 @@ def review_risk_reasons(
         reasons.append("Lyrics label conflicts with speech or dialogue-subtitle evidence")
     if comedic_tone and reflective_tone:
         reasons.append("Comedy versus Reflection tone remains ambiguous")
+    if comedic_tone and "Comedy" not in labels:
+        reasons.append("Explicit joke, meme or comedic evidence is missing the Comedy label")
+    if quote_format and "Quotes" not in labels and not lyrics:
+        reasons.append("Attributed quote format is missing the Quotes label")
     if "Carousel" in labels and _url_type(row) == "video":
         reasons.append("Carousel label conflicts with video post metadata")
     if "Carousel" in labels and _slideshow_image_count(row) == 1:
@@ -440,7 +492,14 @@ def review_risk_reasons(
     if relationship and "Relationship" not in labels:
         reasons.append("Explicit wedding/couple evidence is missing the Relationship label")
 
-    travel = _has(visual_blob, ["beach vacation", "tropical beach", "vacation", "travel destination", "tourist destination", "jet skis on the ocean"])
+    travel = _has(visual_blob, ["beach vacation", "tropical beach", "vacation", "travel destination", "tourist destination", "trip vlog", "tourism", "jet skis on the ocean"])
+    everyday_scenery = bool(re.search(
+        r"(?:casual|ordinary|local|city) (?:drive|road|commute|highway|scenery)|"
+        r"(?:drive|commute|highway).{0,55}(?:sunset|rainbow|city view)|"
+        r"(?:sunset|rainbow) (?:view|capture|scene)",
+        visual_blob,
+        flags=re.I,
+    ))
     reflection = bool(re.search(
         r"relationship reflection|emotional reflection|personal reflection|reflecting on|personal introspection|"
         r"(?:emotional|supportive|encouraging|comforting) (?:message|sentiment|statement)|"
@@ -469,8 +528,15 @@ def review_risk_reasons(
         ["anime character", "fictional character", "manga", "webtoon", "deltarune", "haikyuu", "saiki"],
     )
     explicit_pov = bool(re.search(
-        r"\bpov\s*[:\-]|\bpoint of view\b|\bfirst[- ]person (?:perspective|view|camera|shot|footage|journey|experience)|"
+        r"(?:on[- ]screen|onscreen|overlaid|overlay) text.{0,80}(?<![a-z0-9])pov(?![a-z0-9])|"
+        r"\bpov\s*[:\-]|\bpoint of view\b|\bfirst[- ]person (?:perspective|view|journey|experience|scenario|roleplay)|"
         r"(?:from|through) (?:the )?(?:viewer|creator|camera)(?:'s)? perspective",
+        visual_blob,
+        flags=re.I,
+    ))
+    camera_angle_only = bool(re.search(
+        r"first[- ]person (?:camera|shot|footage|angle)|camera[- ]held (?:shot|footage)|"
+        r"camera (?:shows|follows|captures).{0,50}(?:hand|road|receipt|object)",
         visual_blob,
         flags=re.I,
     ))
@@ -486,6 +552,8 @@ def review_risk_reasons(
     abstract_template = _has(visual_blob, ["capcut template video", "oscillating abstract graphic", "abstract graphic animation", "template edit featuring abstract visual effects"])
     if travel and "Travel" not in labels:
         reasons.append("Explicit vacation/destination evidence is missing the Travel label")
+    if primary == "Travel" and everyday_scenery and not travel:
+        reasons.append("Travel label lacks trip or destination context; everyday scenery may be Slice of Life")
     if reflection and "Reflection" not in labels:
         reasons.append("Explicit reflection evidence is missing the Reflection label")
     if fashion and "Fashion" not in labels and ("Dance" in labels or primary == "Dance"):
@@ -502,6 +570,8 @@ def review_risk_reasons(
         reasons.append("Explicit first-person/viewer-perspective evidence is missing the POV label")
     if "POV" in labels and audience_prompt and not explicit_pov:
         reasons.append("Audience prompt lacks first-person evidence required for POV")
+    if "POV" in labels and camera_angle_only and not explicit_pov:
+        reasons.append("POV appears based only on camera angle without an explicit scenario")
     synthetic_music_performance = synthetic_subject and bool(re.search(
         r"sings? (?:into|on|to|while)|singing (?:into|on|to|while)|vocal performance|"
         r"performs? (?:a |the )?song|concert performance|"
@@ -517,6 +587,37 @@ def review_risk_reasons(
     ])
     if fictional_edit and "Movie/Tv/Drama Edits" not in labels and not tutorial:
         reasons.append("Anime/fictional scene montage is missing Movie/Tv/Drama Edits")
+    drama_edit = bool(re.search(
+        r"k[- ]?drama (?:edit|scene|montage|clips?)|"
+        r"(?:movie|tv|drama|anime|web series) (?:edit|scene montage|clip montage)|"
+        r"clips? from (?:a |the )?(?:romantic )?(?:k[- ]?drama|movie|tv show|anime|web series)",
+        visual_blob,
+        flags=re.I,
+    ))
+    celebrity_edit = bool(re.search(
+        r"(?:fan|celebrity|idol|artist|actor|actress|athlete|public figure) (?:edit|montage|compilation)|"
+        r"(?:k[- ]?pop|real) (?:celebrity|idol|artist|actor|actress).{0,45}(?:edit|montage|compilation)|"
+        r"fancam (?:edit|montage|compilation)",
+        visual_blob,
+        flags=re.I,
+    ))
+    if drama_edit and "Movie/Tv/Drama Edits" not in labels:
+        reasons.append("Explicit drama/fictional edit evidence is missing Movie/Tv/Drama Edits")
+    if celebrity_edit and "Celebrity Edits" not in labels:
+        reasons.append("Explicit real-person fan-edit evidence is missing Celebrity Edits")
+    public_figure_fanfiction = bool(re.search(
+        r"fan[- ]?fiction|fan[- ]written|text[- ]based.{0,45}(?:story|dialogue|slideshow)|"
+        r"written.{0,35}(?:fanfiction|dialogue|story)|prose narrative",
+        evidence_blob,
+        flags=re.I,
+    )) and bool(re.search(
+        r"\b(?:idol|k[- ]?pop|celebrity|public figure|actor|actress|music artist)s?\b|"
+        r"#(?:kpop|idol|lesserafim|celebrity)",
+        evidence_blob,
+        flags=re.I,
+    ))
+    if public_figure_fanfiction:
+        reasons.append("Public-figure fanfiction versus Celebrity Edits purpose needs adjudication")
     if (
         animated_fictional_character
         and "Movie/Tv/Drama Edits" not in labels
@@ -526,6 +627,26 @@ def review_risk_reasons(
         reasons.append("Animated/fictional character source needs Movie/Tv/Drama Edits verification")
     if abstract_template and "Media/Infotainment" in labels and not tutorial:
         reasons.append("Abstract template content is not informative by itself")
+
+    audience_concert_recording = bool(re.search(
+        r"(?:fan|audience member) (?:captures?|records?|films?).{0,70}(?:live|concert|artist|performer)|"
+        r"filmed from (?:the )?audience.{0,50}(?:concert|stage|performance)|"
+        r"audience (?:cheering|filming).{0,60}(?:artist|singer|band|performer) on stage",
+        visual_blob,
+        flags=re.I,
+    ))
+    if "Cover" in labels and audience_concert_recording:
+        reasons.append("Cover conflicts with an audience recording of the original live performer")
+
+    relationship_purpose = bool(re.search(
+        r"relationship dynamics?|couple.s daily (?:interaction|interactions|life)|"
+        r"couple.s relationship moments?|personal photos.{0,60}relationship moments?|"
+        r"romantic couple.{0,45}(?:interaction|daily moment|affection)",
+        visual_blob,
+        flags=re.I,
+    ))
+    if relationship_purpose and "Relationship" not in labels:
+        reasons.append("Explicit couple/relationship purpose is missing the Relationship label")
 
     # Model-generated details can reveal a contradiction even when confidence is high.
     if primary == "Dance" and fitness and not dance:
