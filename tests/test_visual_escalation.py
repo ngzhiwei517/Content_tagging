@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from review_routing import review_risk_reasons, visual_escalation_reasons
+from ugc_tagger.review_routing import review_risk_reasons, visual_escalation_reasons
 
 
 VIDEO_ROW = {"url": "https://www.tiktok.com/@tester/video/123"}
@@ -128,7 +128,7 @@ class BackendPromptTests(unittest.TestCase):
         sys.modules.setdefault("streamlit", streamlit_stub)
         sys.modules.setdefault("requests", SimpleNamespace())
         sys.modules.setdefault("cv2", SimpleNamespace())
-        from final_update2_backend import load_backend
+        from ugc_tagger.final_update2_backend import load_backend
 
         load_backend.cache_clear()
         cls.backend = load_backend()
@@ -996,7 +996,7 @@ class BackendPromptTests(unittest.TestCase):
 
     def test_pipeline_uses_visual_escalation_and_final_audit(self):
         source = Path(__file__).resolve().parents[1].joinpath(
-            "final_update2_backend_source.py"
+            "ugc_tagger", "final_update2_backend_source.py"
         ).read_text(encoding="utf-8")
         self.assertIn("cover_escalation_reasons", source)
         self.assertIn("frame_refinement_reasons", source)

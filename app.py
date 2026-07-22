@@ -27,8 +27,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
-from drama_analysis import campaign_track_catalog_status
-from model_comparison import (
+from ugc_tagger.drama_analysis import campaign_track_catalog_status
+from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_MODEL_OPTIONS,
     gemini_model_label,
@@ -36,7 +36,7 @@ from model_comparison import (
     normalize_gemini_model,
 )
 
-from final_update2_adapter import (
+from ugc_tagger.final_update2_adapter import (
     DRAMA_REVIEW_OPTIONS,
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
@@ -48,7 +48,7 @@ from final_update2_adapter import (
     scrape_links as final_update2_scrape_links,
     tag_candidates as final_update2_tag_candidates,
 )
-from instagram_reels_adapter import (
+from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
     SUPPORTED_PLATFORMS,
     TIKTOK,

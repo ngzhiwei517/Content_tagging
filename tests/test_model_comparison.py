@@ -9,9 +9,9 @@ import pandas as pd
 
 sys.modules.setdefault("cv2", SimpleNamespace())
 
-from final_update2_adapter import tag_candidates
-from final_update2_backend import load_backend
-from model_comparison import (
+from ugc_tagger.final_update2_adapter import tag_candidates
+from ugc_tagger.final_update2_backend import load_backend
+from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
     SUPPORTED_GEMINI_MODELS,
     TARGETED_VERIFIER_MODEL,
@@ -91,7 +91,7 @@ class ModelComparisonTests(unittest.TestCase):
         self.assertEqual(verified["_verifier_status"], "review")
 
     def test_verifier_uses_robust_json_decoder(self):
-        source = (ROOT / "final_update2_backend_source.py").read_text(encoding="utf-8")
+        source = (ROOT / "ugc_tagger" / "final_update2_backend_source.py").read_text(encoding="utf-8")
         self.assertIn("return _decode_gemini_json(response.text)", source)
         decoded = load_backend()._decode_gemini_json(
             'Result: {"decision":"confirm","unsupported_labels":[],"add_labels":[],"confidence":0.9,"evidence":["clear"],"reason":"ok"}'
@@ -138,7 +138,7 @@ class ModelComparisonTests(unittest.TestCase):
             {"id": "7001", "webVideoUrl": link},
             {"id": "7003", "webVideoUrl": second_link},
         ]
-        with patch("final_update2_adapter.load_backend", return_value=FakeBackend()):
+        with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=FakeBackend()):
             tagged = tag_candidates(
                 candidates,
                 records,
@@ -154,7 +154,7 @@ class ModelComparisonTests(unittest.TestCase):
         self.assertEqual(FakeBackend.active_model, DEFAULT_GEMINI_MODEL)
 
     def test_every_active_backend_call_reads_context_model(self):
-        source = (ROOT / "final_update2_backend_source.py").read_text(encoding="utf-8")
+        source = (ROOT / "ugc_tagger" / "final_update2_backend_source.py").read_text(encoding="utf-8")
         self.assertEqual(source.count("model=current_gemini_model()"), 4)
         self.assertEqual(source.count("_throttle_gemini_request()"), 5)
 
@@ -178,7 +178,7 @@ class ModelComparisonTests(unittest.TestCase):
         link = "https://www.tiktok.com/@tester/video/7002"
         candidates = pd.DataFrame([{"Source": "Comparison", "Market": "PH", "Track": "", "Link": link}])
         records = [{"id": "7002", "webVideoUrl": link}]
-        with patch("final_update2_adapter.load_backend", return_value=FakeBackend()):
+        with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=FakeBackend()):
             tagged = tag_candidates(candidates, records, "key", "token")
         self.assertFalse(bool(tagged.loc[0, "Gemini Called"]))
 

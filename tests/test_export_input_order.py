@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pandas as pd
 from openpyxl import load_workbook
 
-from final_update2_adapter import tag_candidates
+from ugc_tagger.final_update2_adapter import tag_candidates
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -104,7 +104,7 @@ class ExportInputOrderTests(unittest.TestCase):
             {"id": "7002", "webVideoUrl": candidates.loc[1, "Link"]},
             {"id": "7003", "webVideoUrl": candidates.loc[2, "Link"]},
         ]
-        with patch("final_update2_adapter.load_backend", return_value=FakeBackend()):
+        with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=FakeBackend()):
             tagged = tag_candidates(candidates, records, "key", "token")
         self.assertEqual(tagged["Link"].tolist(), candidates["Link"].tolist())
         self.assertTrue((tagged["Gemini Model"] == "gemini-3.1-flash-lite").all())

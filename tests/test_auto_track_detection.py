@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from final_update2_adapter import _record_music_name, _resolved_campaign_track
+from ugc_tagger.final_update2_adapter import _record_music_name, _resolved_campaign_track
 
 
 class AutoTrackDetectionTests(unittest.TestCase):

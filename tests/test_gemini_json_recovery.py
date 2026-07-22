@@ -8,7 +8,11 @@ from pathlib import Path
 class GeminiJsonRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        source_path = Path(__file__).resolve().parents[1] / "final_update2_backend_source.py"
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "ugc_tagger"
+            / "final_update2_backend_source.py"
+        )
         source = source_path.read_text(encoding="utf-8")
         parsed = ast.parse(source)
         function = next(

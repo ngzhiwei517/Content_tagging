@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from instagram_reels_adapter import (
+from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
     TIKTOK,
     creator_from_url as platform_creator_from_url,

@@ -18,8 +18,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Compile
-        run: >-
-          python -m py_compile app.py final_update2_adapter.py final_update2_backend.py
-          final_update2_backend_source.py model_comparison.py review_routing.py
+        run: |
+          python -m py_compile app.py
+          python -m compileall -q ugc_tagger
       - name: Unit tests
         run: python -m unittest discover -s tests -v

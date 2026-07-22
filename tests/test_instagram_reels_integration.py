@@ -5,15 +5,15 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from final_update2_adapter import (
+from ugc_tagger.final_update2_adapter import (
     MARKETING_EXPORT_COLUMNS,
     _to_ui_row,
     index_records,
     match_record,
     scrape_links,
 )
-from final_update2_backend import load_backend
-from instagram_reels_adapter import (
+from ugc_tagger.final_update2_backend import load_backend
+from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_ACTOR_ID,
     INSTAGRAM_POST_ACTOR_ID,
     INSTAGRAM_REEL_ACTOR_ID,
@@ -318,8 +318,8 @@ class InstagramScrapeTests(unittest.TestCase):
                 {"id": "7600000000000000001", "webVideoUrl": links[0]}
             ]
         )
-        with patch("final_update2_adapter.load_backend", return_value=fake_backend), patch(
-            "final_update2_adapter.scrape_instagram_posts",
+        with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=fake_backend), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
             return_value=[normalize_instagram_record(instagram_video_record(), VIDEO_URL)],
         ) as ig_scrape:
             records = scrape_links([tiktok_url, VIDEO_URL], "token")

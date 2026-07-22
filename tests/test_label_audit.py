@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from final_update2_adapter import (
+from ugc_tagger.final_update2_adapter import (
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
     _to_ui_row,

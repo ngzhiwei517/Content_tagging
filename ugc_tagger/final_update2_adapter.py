@@ -10,8 +10,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from final_update2_backend import load_backend
-from instagram_reels_adapter import (
+from ugc_tagger.final_update2_backend import load_backend
+from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
     TIKTOK,
     detect_platform,
@@ -20,8 +20,8 @@ from instagram_reels_adapter import (
     post_identifier,
     scrape_instagram_posts,
 )
-from model_comparison import DEFAULT_GEMINI_MODEL, normalize_gemini_model
-from drama_analysis import (
+from ugc_tagger.model_comparison import DEFAULT_GEMINI_MODEL, normalize_gemini_model
+from ugc_tagger.drama_analysis import (
     DRAMA_EXPORT_COLUMNS,
     DRAMA_REVIEW_OPTIONS,
     build_review_drama_updates,
