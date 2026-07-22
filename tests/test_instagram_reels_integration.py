@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from ugc_tagger import __version__ as APP_VERSION
 from ugc_tagger.final_update2_adapter import (
+    APP_VERSION,
     MARKETING_EXPORT_COLUMNS,
     _to_ui_row,
     index_records,

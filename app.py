@@ -27,7 +27,6 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
-from ugc_tagger import __version__ as APP_VERSION
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -38,6 +37,7 @@ from ugc_tagger.model_comparison import (
 )
 
 from ugc_tagger.final_update2_adapter import (
+    APP_VERSION,
     DRAMA_REVIEW_OPTIONS,
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
