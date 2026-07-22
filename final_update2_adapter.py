@@ -72,6 +72,11 @@ QA_AUDIT_COLUMNS = [
 ]
 
 
+# -----------------------------------------------------------------------------
+# Scalar normalization and label-audit history
+# -----------------------------------------------------------------------------
+
+
 def _text(value) -> str:
     try:
         if pd.isna(value):
@@ -278,6 +283,11 @@ def review_audit_update(
     }
 
 
+# -----------------------------------------------------------------------------
+# Post identity and scraped-record matching
+# -----------------------------------------------------------------------------
+
+
 def video_id(url: str) -> str:
     match = re.search(r"/(?:video|photo)/(\d+)", _text(url))
     return match.group(1) if match else ""
@@ -331,6 +341,11 @@ def review_cache(records: Iterable[Dict]) -> Dict[str, Dict]:
     cache.update({f"id:{key}": value for key, value in by_id.items()})
     cache.update({f"url:{key}": value for key, value in by_url.items()})
     return cache
+
+
+# -----------------------------------------------------------------------------
+# Canonical backend records to current UI rows
+# -----------------------------------------------------------------------------
 
 
 def _creator_followers(record: Dict) -> int:
@@ -579,6 +594,11 @@ def enrich_review_drama(
         apify_token,
         log_list=logs if logs is not None else [],
     ))
+
+
+# -----------------------------------------------------------------------------
+# Public adapter API used by app.py
+# -----------------------------------------------------------------------------
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:

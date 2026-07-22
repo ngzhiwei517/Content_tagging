@@ -15,6 +15,11 @@ LOW_CONFIDENCE_REVIEW = 0.80
 QA_AUDIT_PERCENT = 5
 
 
+# -----------------------------------------------------------------------------
+# Reusable evidence and post-structure helpers
+# -----------------------------------------------------------------------------
+
+
 def _text(value) -> str:
     if value is None:
         return ""
@@ -164,6 +169,11 @@ def _stable_key(row) -> str:
     return next((_text(value) for value in candidates if _text(value)), "")
 
 
+# -----------------------------------------------------------------------------
+# Deterministic audit sampling and visual escalation
+# -----------------------------------------------------------------------------
+
+
 def deterministic_audit_sample(row, percent: int = QA_AUDIT_PERCENT) -> bool:
     key = _stable_key(row)
     if not key or percent <= 0:
@@ -290,6 +300,11 @@ def visual_escalation_reasons(
             reasons.append("Text post lacks clear educational or informational purpose")
 
     return list(dict.fromkeys(reasons))
+
+
+# -----------------------------------------------------------------------------
+# Final review-risk composition and routing policy
+# -----------------------------------------------------------------------------
 
 
 def review_risk_reasons(

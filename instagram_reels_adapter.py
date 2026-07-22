@@ -21,6 +21,11 @@ INSTAGRAM_POST_ACTOR_ID = "apify/instagram-scraper"
 INSTAGRAM_ACTOR_ID = INSTAGRAM_REEL_ACTOR_ID
 
 
+# -----------------------------------------------------------------------------
+# Platform URL identity and normalization
+# -----------------------------------------------------------------------------
+
+
 def _text(value) -> str:
     if value is None:
         return ""
@@ -143,6 +148,11 @@ def creator_from_url(url: str) -> str:
         match = re.search(r"tiktok\.com/@([^/?#]+)", value, flags=re.IGNORECASE)
         return match.group(1) if match else ""
     return ""
+
+
+# -----------------------------------------------------------------------------
+# Instagram payload extraction and canonical record mapping
+# -----------------------------------------------------------------------------
 
 
 def _instagram_record_url(record: Dict) -> str:
@@ -360,6 +370,11 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         normalized["error"] = _text(raw.get("error"))
         normalized["errorCode"] = _text(raw.get("errorCode"))
     return normalized
+
+
+# -----------------------------------------------------------------------------
+# Apify execution and result matching
+# -----------------------------------------------------------------------------
 
 
 def _dataset_id(run) -> str:
