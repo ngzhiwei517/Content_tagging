@@ -1,3 +1,10 @@
+"""Current Streamlit application for shared UGC post tagging.
+
+This module owns the six-step marketing workflow and its presentation. Scraping,
+classification and review policy are delegated through ``final_update2_adapter``;
+keep reusable tagging rules in the backend modules rather than in page code.
+"""
+
 import io
 import csv
 import re
@@ -71,9 +78,9 @@ CREATIVE_TYPES = [
     "Movie/Tv/Drama Edits", "Celebrity Edits", "Cover", "Remix", "Others",
 ]
 
-# -----------------------------
-# CSS
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Theme and page layout
+# -----------------------------------------------------------------------------
 st.markdown(
     """
 <style>
@@ -603,9 +610,9 @@ table.clean-table tr:hover td{background:#eef6ff !important;}
 
 
 
-# -----------------------------
-# V38 visual override: refined marketing/SaaS look
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Visual polish layered over the base theme
+# -----------------------------------------------------------------------------
 st.markdown(
     """
 <style>
@@ -826,9 +833,9 @@ table.clean-table tr:hover td{background:#eef4ff !important;}
     unsafe_allow_html=True,
 )
 
-# -----------------------------
-# State
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Session state and navigation
+# -----------------------------------------------------------------------------
 DEFAULT_STATE = {
     "step": 1,
     "mode": "General UGC creative types",
@@ -861,9 +868,7 @@ def reset_review_state_for_new_tagging_run() -> None:
             st.session_state.pop(key, None)
     st.session_state.review_pointer = 0
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# Navigation helpers
 def go(step: int):
     st.session_state.step = step
     _persist_runtime_checkpoint_v68_15()
@@ -912,6 +917,9 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_elapsed_v68_41_4",
 )
 RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
+
+
+# Runtime checkpoint persistence
 
 
 def _valid_runtime_id_v68_15(value) -> str:
@@ -1058,6 +1066,9 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     st.session_state.runtime_restore_checked_v68_15 = True
     _sync_runtime_query_v68_15()
     _persist_runtime_checkpoint_v68_15()
+
+
+# Display values and engagement metrics
 
 
 def clean_api_secret(v) -> str:
@@ -1273,6 +1284,9 @@ def esc(v) -> str:
     return html.escape(display_empty(v, ""))
 
 
+# Links, markets and date selection
+
+
 def is_tiktok_link(v) -> bool:
     return platform_for_url(safe_str(v)) == TIKTOK
 
@@ -1430,6 +1444,9 @@ def selection_rank_metric_label(selection_mode: str, rank_metrics) -> str:
     metrics = [rank_metrics] if isinstance(rank_metrics, str) else list(rank_metrics or [])
     labels = [safe_str(metric) for metric in metrics if safe_str(metric)]
     return ", ".join(labels) or "Total Engagement"
+
+
+# Uploaded table detection and normalization
 
 
 def parse_links(text: str, platform: str = "") -> List[str]:
@@ -1669,6 +1686,9 @@ def standardize_file_rows(
     return out_df, cols
 
 
+# Current batch assembly and deduplication
+
+
 def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep first-source order while backfilling missing metadata from duplicate URLs."""
     if frame is None or frame.empty or "_link_key" not in frame.columns:
@@ -1724,6 +1744,9 @@ def append_to_batch(new_df: pd.DataFrame) -> Tuple[int, int]:
     added = len(st.session_state.batch_df) - before
     skipped = len(new_df) - added
     return added, max(skipped, 0)
+
+
+# Reusable HTML and workflow presentation helpers
 
 
 def render_table(df: pd.DataFrame, max_rows: int = 10, cols: Optional[List[str]] = None) -> str:
@@ -1891,6 +1914,9 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
         return pd.concat(pieces, ignore_index=True).reset_index(drop=True)
 
     return sort_and_take(out).reset_index(drop=True)
+
+
+# Scraped media lookup and review previews
 
 
 def _extract_tiktok_id_from_url(url: str) -> str:
@@ -2254,6 +2280,9 @@ def _record_to_metrics(rec: Dict) -> Dict:
     }
 
 
+# Gemini prompt, request and response normalization
+
+
 def _build_prompt_v43(meta: Dict) -> str:
     labels = ", ".join(CREATIVE_TYPES)
     return f"""
@@ -2385,9 +2414,9 @@ def _normalize_ai_result_v43(result: Dict) -> Dict:
 
 
 
-# -----------------------------
-# Phase 2: Creative KB + guardrails + lightweight Tier 2
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Creative Knowledge Base, guardrails and lightweight Tier 2 analysis
+# -----------------------------------------------------------------------------
 CREATIVE_KB_DIR = "creative_knowledge"
 
 @st.cache_data(show_spinner=False)
@@ -2704,6 +2733,9 @@ def _apply_guardrails_and_kb_v44(ai: Dict, meta: Dict) -> Dict:
     return ai
 
 
+# Temporal video analysis and human-review suggestions
+
+
 def _download_video_v44(video_url: str, apify_token: str, out_path: str) -> bool:
     if not video_url:
         return False
@@ -2968,6 +3000,9 @@ be classified from the available evidence.
     ai = _apply_consistency_soft_audit_v46(ai, meta)
     return ai
 
+# Mock/reference execution and post selection
+
+
 def _mock_results_v43(df: pd.DataFrame) -> pd.DataFrame:
     labels = ["Dance", "Lip Sync", "Relationship", "Quotes", "Beauty", "Comedy", "Celebrity Edits", "Media/Infotainment"]
     rows = []
@@ -3151,6 +3186,9 @@ def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str
             out.loc[sensitive_mask, "Review Note"] = "Sensitive post skipped in Tag every link mode; no replacement was added."
             out.loc[sensitive_mask, "QA Reason"] = "Sensitive post skipped automatically and excluded from Review and final exports."
     return out, count
+
+
+# Production tagging orchestration
 
 
 def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
@@ -3344,6 +3382,9 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
     return result
 
 
+# Workbook export helpers
+
+
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -3401,6 +3442,9 @@ def grouped_excel_bytes(final_df: pd.DataFrame) -> bytes:
     add_sheet("Links Only", links_df)
     return to_excel_bytes(sheets)
 
+
+
+# Summary charts and aggregate performance
 
 
 def render_plotly_chart(fig) -> None:
@@ -3715,9 +3759,9 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
         return df[df[col].fillna("").astype(str).str.strip().eq("")]
     return df[df[col].fillna("").astype(str).str.strip().eq(value)]
 
-# -----------------------------
-# Header
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Application shell and workflow pages
+# -----------------------------------------------------------------------------
 _restore_runtime_checkpoint_v68_15()
 _persist_runtime_checkpoint_v68_15()
 
@@ -3738,9 +3782,7 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         unsafe_allow_html=True,
     )
 
-# -----------------------------
-# STEP 1
-# -----------------------------
+# STEP 1: API keys
 if st.session_state.step == 1:
     st.markdown("<div class='card page-heading'><h2>API Keys</h2></div>", unsafe_allow_html=True)
 
@@ -3766,9 +3808,7 @@ if st.session_state.step == 1:
             st.success("API keys saved for this session.")
             go(2)
 
-# -----------------------------
-# STEP 2
-# -----------------------------
+# STEP 2: Add posts
 elif st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
@@ -3954,8 +3994,7 @@ elif st.session_state.step == 2:
                 go(3)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# STEP 3
-# -----------------------------
+# STEP 3: Select posts
 elif st.session_state.step == 3:
     batch = st.session_state.batch_df
     st.markdown("<div class='card page-heading'><h2>Select posts</h2><p class='sub'>Choose top posts or tag every link.</p></div>", unsafe_allow_html=True)
@@ -4248,9 +4287,7 @@ elif st.session_state.step == 3:
             go(4)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# -----------------------------
-# STEP 4
-# -----------------------------
+# STEP 4: Run tagging
 elif st.session_state.step == 4:
     selected = st.session_state.selected_df if not st.session_state.selected_df.empty else selected_posts_preview(st.session_state.batch_df)
     st.markdown("<div class='card page-heading'><h2>Run tagging</h2></div>", unsafe_allow_html=True)
@@ -4296,9 +4333,7 @@ elif st.session_state.step == 4:
             else:
                 st.warning("No tagged rows were created. Please check your API keys, selected links, or Apify/Gemini error message above.")
 
-# -----------------------------
-# STEP 5
-# -----------------------------
+# STEP 5: Review
 elif st.session_state.step == 5:
     tagged = st.session_state.tagged_df
     st.markdown("<div class='card page-heading'><h2>Review</h2><p class='sub'>Check posts that need a human decision.</p></div>", unsafe_allow_html=True)
@@ -4710,9 +4745,7 @@ elif st.session_state.step == 5:
         if st.button("Continue to Summary", type="primary", width="stretch", key="review_continue_v55"):
             go(6)
 
-# -----------------------------
-# STEP 6
-# -----------------------------
+# STEP 6: Summary and export
 elif st.session_state.step == 6:
     tagged = st.session_state.tagged_df
     st.markdown("<div class='card page-heading'><h2>Summary & Export</h2></div>", unsafe_allow_html=True)

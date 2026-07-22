@@ -48,6 +48,11 @@ CONTENT_KINDS = (
     "POV",
     "Other",
 )
+
+
+# -----------------------------------------------------------------------------
+# Broad-label and entertainment-news interpretation
+# -----------------------------------------------------------------------------
 DRAMA_TYPES = ("General Drama", "BL Drama", "GL Drama", "Unknown")
 EDIT_FOCUS = (
     "Fictional Story",
@@ -654,6 +659,11 @@ def _hashtags(row) -> str:
     return " ".join(names)
 
 
+# -----------------------------------------------------------------------------
+# Drama-detail prompt construction
+# -----------------------------------------------------------------------------
+
+
 def build_drama_prompt(result: Mapping, row=None) -> str:
     """Build the conditional second-pass prompt for drama/entertainment detail."""
     caption = _text(_row_get(row, "text"))
@@ -824,6 +834,11 @@ def _generic_audio_title(value: str) -> bool:
         text == phrase or text.startswith(f"{phrase} ")
         for phrase in generic_phrases
     )
+
+
+# -----------------------------------------------------------------------------
+# Campaign-track lookup and audio comparison
+# -----------------------------------------------------------------------------
 
 
 def split_campaign_track(value: str) -> Tuple[str, str]:
@@ -1742,6 +1757,11 @@ def route_thailand_carousel_ambiguity_to_review(result: Dict, row=None) -> Dict:
     return output
 
 
+# -----------------------------------------------------------------------------
+# Detailed drama subtype, source and format inference
+# -----------------------------------------------------------------------------
+
+
 def _evidence_list(value) -> List[str]:
     values = value if isinstance(value, list) else [_text(value)]
     cleaned: List[str] = []
@@ -2419,6 +2439,11 @@ def _structured_details(base_details: str, fields: Mapping[str, str]) -> str:
         f"Audio Version: {fields['audio_version']}",
     ])
     return "\n".join(lines)
+
+
+# -----------------------------------------------------------------------------
+# Human-review defaults, enrichment and export fields
+# -----------------------------------------------------------------------------
 
 
 def parse_structured_details(value: str) -> Dict[str, str]:

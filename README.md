@@ -67,6 +67,7 @@ Public Instagram metrics depend on what the selected Apify actor and Instagram e
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Code map](docs/CODE_MAP.md)
 - [Project context](docs/PROJECT_CONTEXT.md)
 - [Validation and limitations](docs/VALIDATION.md)
 - [Changelog](CHANGELOG.md)

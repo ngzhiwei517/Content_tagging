@@ -1,3 +1,11 @@
+"""Preserved tagging backend and legacy Streamlit interface.
+
+The current application loads the backend definitions in this file through
+``final_update2_backend`` and calls them through ``final_update2_adapter``. The
+legacy UI below ``run_pipeline`` remains for compatibility but is not executed
+by the current application.
+"""
+
 import streamlit as st
 import pandas as pd
 import json
@@ -290,6 +298,11 @@ ALLOWED_SET = set(ALLOWED_CREATIVE_TYPES)
 #   track_rules.json
 # This KB is for the ORIGINAL tagging app taxonomy, not Creator Core drama tags.
 CREATIVE_KB_DIR = "creative_knowledge"
+
+# -----------------------------------------------------------------------------
+# Creative Knowledge Base
+# -----------------------------------------------------------------------------
+
 
 @st.cache_data(show_spinner=False)
 def load_creative_kb(base_dir: str = CREATIVE_KB_DIR):
@@ -735,6 +748,10 @@ def apply_knowledge_guardrails(result, row=None):
         result['reasoning'] = (old + ' | ' + reason_add).strip(' |')
     return result
 
+# -----------------------------------------------------------------------------
+# Gemini model context and runtime controls
+# -----------------------------------------------------------------------------
+
 # Default Gemini model. The optional 3.5 run and targeted verifier use the same
 # isolated context without sharing mutable model state between sessions.
 GEMINI_MODEL = DEFAULT_GEMINI_MODEL
@@ -803,6 +820,10 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# -----------------------------------------------------------------------------
+# Source ingestion, session records and Apify normalization
+# -----------------------------------------------------------------------------
 
 # Persistent raw JSON index helpers.
 # The review page should always use the uploaded TikTok JSON as the source of truth
@@ -1143,6 +1164,11 @@ def _auto_remove_unusable_existing_rows():
 import math as _math_global
 
 import math as _math_global
+
+# -----------------------------------------------------------------------------
+# Media extraction and reusable evidence helpers
+# -----------------------------------------------------------------------------
+
 
 def _si(val, default=0):
     """Safe int conversion handling NaN/None/float strings from pandas round-trips."""
@@ -1562,6 +1588,11 @@ def _kb_track_rule(row):
         return (kb.get('track_rules') or {}).get(track, {}) or {}, track
     except Exception:
         return {}, ''
+
+
+# -----------------------------------------------------------------------------
+# Creative-type and market-specific guardrails
+# -----------------------------------------------------------------------------
 
 
 def apply_kr_track_dance_guardrails(result, row=None):
@@ -3730,6 +3761,11 @@ def apply_sg_scene_balance_guardrails(result, row=None):
 
 
 
+# -----------------------------------------------------------------------------
+# Final response normalization and guardrail composition
+# -----------------------------------------------------------------------------
+
+
 def coerce_gemini_result(obj):
     """Normalize any Gemini response into the dict schema used by the tagger.
 
@@ -4064,6 +4100,11 @@ def apply_post_guardrails(result, row=None):
         != (final_labels[0] if final_labels else '')
     )
     return result
+
+# -----------------------------------------------------------------------------
+# Gemini prompt and transport
+# -----------------------------------------------------------------------------
+
 
 def build_prompt(row):
     caption    = row.get('text', '')
@@ -4506,6 +4547,11 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
     return {'parse_error': True, 'review_reason': 'Drama enrichment retries exhausted'}
 
 
+# -----------------------------------------------------------------------------
+# Conditional drama enrichment and targeted evidence verification
+# -----------------------------------------------------------------------------
+
+
 def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id='', log_list=None):
     """Run a visual second pass only after the broad drama label is final."""
     if not has_drama_label(result):
@@ -4769,6 +4815,11 @@ def _should_try_video_fallback(row, result, status):
         or (motion_label and conf < 0.82)
     )
 
+# -----------------------------------------------------------------------------
+# Validation and normalized output records
+# -----------------------------------------------------------------------------
+
+
 def validate(result):
     result = coerce_gemini_result(result)
     issues, score = [], 0
@@ -4897,6 +4948,11 @@ def build_out(row, vid_id, market, track, result, tier_used, status, score, issu
     }
     output.update(drama_export_values(result))
     return output
+
+# -----------------------------------------------------------------------------
+# End-to-end tagging pipeline
+# -----------------------------------------------------------------------------
+
 
 def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_seconds=1, on_row_done=None, source_file="", campaign_market=""):
     from google.genai import types as gtypes
@@ -5426,6 +5482,10 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
 # v16 KB + guardrail backend is used above.
 # ══════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------------
+# Preserved legacy Streamlit interface (not executed by the current app)
+# -----------------------------------------------------------------------------
+
 PAGES = ["Home", "Batch Filter", "Upload & Tag", "Review Flagged", "Summary", "Export"]
 if 'page' not in st.session_state:
     st.session_state.page = "Home"

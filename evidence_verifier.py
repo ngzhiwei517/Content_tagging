@@ -139,6 +139,11 @@ STRONG_LABEL_PATTERNS = {
 }
 
 
+# -----------------------------------------------------------------------------
+# Evidence normalization and label support checks
+# -----------------------------------------------------------------------------
+
+
 TEXT_RESOLVABLE_REVIEW_MARKERS = (
     "conflicts with",
     "evidence is stronger than",
@@ -317,6 +322,11 @@ def label_has_explicit_contradiction(label: str, result: Dict, row=None) -> bool
     return bool(patterns) and _has_any(_observation(result), patterns)
 
 
+# -----------------------------------------------------------------------------
+# Target selection and verifier prompt construction
+# -----------------------------------------------------------------------------
+
+
 def resolvable_review_reasons(review_reasons: Iterable[str] | None) -> List[str]:
     """Keep only review reasons that a text consistency check can resolve."""
     selected: List[str] = []
@@ -402,6 +412,11 @@ Return only JSON using this schema:
 
 Evidence packet:
 {json.dumps(payload, ensure_ascii=False)}"""
+
+
+# -----------------------------------------------------------------------------
+# Verifier response validation and conservative application
+# -----------------------------------------------------------------------------
 
 
 def normalize_verifier_response(payload, allowed_labels: Iterable[str]) -> Dict:
