@@ -3,7 +3,7 @@
 ## Project summary
 This repository contains a Streamlit prototype for an AI-assisted TikTok UGC creative-type tagging tool for music marketing workflows. The tool should accept generic post CSV/XLSX files or pasted TikTok links, scrape TikTok metadata using Apify, classify posts using Gemini, apply guardrails and a Creative Knowledge Base, support human review, and export clean marketing reports.
 
-v68.41.6 is the current isolated final-validation candidate and is integrated end to end.
+v68.42.3 is the current local integration candidate. It preserves the validated v68.41.6 TikTok path and adds Instagram Reels through a shared workflow.
 
 ## Current product direction
 - Use the v68.14 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
