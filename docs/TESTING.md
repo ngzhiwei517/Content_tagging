@@ -20,6 +20,9 @@ python -m unittest discover -s tests -v
 6. Keep, edit and remove one post.
 7. Check Summary and download the CSV, grouped XLSX and QA report.
 8. Confirm TikTok and Instagram rows remain in one export and unavailable Instagram metrics show `Not available`.
+9. For one public Reel, confirm caption, creator, audio and video preview are populated after scraping.
+10. If the full-metrics actor returns Shares/Saves, confirm they survive Review, Summary, CSV, XLSX and QA export.
+11. Simulate or observe a full-metrics actor failure and confirm the broad Instagram actor fallback still produces a taggable row.
 
 ## Accuracy evaluation
 

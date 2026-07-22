@@ -1,14 +1,16 @@
-# Project Context — TikTok UGC Creative Type Tagger
+# Project Context — UGC Creative Type Tagger
 
 ## Current release
 
-v68.41.6 is the current isolated final-validation candidate. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
+v68.42.4 is the shared TikTok and Instagram Reels finalization candidate. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
+
+Instagram Reels uses a platform-specific Apify adapter before the shared Gemini taxonomy, review queue and exports. The adapter supports both current flat actor results and the earlier nested result shape. Missing public Shares or Saves remain `Not available`; the app never reports an unavailable metric as a confirmed zero.
 
 The verifier checks consistency between existing Narrative, Content Details and labels; it is not an independent second view of the original media and must not be presented as a proven accuracy lift until a fresh locked holdout is scored.
 
 ## Goal and users
 
-The tool helps marketing teams tag TikTok UGC posts into broad Creative Type labels and analyse performance. The UI must remain direct, non-technical and marketing-friendly.
+The tool helps marketing teams tag TikTok and Instagram Reels UGC posts into broad Creative Type labels and analyse performance. The UI must remain direct, non-technical and marketing-friendly.
 
 ## Accepted workflow
 
@@ -24,11 +26,11 @@ General UGC is the default. Do not add a General-versus-Drama selector unless ex
 ## Accepted input behaviour
 
 - Upload one or more CSV/XLSX files.
-- Paste TikTok links.
+- Paste TikTok or Instagram post/Reel links.
 - Uploaded and pasted sources are additive.
-- TikTok link is the only required field.
+- A supported TikTok or Instagram post link is the only required field.
 - Market and Track are optional.
-- Deduplicate by TikTok video ID or normalized URL.
+- Deduplicate by TikTok video ID, Instagram shortcode or normalized URL.
 
 ## Accepted selection behaviour
 

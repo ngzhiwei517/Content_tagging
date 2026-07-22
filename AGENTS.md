@@ -1,22 +1,22 @@
-# AGENTS.md — UGC TikTok Tagging Tool
+# AGENTS.md — UGC Content Tagging Tool
 
 ## Project summary
-This repository contains a Streamlit prototype for an AI-assisted TikTok UGC creative-type tagging tool for music marketing workflows. The tool should accept generic post CSV/XLSX files or pasted TikTok links, scrape TikTok metadata using Apify, classify posts using Gemini, apply guardrails and a Creative Knowledge Base, support human review, and export clean marketing reports.
+This repository contains a Streamlit prototype for AI-assisted TikTok and Instagram Reels UGC creative-type tagging in music marketing workflows. The tool accepts generic post CSV/XLSX files or pasted post links, scrapes platform metadata using Apify, classifies posts using Gemini, applies guardrails and a Creative Knowledge Base, supports human review, and exports clean marketing reports.
 
-v68.42.3 is the current local integration candidate. It preserves the validated v68.41.6 TikTok path and adds Instagram Reels through a shared workflow.
+v68.42.4 is the current Instagram Reels finalization candidate. It preserves the validated v68.41.6 TikTok path and runs TikTok and Instagram Reels through one shared workflow.
 
 ## Current product direction
 - Use the v68.14 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.
 - The app is now general UGC tagging by default. Do not show a General vs Drama selector in the current UI.
 - Drama / Creator Core detailed mode is a possible future route, but do not integrate it unless explicitly requested.
-- User-facing wording should say Post, TikTok post, or UGC post. Avoid MelodyIQ-specific wording unless working on legacy compatibility.
+- User-facing wording should say Post, TikTok post, Instagram Reel, or UGC post. Avoid MelodyIQ-specific wording unless working on legacy compatibility.
 - Marketing users are the target users, not analysts. Keep pages clean, direct, and non-technical.
 
 ## Main workflow
 1. Setup / API Keys
 2. Add Posts
    - Upload one or more CSV/XLSX post files
-   - Optionally paste TikTok links
+   - Optionally paste TikTok or Instagram post links
    - Both uploaded rows and pasted links add into one Current Batch
 3. Select Posts
    - Top posts
@@ -30,12 +30,12 @@ v68.42.3 is the current local integration candidate. It preserves the validated 
 Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic guardrails -> optional Creative Knowledge Base -> market guardrails -> temporal validation -> targeted evidence verification for suspicious conflicts -> human review if needed -> export.
 
 ## Important behavior rules
-- The only required input is a TikTok link column or pasted TikTok links.
+- The only required input is a supported TikTok or Instagram post link column or pasted links.
 - Market is optional. If missing, keep blank in the working data and group/export as Other only when needed.
 - Track is optional. If missing, show Not specified in summaries instead of blank.
 - CSV and pasted links are additive. Adding one source must never erase the other.
 - Multiple CSV/XLSX files must be supported.
-- Duplicate TikTok URLs should be deduplicated by TikTok video ID or normalized URL.
+- Duplicate post URLs should be deduplicated by TikTok video ID, Instagram shortcode, or normalized URL.
 - Deleted/private/unavailable posts should be auto-removed, not sent to manual review.
 - Blank AI tag should become Others rather than empty output.
 - Do not expose technical tier/confidence/guardrail details in marketing-facing Summary. Keep those only in QA/report exports.
@@ -70,7 +70,7 @@ Input posts -> Apify scraping -> Gemini multimodal analysis -> global/semantic g
 - Do not learn from every raw AI output automatically.
 - Future database/KB updates should come only from reviewed or approved rows.
 - The KB should store reusable patterns such as creator, track, market, post format, keywords, hashtags, and corrected labels.
-- Do not use exact TikTok URL -> label memory for prediction.
+- Do not use exact post URL -> label memory for prediction.
 
 ## Safety and secrets
 - Never hardcode API keys, Apify tokens, Gemini keys, or credentials.

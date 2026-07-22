@@ -177,7 +177,7 @@ def _image_urls(record: Dict) -> List[str]:
             add(
                 _first(
                     value,
-                    ("displayUrl", "imageUrl", "url", "thumbnailUrl", "thumbnail_url"),
+                    ("displayUrl", "imageUrl", "media_url", "url", "thumbnailUrl", "thumbnail_url"),
                 )
             )
 
@@ -185,6 +185,8 @@ def _image_urls(record: Dict) -> List[str]:
         add(item)
     for child in record.get("childPosts", []) if isinstance(record.get("childPosts"), list) else []:
         add(child)
+    for item in record.get("media_items", []) if isinstance(record.get("media_items"), list) else []:
+        add(item)
     image_versions = record.get("image_versions")
     if isinstance(image_versions, dict):
         for item in image_versions.get("items", []) if isinstance(image_versions.get("items"), list) else []:
@@ -222,14 +224,14 @@ def _music(record: Dict) -> Dict:
     audio_part = next((item for item in audio_parts if isinstance(item, dict)), {})
     name = _text(
         _first(info, ("song_name", "songName", "musicName", "audio_name", "title"))
-        or _first(record, ("audioName", "musicName", "soundName"))
+        or _first(record, ("audioName", "audio_title", "musicName", "soundName"))
         or _first(meta, ("song_name", "musicName", "audioName"))
         or _first(audio_part, ("display_title", "title", "song_name"))
         or _first(original_sound, ("original_audio_title", "title"))
     )
     artist = _text(
         _first(info, ("artist_name", "artistName", "musicAuthor", "author"))
-        or _first(record, ("musicAuthor", "audioAuthor"))
+        or _first(record, ("musicAuthor", "audioAuthor", "audio_artist"))
         or _first(meta, ("artist_name", "musicAuthor"))
         or _first(audio_part, ("display_artist", "artist", "artist_name"))
     )
@@ -260,6 +262,20 @@ def _metric_available(record: Dict, top_level_keys: Iterable[str], metric_keys: 
     return any(key in metrics and metrics.get(key) is not None for key in metric_keys)
 
 
+def _record_error(record: Dict) -> str:
+    """Return an actionable actor error without treating successful status text as failure."""
+    explicit = _text(record.get("error") or record.get("errorCode"))
+    if explicit:
+        return explicit
+    status = _text(record.get("status")).casefold().replace("-", "_").replace(" ", "_")
+    if status in {
+        "error", "failed", "not_found", "private", "deleted", "unavailable",
+        "blocked", "age_restricted", "invalid_url",
+    }:
+        return status.upper()
+    return ""
+
+
 def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
     """Return one Instagram item in the classifier's canonical record shape."""
     raw = dict(record or {})
@@ -268,7 +284,7 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
     code = _instagram_record_shortcode(raw) or instagram_shortcode(requested_url)
     images = _image_urls(raw)
     video_url = _video_url(raw)
-    type_text = _text(raw.get("type") or raw.get("media_name")).casefold()
+    type_text = _text(raw.get("type") or raw.get("media_name") or raw.get("post_type")).casefold()
     product_type = _text(raw.get("productType") or raw.get("product_type")).casefold()
     children = raw.get("childPosts") if isinstance(raw.get("childPosts"), list) else []
     is_slideshow = (
@@ -279,15 +295,15 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
     )
     user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
     creator = _text(
-        _first(raw, ("ownerUsername", "username"))
+        _first(raw, ("ownerUsername", "owner_username", "username"))
         or _first(user, ("username", "user_name"))
     )
     creator_display = _text(
-        _first(raw, ("ownerFullName", "fullName"))
+        _first(raw, ("ownerFullName", "owner_full_name", "fullName"))
         or _first(user, ("full_name", "fullName", "name"))
     )
     followers = _number(
-        _first(raw, ("ownerFollowersCount", "followersCount", "followerCount"))
+        _first(raw, ("ownerFollowersCount", "owner_follower_count", "followersCount", "followerCount"))
         or _nested(raw, "owner", "followersCount", default=0)
         or _first(user, ("follower_count", "followers_count", "followers"), default=0)
         or _nested(raw, "metrics", "user_follower_count", default=0)
@@ -306,7 +322,7 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
     music = _music(raw)
 
     normalized = {
-        "id": _text(_first(raw, ("id", "postId", "pk"))) or code or normalize_post_url(public_url),
+        "id": _text(_first(raw, ("id", "postId", "post_id", "pk"))) or code or normalize_post_url(public_url),
         "url": public_url,
         "webVideoUrl": public_url,
         "submittedVideoUrl": requested_url or public_url,
@@ -315,20 +331,23 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         "hashtags": hashtags,
         "playCount": _metric_value(
             raw,
-            ("videoPlayCount", "videoViewCount", "viewCount", "playsCount"),
+            (
+                "videoPlayCount", "videoViewCount", "viewCount", "playsCount",
+                "play_count", "ig_play_count", "view_count",
+            ),
             ("play_count", "ig_play_count", "view_count"),
         ),
         "diggCount": _metric_value(
-            raw, ("likesCount", "likeCount", "likes"), ("like_count",)
+            raw, ("likesCount", "likeCount", "likes", "like_count"), ("like_count",)
         ),
         "commentCount": _metric_value(
-            raw, ("commentsCount", "commentCount", "comments"), ("comment_count",)
+            raw, ("commentsCount", "commentCount", "comments", "comment_count"), ("comment_count",)
         ),
         "shareCount": _metric_value(
-            raw, ("sharesCount", "shareCount", "shares"), ("share_count",)
+            raw, ("sharesCount", "shareCount", "shares", "share_count"), ("share_count",)
         ),
         "collectCount": _metric_value(
-            raw, ("savesCount", "saveCount", "saves"), ("save_count",)
+            raw, ("savesCount", "saveCount", "saves", "save_count"), ("save_count",)
         ),
         "authorMeta": {
             "name": creator,
@@ -349,26 +368,27 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         "slideshowImageLinks": images if is_slideshow else [],
         "isSlideshow": bool(is_slideshow),
         "createTimeISO": _text(
-            _first(raw, ("timestamp", "takenAt", "taken_at_date", "createdAt"))
+            _first(raw, ("timestamp", "posted_at", "takenAt", "taken_at_date", "taken_at_timestamp", "createdAt"))
         ),
         "locationCreated": "",
         "_platform": INSTAGRAM_REELS,
         "platform": INSTAGRAM_REELS,
         "instagramShortcode": code,
         "instagramProductType": _text(raw.get("productType") or raw.get("product_type")),
-        "instagramType": _text(raw.get("type") or raw.get("media_name")),
+        "instagramType": _text(raw.get("type") or raw.get("media_name") or raw.get("post_type")),
         "instagramMetricsUnavailable": [
             name
             for name, top_keys, metric_keys in (
-                ("Shares", ("sharesCount", "shareCount", "shares"), ("share_count",)),
-                ("Saves", ("savesCount", "saveCount", "saves"), ("save_count",)),
+                ("Shares", ("sharesCount", "shareCount", "shares", "share_count"), ("share_count",)),
+                ("Saves", ("savesCount", "saveCount", "saves", "save_count"), ("save_count",)),
             )
             if not _metric_available(raw, top_keys, metric_keys)
         ],
     }
-    if _text(raw.get("error")) or _text(raw.get("errorCode")):
-        normalized["error"] = _text(raw.get("error"))
-        normalized["errorCode"] = _text(raw.get("errorCode"))
+    record_error = _record_error(raw)
+    if record_error:
+        normalized["error"] = _text(raw.get("error")) or record_error
+        normalized["errorCode"] = _text(raw.get("errorCode")) or record_error
     return normalized
 
 
@@ -446,7 +466,7 @@ def scrape_instagram_posts(
         returned_codes = {
             _instagram_record_shortcode(item)
             for item in reel_items
-            if _instagram_record_shortcode(item)
+            if _instagram_record_shortcode(item) and not _record_error(item)
         }
         generic_links.extend(
             link for link in reel_links if instagram_shortcode(link) not in returned_codes
