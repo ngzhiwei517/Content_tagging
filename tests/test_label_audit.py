@@ -1,10 +1,10 @@
 import json
 import unittest
 
-from ugc_tagger import __version__ as APP_VERSION
 from pathlib import Path
 
 from ugc_tagger.final_update2_adapter import (
+    APP_VERSION,
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
     _to_ui_row,
@@ -13,6 +13,11 @@ from ugc_tagger.final_update2_adapter import (
 
 
 class LabelAuditTests(unittest.TestCase):
+    def test_streamlit_entrypoint_does_not_import_version_from_package_initializer(self):
+        source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("from ugc_tagger import __version__", source)
+        self.assertIn("APP_VERSION,", source)
+
     def test_automated_row_preserves_original_and_final_labels(self):
         row = _to_ui_row(
             {"Link": "https://www.tiktok.com/@tester/video/123"},

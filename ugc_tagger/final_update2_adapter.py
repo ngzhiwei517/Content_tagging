@@ -10,7 +10,6 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from ugc_tagger import __version__ as APP_VERSION
 from ugc_tagger.final_update2_backend import load_backend
 from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
@@ -29,6 +28,14 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
+
+
+# Keep the runtime version beside the UI/backend schema boundary.  Importing
+# ``__version__`` from the package initializer caused Streamlit Cloud startup
+# to fail when its hot-reload cache briefly exposed the older initializer.
+# ``app.py`` imports this constant with the rest of the adapter API, so startup
+# no longer depends on package metadata being refreshed first.
+APP_VERSION = "v68.42.5"
 
 
 ProgressCallback = Callable[[int, int, str], None]

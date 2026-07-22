@@ -2,6 +2,12 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.5 — Streamlit Cloud startup hotfix
+
+- Removed the Streamlit entry point's dependency on package-level version metadata during startup.
+- Kept one canonical runtime version in the UI/backend adapter and added a regression contract for the import path.
+- Changed no tagging, review, scraping, metrics or export behaviour.
+
 ## v68.42.4 — Instagram Reels finalization candidate
 
 - Added dual-schema normalization for both nested and flat Instagram full-metrics actor payloads.

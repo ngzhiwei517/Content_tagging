@@ -3,7 +3,7 @@
 ## Project summary
 This repository contains a Streamlit prototype for AI-assisted TikTok and Instagram Reels UGC creative-type tagging in music marketing workflows. The tool accepts generic post CSV/XLSX files or pasted post links, scrapes platform metadata using Apify, classifies posts using Gemini, applies guardrails and a Creative Knowledge Base, supports human review, and exports clean marketing reports.
 
-v68.42.4 is the current Instagram Reels finalization candidate. It preserves the validated v68.41.6 TikTok path and runs TikTok and Instagram Reels through one shared workflow.
+v68.42.5 is the current Instagram Reels finalization candidate. It preserves the validated v68.41.6 TikTok path and runs TikTok and Instagram Reels through one shared workflow.
 
 ## Current product direction
 - Use the v68.14 implementation and its v41-style UI flow as the baseline unless the user explicitly says otherwise.

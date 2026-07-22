@@ -2,7 +2,7 @@
 
 ## Current release
 
-v68.42.4 is the shared TikTok and Instagram Reels finalization candidate. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
+v68.42.5 is the shared TikTok and Instagram Reels finalization candidate. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
 
 Instagram Reels uses a platform-specific Apify adapter before the shared Gemini taxonomy, review queue and exports. The adapter supports both current flat actor results and the earlier nested result shape. Missing public Shares or Saves remain `Not available`; the app never reports an unavailable metric as a confirmed zero.
 
