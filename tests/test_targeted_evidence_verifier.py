@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from evidence_verifier import (
+from ugc_tagger.evidence_verifier import (
     apply_verifier_response,
     build_verifier_prompt,
     targeted_verifier_reasons,
@@ -342,7 +342,7 @@ class TargetedEvidenceVerifierTests(unittest.TestCase):
 
     def test_pipeline_calls_verifier_after_temporal_selection(self):
         source = Path(__file__).resolve().parents[1].joinpath(
-            "final_update2_backend_source.py"
+            "ugc_tagger", "final_update2_backend_source.py"
         ).read_text(encoding="utf-8")
         verifier_position = source.index("result = maybe_run_targeted_evidence_verifier(")
         tier_position = source.index("Tier 2C (full video fallback")
@@ -361,7 +361,7 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
         sys.modules.setdefault("streamlit", streamlit_stub)
         sys.modules.setdefault("requests", SimpleNamespace())
         sys.modules.setdefault("cv2", SimpleNamespace())
-        from final_update2_backend import load_backend
+        from ugc_tagger.final_update2_backend import load_backend
 
         load_backend.cache_clear()
         cls.backend = load_backend()
@@ -461,7 +461,7 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
 
     def test_pipeline_distinguishes_soft_verifier_error_and_clears_stale_state(self):
         source = Path(__file__).resolve().parents[1].joinpath(
-            "final_update2_backend_source.py"
+            "ugc_tagger", "final_update2_backend_source.py"
         ).read_text(encoding="utf-8")
         self.assertIn("verifier_status == 'error' and not verifier_error_requires_review", source)
         self.assertIn("result.pop('needs_human_review', None)", source)
@@ -469,7 +469,7 @@ class TargetedVerifierOrchestrationTests(unittest.TestCase):
 
     def test_changed_labels_are_rechecked_by_post_guardrails(self):
         source = Path(__file__).resolve().parents[1].joinpath(
-            "final_update2_backend_source.py"
+            "ugc_tagger", "final_update2_backend_source.py"
         ).read_text(encoding="utf-8")
         verifier_position = source.index("if verifier_status == 'changed':")
         guardrail_position = source.index("result = apply_post_guardrails(result, row)", verifier_position)

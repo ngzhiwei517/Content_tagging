@@ -6,11 +6,11 @@ The original phased integration remains complete in v68.15. This document descri
 
 1. `app.py` normalizes uploads and pasted links into one Current Batch.
 2. Selection chooses Top posts or Tag every link.
-3. `final_update2_adapter.py` groups candidates and calls the backend.
-4. `final_update2_backend.py` loads the preserved backend definitions without rendering its legacy UI.
-5. `final_update2_backend_source.py` runs Apify normalization, Gemini visual analysis, reusable guardrails, temporal escalation and validation.
-6. `evidence_verifier.py` selectively cross-checks suspicious label/evidence conflicts after the best temporal result is chosen.
-7. `review_routing.py` decides whether unresolved evidence requires human review.
+3. `ugc_tagger/final_update2_adapter.py` groups candidates and calls the backend.
+4. `ugc_tagger/final_update2_backend.py` loads the preserved backend definitions without rendering its legacy UI.
+5. `ugc_tagger/final_update2_backend_source.py` runs Apify normalization, Gemini visual analysis, reusable guardrails, temporal escalation and validation.
+6. `ugc_tagger/evidence_verifier.py` selectively cross-checks suspicious label/evidence conflicts after the best temporal result is chosen.
+7. `ugc_tagger/review_routing.py` decides whether unresolved evidence requires human review.
 8. The adapter maps results into the UI/QA schema.
 9. Review preserves original labels and writes final labels plus history.
 10. Summary/export separates clean marketing files from internal QA diagnostics.

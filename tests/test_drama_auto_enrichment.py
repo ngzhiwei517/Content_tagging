@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from drama_analysis import (
+from ugc_tagger.drama_analysis import (
     DRAMA_EXPORT_COLUMNS,
     DRAMA_REVIEW_OPTIONS,
     apply_audio_comparison,
@@ -22,7 +22,7 @@ from drama_analysis import (
     route_unknown_drama_audio_to_review,
     split_campaign_track,
 )
-from final_update2_adapter import MARKETING_EXPORT_COLUMNS
+from ugc_tagger.final_update2_adapter import MARKETING_EXPORT_COLUMNS
 
 
 class _Response:
@@ -2388,7 +2388,7 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertIn('"Content category (max 2)"', app_text)
 
     def test_backend_applies_generic_audio_default_after_waveform_check(self):
-        backend_text = Path("final_update2_backend_source.py").read_text(encoding="utf-8")
+        backend_text = Path("ugc_tagger/final_update2_backend_source.py").read_text(encoding="utf-8")
         comparison_call = backend_text.index(
             "enriched = apply_audio_comparison(enriched, audio_comparison)"
         )
@@ -2402,7 +2402,7 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertLess(default_call, review_call)
 
     def test_resolved_kpop_show_cut_clears_stale_low_confidence_review(self):
-        from drama_analysis import clear_resolved_drama_soft_review_flags
+        from ugc_tagger.drama_analysis import clear_resolved_drama_soft_review_flags
 
         resolved = clear_resolved_drama_soft_review_flags({
             "creative_type": ["Movie/Tv/Drama Edits"],
@@ -2415,7 +2415,7 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(resolved["review_risk_reasons"], "")
 
     def test_resolved_drama_clears_only_generic_subtype_review(self):
-        from drama_analysis import clear_resolved_drama_soft_review_flags
+        from ugc_tagger.drama_analysis import clear_resolved_drama_soft_review_flags
 
         resolved = clear_resolved_drama_soft_review_flags({
             "creative_type": ["Movie/Tv/Drama Edits"],
@@ -2432,7 +2432,7 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertFalse(resolved["needs_human_review"])
 
     def test_audio_conflict_and_routine_audit_are_never_cleared(self):
-        from drama_analysis import clear_resolved_drama_soft_review_flags
+        from ugc_tagger.drama_analysis import clear_resolved_drama_soft_review_flags
 
         reasons = (
             "AI confidence below 80% (70%) | "

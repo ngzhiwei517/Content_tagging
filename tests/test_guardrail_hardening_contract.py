@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_routing import review_risk_reasons
+from ugc_tagger.review_routing import review_risk_reasons
 
 
 class GuardrailHardeningContractTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class GuardrailHardeningContractTests(unittest.TestCase):
         sys.modules.setdefault("streamlit", streamlit_stub)
         sys.modules.setdefault("requests", SimpleNamespace())
         sys.modules.setdefault("cv2", SimpleNamespace())
-        from final_update2_backend import load_backend
+        from ugc_tagger.final_update2_backend import load_backend
 
         load_backend.cache_clear()
         cls.backend = load_backend()

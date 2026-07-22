@@ -20,20 +20,20 @@ import io
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from model_comparison import (
+from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
     TARGETED_VERIFIER_MODEL,
     normalize_gemini_model,
 )
 
-from review_routing import apply_review_policy, review_risk_reasons, visual_escalation_reasons
-from evidence_verifier import (
+from ugc_tagger.review_routing import apply_review_policy, review_risk_reasons, visual_escalation_reasons
+from ugc_tagger.evidence_verifier import (
     apply_verifier_response,
     build_verifier_prompt,
     resolvable_review_reasons,
     targeted_verifier_reasons,
 )
-from drama_analysis import (
+from ugc_tagger.drama_analysis import (
     apply_audio_comparison,
     apply_generic_original_audio_default,
     apply_drama_enrichment,

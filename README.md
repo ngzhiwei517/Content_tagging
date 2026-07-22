@@ -75,7 +75,8 @@ Public Instagram metrics depend on what the selected Apify actor and Instagram e
 ## Tests
 
 ```bash
-python -m py_compile app.py final_update2_adapter.py final_update2_backend.py final_update2_backend_source.py instagram_reels_adapter.py model_comparison.py review_routing.py
+python -m py_compile app.py
+python -m compileall -q ugc_tagger
 python -m unittest discover -s tests -v
 ```
 
