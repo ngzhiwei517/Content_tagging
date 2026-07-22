@@ -4,7 +4,7 @@ Streamlit application for selecting, tagging, reviewing and reporting TikTok and
 
 [Open the stable Streamlit demo](https://umgcontenttag.streamlit.app/)
 
-> The public demo remains the validated TikTok release. Instagram Reels support is available in the current local candidate and should be treated as a directional pilot until separately validated.
+> TikTok and Instagram Reels now use one shared workflow. TikTok retains its established validation baseline; Instagram tagging has encouraging directional pilot results but does not yet have a formal large-sample benchmark.
 
 ## What it does
 

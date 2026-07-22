@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from ugc_tagger import __version__ as APP_VERSION
 from ugc_tagger.final_update2_backend import load_backend
 from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
@@ -503,7 +504,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     if not isinstance(unavailable_metrics, list):
         unavailable_metrics = []
     output.update({
-        "App Version": "v68.42.3",
+        "App Version": APP_VERSION,
         "Platform": platform,
         "Link": _text(tagged_dict.get("tiktok_url")) or _text(original_dict.get("Link")),
         # Campaign Market is user-provided business context. Do not fall back to

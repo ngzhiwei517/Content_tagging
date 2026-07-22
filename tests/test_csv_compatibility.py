@@ -144,6 +144,26 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Platform"], INSTAGRAM_REELS)
         self.assertEqual(rows.loc[0, "Market"], "SG")
         self.assertEqual(rows.loc[0, "Track"], "Track IG")
+        self.assertEqual(rows.loc[0, "Metrics Unavailable"], "Shares, Saves")
+        self.assertTrue(pd.isna(rows.loc[0, "Shares"]))
+        self.assertTrue(pd.isna(rows.loc[0, "Saves"]))
+
+    def test_full_metrics_actor_csv_aliases_are_preserved(self):
+        text = (
+            "post_url,owner_username,owner_follower_count,caption,play_count,like_count,comment_count,share_count,save_count,audio_title,audio_artist\n"
+            "https://www.instagram.com/reel/DExampleAbC1,creator_name,1000,A Reel,5000,250,12,41,17,Test Song,Test Artist\n"
+        )
+        rows, columns = self.parse(text, name="instagram_actor.csv")
+        self.assertEqual(columns["link"], "post_url")
+        self.assertEqual(columns["creator"], "owner_username")
+        self.assertEqual(columns["views"], "play_count")
+        self.assertEqual(rows.loc[0, "Creator"], "creator_name")
+        self.assertEqual(rows.loc[0, "Caption"], "A Reel")
+        self.assertEqual(rows.loc[0, "Followers"], 1000)
+        self.assertEqual(rows.loc[0, "Views"], 5000)
+        self.assertEqual(rows.loc[0, "Shares"], 41)
+        self.assertEqual(rows.loc[0, "Saves"], 17)
+        self.assertEqual(rows.loc[0, "Metrics Unavailable"], "")
 
     def test_instagram_numeric_sound_id_uses_campaign_context_from_filename(self):
         text = (
@@ -157,6 +177,18 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(columns["track"], "Sound")
         self.assertEqual(rows.loc[0, "Track"], "Hate That I Made You Love Me")
         self.assertEqual(rows.loc[0, "Campaign Artist"], "Ariana Grande")
+
+    def test_instagram_non_padded_export_date_still_uses_filename_context(self):
+        text = (
+            "Sound,Link\n"
+            "335659060381430,https://www.instagram.com/reel/DExampleAbC3\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="2026-02-3_OnTheFloor_JenniferLopez_posts_instagram.csv",
+        )
+        self.assertEqual(rows.loc[0, "Track"], "On The Floor")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Jennifer Lopez")
 
     def test_instagram_descriptive_sound_name_beats_filename_fallback(self):
         text = (

@@ -2,6 +2,14 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.4 — Instagram Reels finalization candidate
+
+- Added dual-schema normalization for both nested and flat Instagram full-metrics actor payloads.
+- Preserved Instagram views, shares, saves, creator, caption and audio fields across scraping, review and export.
+- Marked missing Instagram Shares/Saves as `Not available` from upload through final reporting.
+- Added fallback handling for per-item actor errors without changing the TikTok classifier or guardrails.
+- Expanded regression coverage for real Instagram export headers and current actor output fields.
+
 ## v68.42.3 — Review-card rendering fix
 
 - Fixed raw HTML appearing beneath Instagram metrics on the Review page.

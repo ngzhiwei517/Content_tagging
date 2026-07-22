@@ -1,5 +1,7 @@
 import json
 import unittest
+
+from ugc_tagger import __version__ as APP_VERSION
 from pathlib import Path
 
 from ugc_tagger.final_update2_adapter import (
@@ -21,7 +23,7 @@ class LabelAuditTests(unittest.TestCase):
             },
             {},
         )
-        self.assertEqual(row["App Version"], "v68.42.3")
+        self.assertEqual(row["App Version"], APP_VERSION)
         self.assertEqual(row["Platform"], "TikTok")
         self.assertEqual(row["Original AI Labels"], "Fashion, Dance")
         self.assertEqual(row["Final Labels"], "Fashion, Dance")

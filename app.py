@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
+from ugc_tagger import __version__ as APP_VERSION
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -998,7 +999,7 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         else:
             state_payload[key] = value
     payload = {
-        "version": "v68.42.3",
+        "version": APP_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
@@ -1561,7 +1562,7 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
             "Reel Link", "Reel URL",
             "Post URL", "Post Link", "Video URL", "Video Link", "Permalink",
             "Share URL", "webVideoUrl", "submittedVideoUrl", "itemWebUrl",
-            "item_web_url", "tiktok_url",
+            "item_web_url", "tiktok_url", "post_url", "input_url",
         ]),
         "platform": detect_col(df, ["Platform", "Social Platform", "Channel", "Source Platform"]),
         # Prefer explicit campaign-market fields. Country remains a compatibility
@@ -1574,21 +1575,24 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
             "Campaign Track", "Campaign Track Name", "Campaign Song",
             "Campaign Song Used", "Campaign Sound", "Artist - Track",
             "Artist / Track", "Track / Sound", "Track / Sound Name",
+            "audio_title",
         ]),
         "artist": detect_col(df, [
             "Campaign Artist", "Artist", "Artist Name", "Track Artist",
             "Song Artist", "Music Artist", "Sound Artist",
+            "audio_artist",
         ]),
         "viral_date": detect_col(df, ["Viral Date", "2026 Viral Date", "First Viral Date", "Track Viral Date"]),
-        "date": detect_col(df, ["Date", "Post Date", "Created Date", "Create Time", "Created At", "Published Date", "createTimeISO"]),
-        "creator": detect_col(df, ["Username", "Creator", "Creator Username", "Author", "Author Username", "Handle", "Account", "User"]),
-        "followers": detect_col(df, ["Followers", "Follower Count", "Followers Count", "Fans", "Fans Count", "authorMeta.fans", "authorMeta.fansCount", "fansCount"]),
+        "date": detect_col(df, ["Date", "Post Date", "Created Date", "Create Time", "Created At", "Published Date", "createTimeISO", "posted_at", "taken_at_date"]),
+        "creator": detect_col(df, ["Username", "Creator", "Creator Username", "Author", "Author Username", "Handle", "Account", "User", "owner_username"]),
+        "caption": detect_col(df, ["Caption", "Post Caption", "Description", "Text", "caption.text"]),
+        "followers": detect_col(df, ["Followers", "Follower Count", "Followers Count", "Fans", "Fans Count", "authorMeta.fans", "authorMeta.fansCount", "fansCount", "owner_follower_count", "follower_count"]),
         "kol_size": detect_col(df, ["KOL Size", "KOL", "Creator Size", "Influencer Size"]),
-        "views": detect_col(df, ["Views", "Post Views", "Video Views", "View Count", "Plays", "Play Count", "playCount"]),
-        "likes": detect_col(df, ["Likes", "Post Likes", "Video Likes", "Like Count", "diggCount"]),
-        "comments": detect_col(df, ["Comments", "Post Comments", "Video Comments", "Comment Count", "commentCount"]),
-        "shares": detect_col(df, ["Shares", "Post Shares", "Video Shares", "Share Count", "shareCount"]),
-        "saves": detect_col(df, ["Saves", "Post Saves", "Video Saves", "Save Count", "Bookmarks", "Favorites", "Download Count", "Collect Count", "collectCount"]),
+        "views": detect_col(df, ["Views", "Post Views", "Video Views", "View Count", "Plays", "Play Count", "playCount", "videoPlayCount", "videoViewCount", "view_count", "play_count", "ig_play_count"]),
+        "likes": detect_col(df, ["Likes", "Post Likes", "Video Likes", "Like Count", "diggCount", "likesCount", "like_count"]),
+        "comments": detect_col(df, ["Comments", "Post Comments", "Video Comments", "Comment Count", "commentCount", "commentsCount", "comment_count"]),
+        "shares": detect_col(df, ["Shares", "Post Shares", "Video Shares", "Share Count", "shareCount", "sharesCount", "share_count"]),
+        "saves": detect_col(df, ["Saves", "Post Saves", "Video Saves", "Save Count", "Bookmarks", "Favorites", "Download Count", "Collect Count", "collectCount", "savesCount", "save_count"]),
         "total_engagement": detect_col(df, ["Total Engagement", "Engagement", "Total Likes, Comments & Shares", "Likes Comments Shares"]),
     }
 
@@ -1606,7 +1610,7 @@ def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
     stem = re.sub(r"\.(?:csv|xlsx?|xls)$", "", basename, flags=re.I)
     stem = re.sub(r"\s*\(\d+\)$", "", stem)
     match = re.match(
-        r"^\d{4}-\d{2}-\d{2}_(.+)_posts_instagram$",
+        r"^\d{4}-\d{1,2}-\d{1,2}_(.+)_posts_instagram$",
         stem,
         flags=re.I,
     )
@@ -1657,6 +1661,12 @@ def standardize_file_rows(
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
         shares = clean_num(r.get(cols["shares"])) if cols.get("shares") else 0
         saves = clean_num(r.get(cols["saves"])) if cols.get("saves") else 0
+        unavailable_metrics = []
+        if detected_platform == INSTAGRAM_REELS:
+            for metric_name, column_name in (("Shares", cols.get("shares")), ("Saves", cols.get("saves"))):
+                raw_value = r.get(column_name) if column_name else None
+                if not column_name or pd.isna(raw_value) or safe_str(raw_value) == "":
+                    unavailable_metrics.append(metric_name)
         total_eng = clean_num(r.get(cols["total_engagement"])) if cols.get("total_engagement") else likes + comments + shares + saves
         rows.append({
             "Platform": detected_platform,
@@ -1669,6 +1679,7 @@ def standardize_file_rows(
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),
+            "Caption": safe_str(r.get(cols["caption"])) if cols.get("caption") else "",
             "Followers": clean_num(r.get(cols["followers"])) if cols.get("followers") else 0,
             "KOL Size": safe_str(r.get(cols["kol_size"])) if cols.get("kol_size") else "",
             "Views": clean_num(r.get(cols["views"])) if cols.get("views") else 0,
@@ -1676,6 +1687,7 @@ def standardize_file_rows(
             "Comments": comments,
             "Shares": shares,
             "Saves": saves,
+            "Metrics Unavailable": ", ".join(unavailable_metrics),
             "Total Engagement": total_eng,
         })
     out_df = add_performance_fields(pd.DataFrame(rows))
@@ -1695,7 +1707,8 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
     backfill_columns = [
         "Platform", "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
-        "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
+        "Caption", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
+        "Metrics Unavailable",
         "Total Engagement",
     ]
 
@@ -3952,6 +3965,7 @@ elif st.session_state.step == 2:
                         "Comments": 0,
                         "Shares": 0,
                         "Saves": 0,
+                        "Metrics Unavailable": "Shares, Saves" if input_platform == INSTAGRAM_REELS else "",
                         "Total Engagement": 0,
                     })
                 added, skipped = append_to_batch(pd.DataFrame(rows))
@@ -5011,7 +5025,7 @@ elif st.session_state.step == 6:
     qa_df = qa_df[qa_front + [column for column in qa_df.columns if column not in qa_front]]
     report = {
         "Summary": pd.DataFrame([{
-            "App Version": "v68.42.3",
+            "App Version": APP_VERSION,
             "Gemini Model": safe_str(qa_df.iloc[0].get("Gemini Model")) if not qa_df.empty else normalize_gemini_model(st.session_state.get("qa_gemini_model_v68_41_4")),
             "Comparison Run ID": safe_str(qa_df.iloc[0].get("Comparison Run ID")) if not qa_df.empty else st.session_state.get("comparison_run_id_v68_41_4", ""),
             "Run Started UTC": safe_str(qa_df.iloc[0].get("Run Started UTC")) if not qa_df.empty else st.session_state.get("comparison_run_started_utc_v68_41_4", ""),
