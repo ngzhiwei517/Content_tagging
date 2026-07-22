@@ -1,188 +1,32 @@
 # Changelog
 
-## v68.41.6 — Final unseen-validation candidate
+This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
-- Kept targeted verification on the explicitly selected Gemini model; 3.1 Flash-Lite runs no longer invoke hidden 3.5 calls.
-- Reused the robust Gemini JSON decoder for verifier responses and retained the final parse error when retries fail.
-- Removed verifier calls caused only by primary-guardrail changes or label-pair membership, allowed optional verifier failures to fail open, and recomputed stale review state after safe outcomes.
-- Added reusable high-signal safeguards for flexible on-screen quote wording, explicit humorous-story purpose, public-figure fanfiction and literal visible POV setups.
-- Added narrow SG CCA/school-life handling and stopped incidental outfit mentions from counting as strong Fashion evidence.
-- Removed false review triggers for performance-only "Dance tutorial" wording and valid Dance + Beauty combinations.
-- Preserved ambiguous local humour and motion cases for human review rather than learning exact URLs.
+## v68.42.3 — Review-card rendering fix
 
-## v68.41.5 — Balanced Flash-model validation candidate
+- Fixed raw HTML appearing beneath Instagram metrics on the Review page.
+- Kept the Instagram adapter, TikTok classifier, taxonomy and review decisions unchanged.
 
-- Kept Gemini 3.1 Flash-Lite as the recommended default after the completed 24-post comparison.
-- Removed Gemini 3.1 Pro Preview from the app; Gemini 3.5 Flash remains an optional slower model.
-- Used Gemini 3.5 Flash only for the existing targeted evidence verifier when a 3.1 result already has a suspicious cross-field conflict.
-- Added Verifier Model and Verifier Fallback Used to the internal QA export.
-- Strengthened the reusable quote-format rule when Narrative and Content Details clearly describe an on-screen teacher or attributed quote.
-- Routed public-figure fanfiction versus Celebrity Edits purpose conflicts for human adjudication instead of forcing a disputed source label.
-- Preserved the v41-style UI, General UGC scope, drama boundary and stable live demo.
+## v68.42.2 — Instagram Reel public metrics
 
-## v68.41.4 — Isolated Gemini model comparison
+- Added the Data Slayer Instagram post-details actor for public Views, Likes, Comments, Shares and Saves.
+- Normalized Reel media, caption, creator and audio fields into the shared post schema.
+- Retained the broad Instagram scraper as a fallback and preserved unavailable metrics as `Not available`.
 
-- Added a run-level choice between Gemini 3.1 Flash-Lite, Gemini 3.5 Flash and Gemini 3.1 Pro Preview without changing the tagging prompt, guardrails or fallback order.
-- Routed every Gemini call in a run through the selected model using an isolated execution context.
-- Added selected-model, run-ID, start-time and elapsed-time fields to the internal QA report, with model-specific download filenames.
-- Added a clear comparison-review instruction so testers skip flagged rows and preserve untouched AI outputs for scoring.
-- Added a direct no-edit path from Review to Summary, reset run-specific Review widgets between models, and paced Pro requests for the comparison project's 25 RPM limit.
-- Kept the stable v68.41.3 candidate and the existing Streamlit demo untouched.
+## v68.42.1 — Instagram share-count candidate
 
-## v68.41.3 — Cross-market Creative Type accuracy hardening
+- Added share-count ingestion for eligible explicit Reel URLs.
+- Preserved fallback behaviour when the paid actor or share-count option is unavailable.
 
-- Recognized rhythmic, repeated or coordinated hand/arm and upper-body choreography as Dance even when creators are seated or framed close-up; full-body framing is no longer required.
-- Kept generic isolated hand gestures as Lip Sync evidence rather than automatically converting every gesture into Dance.
-- Prioritized attributed quote presentation over Reflection/Fashion while preserving Relationship as an optional secondary theme.
-- Added high-signal consistency rules for genuine lyric translation, explicit drama/celebrity edits, fit checks and relationship-purpose posts.
-- Tightened prompt guidance for Travel and Cover: everyday scenery is not automatically travel, and audience recordings of the original live artist are not Cover.
-- Expanded conservative review routing for ambiguous local comedy, everyday scenery, camera-angle-only POV, audience concert recordings and disputed edit/source cases.
-- Added 16 reusable regression tests; no exact TikTok URL, creator or one-off track answer was added to prediction memory.
-- Kept detailed drama classification and the established v41-style user flow unchanged.
+## v68.42.0 — Shared TikTok and Instagram workflow
 
-## v68.15 — Session resume and clearer marketing Summary
+- Added Instagram Reels as a platform adapter before the existing Gemini pipeline.
+- Kept one taxonomy, Current Batch, review queue, summary and export flow across both platforms.
+- Preserved the validated TikTok prompt and guardrail path.
 
-- Added non-secret workflow checkpoints and URL-based batch IDs so an inactive reconnect can restore the current step and data instead of returning to API Keys.
-- Changed Summary KPIs and grouped tables to Average Engagements and Average Engagement Rate per post.
-- Reordered the Summary flow to Market Summary, Track Summary, Creative Type Mix, Source Summary, Top Posts, KOL Size Performance and Downloads.
-- Moved KOL Size Performance to the end of the analytical flow and replaced median engagement rate with average engagement rate.
-- Made TikTok links in displayed tables open as safe clickable links.
-- Kept Average Views, Average Engagements, Average Engagement Rate, Shares Rate and Saves Rate in grouped Summary tables; removed only the median engagement metric.
-- Kept the established General UGC tagging pipeline unchanged; detailed drama tagging remains outside this demo release.
+## v68.41.6 — Final TikTok validation candidate
 
-## v68.14 — Chart compatibility and animal-Dance review fix
-
-- Removed Plotly warning banners on older Streamlit installs through version-compatible chart sizing.
-- Recognized explicit rhythmic animal movement during temporal review routing so a supported animal Dance label is not needlessly flagged.
-- Added regression coverage for both compatibility paths and the puppy Dance evidence phrase.
-
-## v68.13 — Subject-neutral Dance evidence
-
-- Changed Dance from a human-only assumption to an action-based label.
-- Allowed people, animals and animated subjects to receive Dance when explicit rhythmic or choreographed movement is visible.
-- Kept ordinary animal movement, posing, walking and rolling from triggering Dance.
-- Updated the Gemini prompt, semantic guardrails, targeted verifier and review routing to use the same rule.
-- Added regression coverage for a dancing puppy while preserving the existing non-dancing hamster and Fashion safeguards.
-
-## v68.12 — Targeted evidence verifier
-
-- Added one selective second-pass Gemini check after the best temporal result is chosen.
-- Limited the check to suspicious cross-field conflicts, high-confusion label pairs and strong missing-label evidence.
-- Applied automated changes only with explicit evidence and at least 86% verifier confidence; otherwise labels remain unchanged and the post is routed to review.
-- Added verifier input/output labels, status, confidence, evidence and triggers to the internal QA audit trail.
-- Added regression coverage for safe confirmation, conservative changes, review routing and structural Carousel protection.
-- Documented that this is a same-model consistency check, not an independent media judgement or an accuracy claim.
-
-## v68.11 — Blind-100 semantic adjudication fixes
-
-- Adjudicated all 24 strict blind-100 disagreements instead of treating every human-label mismatch as a model error.
-- Restored Dance when direct visual details explicitly describe a human performing dance steps or rhythmic body movement, while preserving a supported secondary label such as Travel.
-- Routed ambiguous animated/fictional-character posts to human review when a generic Slice of Life, Comedy, Relationship or Others label may be hiding Movie/Tv/Drama Edits.
-- Added negative controls so static beach poses and real pet comedy do not trigger the new rules.
-- Kept the unresolved real-person-versus-show-source case unchanged pending direct video review; no exact-link memory was added.
-
-## v68.10 — Streamlit Cloud UI and deployment fixes
-
-- Added a fixed light theme and scoped contrast rules for buttons, uploads, dropdowns, expanders and password controls.
-- Prevented multiselect labels from being covered by Streamlit's hidden search input.
-- Switched to headless OpenCV so tagging can run on Linux without `libGL.so.1`.
-- Compacted page headings and added deployment contract regression tests.
-- Removed the retired standalone accuracy-checker app and unused local helper scripts from the public repository.
-
-## v68.9 — Flexible CSV import compatibility
-
-- Added automatic comma, semicolon, tab and pipe delimiter detection.
-- Added UTF-8 BOM and UTF-16 CSV support.
-- Added common generic, Creator-style and Apify link/metric header aliases.
-- Added six CSV compatibility regression tests and a local cross-format test kit.
-
-## v68.8 — Bordered track rows and automatic replacement
-
-- Added a bordered container around every per-track date row.
-- Removed the replacement checkbox from the user flow.
-- Made replacement of unavailable and sensitive Top N posts always active.
-
-## v68.7 — Date-filter usability cleanup
-
-- Simplified the date-window label and per-track helper text.
-- Renamed `Use date` to `Include` and shortened the replacement option.
-- Replaced the long technical active-filter warning with a concise status line.
-
-## v68.6 — Persistent date-mode highlight and audit fix
-
-- Replaced the version-sensitive segmented control with two stateful primary/secondary buttons.
-- Ensured the active Date setup choice remains purple after clicking.
-- Corrected `Current Sort Metric` in the QA Summary to record the actual selection ranking.
-
-## v68.5 — Selected date choice highlight
-
-- Added a strong purple background and white text to the selected Date setup choice.
-- Added selected-state selectors for newer and older Streamlit markup.
-
-## v68.4 — Summary card copy cleanup
-
-- Removed redundant helper text from Posts, Views, Markets, Most Common Format, Main Market and Track / Source.
-- Kept the Engagements formula, Engagement Rate formula and Best Reach Type view total.
-- Omitted empty helper elements from rendered card HTML.
-
-## v68.3 — Grouped export cleanup
-
-- Removed duplicate source-file worksheets from the grouped XLSX export.
-- Kept source provenance as a column in the remaining worksheets.
-- Added an export regression test covering multiple source files.
-
-## v68.2 — Date setup visibility fix
-
-- Made both date-scope choices white with readable dark text.
-- Added compatible selectors for newer and older Streamlit segmented-control markup.
-- Kept the active choice highlighted and left date-filter behaviour unchanged.
-
-## v68.1 — Streamlit compatibility fix
-
-- Removed `required` and `width` from the new date-scope segmented control for compatibility with the user's existing Mac Streamlit runtime.
-- Added a regression contract for the supported segmented-control arguments.
-
-## v68 — Per-track viral-date selection
-
-- Added optional separate viral dates for multiple tracks in one batch.
-- Kept the existing shared date window as the default and preserved inclusive ±7-day behaviour.
-- Added per-track opt-out for non-viral tracks.
-- Added optional prefill from supported uploaded viral-date columns.
-- Applied track windows before Top N ranking and replacement-candidate selection.
-- Added a 40-row Mastering-derived external fixture, answer key and dedicated regression tests.
-
-## v67 — Auditable final release candidate
-
-- Added separate Original AI Labels and Final Labels.
-- Added Human Reviewed, Human Edited and ordered Label History fields.
-- Added a Lyrics contradiction safeguard for speech/dialogue subtitles and personal reflection.
-- Added an unsupported-secondary-Dance safeguard.
-- Added review routing for mixed Comedy/Reflection tone.
-- Kept QA diagnostics out of marketing exports.
-- Replaced deprecated Streamlit `use_container_width` arguments.
-- Added GitHub-ready documentation, Windows runner and CI checks.
-
-## v66.6 — Final candidate accuracy safeguards
-
-- Prioritized supportive/personal text as Reflection unless explicit song-lyric evidence exists.
-- Required direct first-person evidence for POV.
-- Prevented creator/track history from overriding stronger Narrative and Content Details.
-- Improved Beauty recovery for makeup advice and cosmetic content.
-- Improved AI-generated/fictional performer handling.
-
-## v66.5 — Selection and summary cleanup
-
-- Excluded sensitive posts in every selection mode.
-- Backfilled Top posts from the next eligible candidate.
-- Kept Tag every link without replacement.
-- Simplified Summary headings while preserving performance sections.
-
-## v60–v66.4 — Evidence-first classifier development
-
-- Enforced cover → 3-frame → 9-frame → full-video escalation when unresolved.
-- Added deterministic 5% QA sampling.
-- Added Lyrics versus Lyrics Translation rules.
-- Reduced false Dance, Lip Sync, POV, Beauty and Carousel assignments.
-- Added Movie/Tv/Drama Edits, Celebrity Edits, Relationship, Reflection, Travel, Fashion, Fitness and Media/Infotainment consistency rules.
-- Added KOL Size performance reporting and filter-aware Summary views.
-- Kept rules general: no exact TikTok URL-to-label prediction memory.
+- Kept Gemini 3.1 Flash-Lite as the recommended default with no hidden 3.5 calls.
+- Hardened reusable rules for quotes, humour, public-figure fanfiction, POV and subtle choreography.
+- Reduced unnecessary verifier calls and retained genuinely ambiguous cases for human review.
+- Preserved the v41-style workflow and detailed drama boundary.
