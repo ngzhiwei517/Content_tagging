@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import pandas as pd
+import requests
 
 from ugc_tagger.final_update2_backend import load_backend
 from ugc_tagger.instagram_reels_adapter import (
@@ -60,6 +63,7 @@ CAMPAIGN_MARKET_MISSING = {
     "", "OTHER", "OTHER / NO MARKET", "OTHER/NO MARKET", "NO MARKET",
     "UNKNOWN", "NOT SPECIFIED", "N/A", "NA", "NONE", "NULL", "NAN",
 }
+TIKTOK_SHORT_LINK_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
 
 
 MARKETING_EXPORT_COLUMNS = [
@@ -305,13 +309,99 @@ def normalize_url(url: str) -> str:
     return normalize_post_url(_text(url))
 
 
-def record_url(record: Dict) -> str:
-    for key in ("webVideoUrl", "submittedVideoUrl", "url", "inputUrl"):
+def is_tiktok_short_url(url: str) -> bool:
+    """Return whether *url* is a TikTok redirect-style share link."""
+    try:
+        host = (urlsplit(_text(url)).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in TIKTOK_SHORT_LINK_HOSTS
+
+
+def resolve_tiktok_short_url(url: str, timeout_seconds: int = 10) -> str:
+    """Resolve a TikTok ``vt``/``vm`` share link to a stable post URL.
+
+    Only TikTok-owned short-link hosts are contacted. If TikTok blocks the
+    redirect request or the resolved location is not a recognisable TikTok
+    post URL, the original link is returned so Apify still gets a chance to
+    process it.
+    """
+    original = _text(url)
+    if not is_tiktok_short_url(original):
+        return original
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0 Safari/537.36"
+        )
+    }
+    resolved = ""
+    response = None
+    try:
+        response = requests.head(
+            original,
+            headers=headers,
+            allow_redirects=True,
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        resolved = _text(response.url)
+    except requests.RequestException:
+        if response is not None:
+            getattr(response, "close", lambda: None)()
+        response = None
+        try:
+            response = requests.get(
+                original,
+                headers=headers,
+                allow_redirects=True,
+                stream=True,
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            resolved = _text(response.url)
+        except requests.RequestException:
+            return original
+        finally:
+            if response is not None:
+                getattr(response, "close", lambda: None)()
+    else:
+        getattr(response, "close", lambda: None)()
+
+    if detect_platform(resolved) == TIKTOK and post_identifier(resolved):
+        return normalize_url(resolved)
+    return original
+
+
+def record_urls(record: Dict) -> List[str]:
+    """Return every usable URL alias carried by an Apify record."""
+    urls: List[str] = []
+    for key in (
+        "webVideoUrl",
+        "submittedVideoUrl",
+        "url",
+        "inputUrl",
+        "itemWebUrl",
+        "shareUrl",
+        "postUrl",
+        "_requested_url",
+        "_resolved_url",
+    ):
         value = _text(record.get(key))
-        if value:
-            return value
+        if value and value not in urls:
+            urls.append(value)
     video_meta = record.get("videoMeta") if isinstance(record.get("videoMeta"), dict) else {}
-    return _text(video_meta.get("webVideoUrl"))
+    nested_url = _text(video_meta.get("webVideoUrl"))
+    if nested_url and nested_url not in urls:
+        urls.append(nested_url)
+    return urls
+
+
+def record_url(record: Dict) -> str:
+    urls = record_urls(record)
+    return urls[0] if urls else ""
 
 
 def index_records(records: Iterable[Dict]) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
@@ -320,14 +410,13 @@ def index_records(records: Iterable[Dict]) -> Tuple[Dict[str, Dict], Dict[str, D
     for record in records:
         if not isinstance(record, dict):
             continue
-        url = record_url(record)
         raw_id = _text(record.get("id"))
-        stable_id = post_identifier(url)
-        legacy_tiktok_id = video_id(url)
-        for post_id in (raw_id, stable_id, legacy_tiktok_id):
-            if post_id:
-                by_id[post_id] = record
-        if url:
+        if raw_id:
+            by_id[raw_id] = record
+        for url in record_urls(record):
+            for post_id in (post_identifier(url), video_id(url)):
+                if post_id:
+                    by_id[post_id] = record
             by_url[normalize_url(url)] = record
     return by_id, by_url
 
@@ -616,11 +705,36 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
     records: List[Dict] = []
     if tiktok_links:
-        tiktok_records = list(backend.run_apify_tiktok_scraper_api(tiktok_links, apify_token))
+        short_link_count = sum(is_tiktok_short_url(link) for link in tiktok_links)
+        if short_link_count > 1:
+            worker_count = min(short_link_count, 8)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                resolved_links = list(executor.map(resolve_tiktok_short_url, tiktok_links))
+        else:
+            resolved_links = [resolve_tiktok_short_url(link) for link in tiktok_links]
+        tiktok_requests = list(zip(tiktok_links, resolved_links))
+        actor_links = [resolved for _, resolved in tiktok_requests]
+        tiktok_records = list(backend.run_apify_tiktok_scraper_api(actor_links, apify_token))
         for record in tiktok_records:
             if isinstance(record, dict):
                 record.setdefault("_platform", TIKTOK)
                 record.setdefault("platform", TIKTOK)
+
+        # Attach the submitted short URL as an alias to the matching canonical
+        # actor result. This keeps display/audit data unchanged while allowing
+        # tag_candidates() to match the original row reliably.
+        by_id, by_url = index_records(tiktok_records)
+        same_length = len(tiktok_records) == len(tiktok_requests)
+        for position, (original, resolved) in enumerate(tiktok_requests):
+            record = match_record({"Link": resolved}, by_id, by_url)
+            if not isinstance(record, dict):
+                record = match_record({"Link": original}, by_id, by_url)
+            if not isinstance(record, dict) and same_length:
+                candidate = tiktok_records[position]
+                record = candidate if isinstance(candidate, dict) else None
+            if isinstance(record, dict):
+                record.setdefault("_requested_url", original)
+                record.setdefault("_resolved_url", resolved)
         records.extend(tiktok_records)
     if instagram_links:
         records.extend(scrape_instagram_posts(instagram_links, apify_token))

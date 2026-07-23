@@ -3179,7 +3179,7 @@ def _removed_mask_v56(df: pd.DataFrame) -> pd.Series:
 
 
 def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str) -> Tuple[pd.DataFrame, int]:
-    """Skip sensitive rows in every mode; Top posts can backfill them later."""
+    """Keep viewable sensitive posts in Review for manual tagging."""
     if tagged.empty:
         return tagged, 0
     out = tagged.copy()
@@ -3188,16 +3188,18 @@ def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str
     sensitive_mask = tier.eq("sensitive_human_review") | raw_status.str.contains("SENSITIVE", case=False, na=False)
     count = int(sensitive_mask.sum())
     if count:
-        out.loc[sensitive_mask, "Review Action"] = "REMOVE"
-        out.loc[sensitive_mask, "Needs Review"] = False
-        out.loc[sensitive_mask, "Validation Status"] = "removed"
-        out.loc[sensitive_mask, "QA Priority"] = "Removed"
-        if selection_mode == "Top posts":
-            out.loc[sensitive_mask, "Review Note"] = "Sensitive post skipped in Top posts mode; use the next-ranked candidate."
-            out.loc[sensitive_mask, "QA Reason"] = "Sensitive post skipped and replaced to preserve the requested Top N."
-        else:
-            out.loc[sensitive_mask, "Review Note"] = "Sensitive post skipped in Tag every link mode; no replacement was added."
-            out.loc[sensitive_mask, "QA Reason"] = "Sensitive post skipped automatically and excluded from Review and final exports."
+        out.loc[sensitive_mask, "Review Action"] = ""
+        out.loc[sensitive_mask, "Needs Review"] = True
+        out.loc[sensitive_mask, "Validation Status"] = "review"
+        out.loc[sensitive_mask, "QA Priority"] = "High"
+        out.loc[sensitive_mask, "Manual Metrics Required"] = True
+        out.loc[sensitive_mask, "Review Note"] = (
+            "TikTok restricted automated access to this viewable post. "
+            "Open the post and tag it manually."
+        )
+        out.loc[sensitive_mask, "QA Reason"] = (
+            "Sensitive content could not be scraped automatically; retained for human review."
+        )
     return out, count
 
 
@@ -3285,19 +3287,18 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
                 gemini_model=comparison_model,
             )
 
-            # Sensitive posts are never sent to Review or final exports. Top posts
-            # mode backfills from the ranked candidate pool; Tag every link records
-            # the skipped row in QA without adding an unrelated replacement.
+            # TikTok-sensitive posts may still be viewable in the browser. Keep
+            # them in Review for manual tagging instead of treating them as
+            # deleted/private/unavailable.
             selection_mode = st.session_state.get("selection_mode", "Top posts")
-            tagged_batch, skipped_sensitive = _route_sensitive_for_selection_v56(
+            tagged_batch, sensitive_review_count = _route_sensitive_for_selection_v56(
                 tagged_batch,
                 selection_mode,
             )
-            if skipped_sensitive:
-                if selection_mode == "Top posts":
-                    logs.append(f"Skipped {skipped_sensitive} sensitive post(s); selecting the next-ranked candidate(s).")
-                else:
-                    logs.append(f"Skipped {skipped_sensitive} sensitive post(s); Tag every link does not add replacements.")
+            if sensitive_review_count:
+                logs.append(
+                    f"Routed {sensitive_review_count} sensitive post(s) to human review."
+                )
                 _render_run_log_v45(log_box, logs)
         except Exception as exc:
             st.error(f"final_update_2 backend failed: {exc}")
@@ -3348,7 +3349,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> pd.DataFrame:
         output["Run Started UTC"] = comparison_started_utc
         output["Run Elapsed Seconds"] = elapsed_seconds
     if replacement_count:
-        st.success(f"Used {replacement_count} next-ranked candidate(s) to replace unavailable or sensitive posts where possible.")
+        st.success(f"Used {replacement_count} next-ranked candidate(s) to replace unavailable posts where possible.")
     return output
 
 
@@ -4242,7 +4243,7 @@ elif st.session_state.step == 3:
                     "Post dates from links or uploaded files are used when available."
                 )
         if st.session_state.selection_mode == "Top posts":
-            # Top N must remain complete, so unavailable and sensitive posts are
+            # Top N must remain complete, so genuinely unavailable posts are
             # always replaced by the next eligible ranked candidate.
             st.session_state.replace_unavailable_posts = True
 
