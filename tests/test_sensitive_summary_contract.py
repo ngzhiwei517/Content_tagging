@@ -33,6 +33,10 @@ class SensitiveSelectionContractTests(unittest.TestCase):
             "_route_sensitive_for_selection_v56",
             {"pd": pd, "Tuple": Tuple},
         ))
+        cls.removed_mask = staticmethod(load_function(
+            "_removed_mask_v56",
+            {"pd": pd},
+        ))
 
     def sample_rows(self):
         return pd.DataFrame([
@@ -60,23 +64,33 @@ class SensitiveSelectionContractTests(unittest.TestCase):
             },
         ])
 
-    def test_top_posts_removes_sensitive_and_requests_backfill(self):
+    def test_top_posts_keeps_sensitive_in_human_review(self):
         routed, count = self.route_sensitive(self.sample_rows(), "Top posts")
         self.assertEqual(count, 1)
-        self.assertEqual(routed.loc[0, "Review Action"], "REMOVE")
-        self.assertFalse(bool(routed.loc[0, "Needs Review"]))
-        self.assertEqual(routed.loc[0, "Validation Status"], "removed")
-        self.assertIn("next-ranked candidate", routed.loc[0, "Review Note"])
+        self.assertEqual(routed.loc[0, "Review Action"], "")
+        self.assertTrue(bool(routed.loc[0, "Needs Review"]))
+        self.assertEqual(routed.loc[0, "Validation Status"], "review")
+        self.assertEqual(routed.loc[0, "QA Priority"], "High")
+        self.assertTrue(bool(routed.loc[0, "Manual Metrics Required"]))
+        self.assertIn("tag it manually", routed.loc[0, "Review Note"])
         self.assertEqual(routed.loc[1, "Review Action"], "KEEP")
 
-    def test_tag_every_link_removes_sensitive_without_replacement(self):
+    def test_tag_every_link_keeps_sensitive_in_human_review(self):
         routed, count = self.route_sensitive(self.sample_rows(), "Tag every link")
         self.assertEqual(count, 1)
-        self.assertEqual(routed.loc[0, "Review Action"], "REMOVE")
-        self.assertFalse(bool(routed.loc[0, "Needs Review"]))
-        self.assertEqual(routed.loc[0, "Validation Status"], "removed")
-        self.assertIn("no replacement", routed.loc[0, "Review Note"].lower())
-        self.assertIn("excluded from Review and final exports", routed.loc[0, "QA Reason"])
+        self.assertEqual(routed.loc[0, "Review Action"], "")
+        self.assertTrue(bool(routed.loc[0, "Needs Review"]))
+        self.assertEqual(routed.loc[0, "Validation Status"], "review")
+        self.assertIn("retained for human review", routed.loc[0, "QA Reason"])
+
+    def test_sensitive_review_is_not_removed_but_unavailable_still_is(self):
+        routed, _ = self.route_sensitive(self.sample_rows(), "Tag every link")
+        self.assertFalse(bool(self.removed_mask(routed).iloc[0]))
+        unavailable = pd.DataFrame([{
+            "Review Action": "REMOVE",
+            "Validation Status": "removed",
+        }])
+        self.assertTrue(bool(self.removed_mask(unavailable).iloc[0]))
 
     def test_replacement_loop_remains_top_posts_only(self):
         self.assertIn(

@@ -10,7 +10,9 @@ from ugc_tagger.final_update2_adapter import (
     MARKETING_EXPORT_COLUMNS,
     _to_ui_row,
     index_records,
+    is_tiktok_short_url,
     match_record,
+    resolve_tiktok_short_url,
     scrape_links,
 )
 from ugc_tagger.final_update2_backend import load_backend
@@ -181,6 +183,52 @@ class InstagramUrlTests(unittest.TestCase):
         self.assertEqual(
             normalize_post_url(VIDEO_URL),
             "https://www.instagram.com/reel/DExampleAbC1",
+        )
+
+
+class TikTokShortLinkTests(unittest.TestCase):
+    SHORT_URL = "https://vt.tiktok.com/ZSH6bjPhF/"
+    CANONICAL_URL = "https://www.tiktok.com/@ndo0yyy/video/7618049168501755157"
+
+    def test_short_link_host_detection_is_allowlisted(self):
+        self.assertTrue(is_tiktok_short_url(self.SHORT_URL))
+        self.assertTrue(is_tiktok_short_url("https://vm.tiktok.com/example/"))
+        self.assertFalse(is_tiktok_short_url(self.CANONICAL_URL))
+        self.assertFalse(is_tiktok_short_url("https://example.com/redirect"))
+
+    def test_short_link_resolver_returns_canonical_post_url(self):
+        response = SimpleNamespace(
+            url=f"{self.CANONICAL_URL}?is_from_webapp=1",
+            raise_for_status=lambda: None,
+        )
+        with patch("ugc_tagger.final_update2_adapter.requests.head", return_value=response):
+            resolved = resolve_tiktok_short_url(self.SHORT_URL)
+        self.assertEqual(resolved, self.CANONICAL_URL)
+
+    def test_actor_record_matches_original_short_link_alias(self):
+        captured = {}
+
+        def fake_tiktok_scrape(links, token):
+            captured["links"] = links
+            return [{"id": "7618049168501755157", "webVideoUrl": self.CANONICAL_URL}]
+
+        fake_backend = SimpleNamespace(run_apify_tiktok_scraper_api=fake_tiktok_scrape)
+        with patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=fake_backend,
+        ), patch(
+            "ugc_tagger.final_update2_adapter.resolve_tiktok_short_url",
+            return_value=self.CANONICAL_URL,
+        ):
+            records = scrape_links([self.SHORT_URL], "token")
+
+        self.assertEqual(captured["links"], [self.CANONICAL_URL])
+        self.assertEqual(records[0]["_requested_url"], self.SHORT_URL)
+        self.assertEqual(records[0]["_resolved_url"], self.CANONICAL_URL)
+        by_id, by_url = index_records(records)
+        self.assertIs(
+            match_record(pd.Series({"Link": self.SHORT_URL}), by_id, by_url),
+            records[0],
         )
 
 
