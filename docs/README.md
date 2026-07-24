@@ -7,6 +7,7 @@
 - [UI specification](UI_SPEC.md)
 - [Backend integration plan](BACKEND_INTEGRATION_PLAN.md)
 - [Validation and limitations](VALIDATION.md)
+- [Link compatibility](LINK_COMPATIBILITY.md)
 - [Testing](TESTING.md)
 - [Open questions](OPEN_QUESTIONS.md)
 

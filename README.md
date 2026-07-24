@@ -22,6 +22,17 @@ Add posts → Select posts → Run tagging → Review → Summary → Export
 
 TikTok and Instagram rows can share one batch, review queue and export. Market and Track are optional. Unavailable posts are removed automatically.
 
+## Supported post links
+
+For the most reliable scraping, paste the direct post URL:
+
+- TikTok: `https://www.tiktok.com/@creator/video/123...` or `/photo/123...`
+- Instagram: `https://www.instagram.com/reel/SHORTCODE/` or `/p/SHORTCODE/`
+
+Links without `www`, links with tracking parameters and full TikTok links using `http` were accepted in the compatibility test. TikTok redirect/share links (`vt.tiktok.com`, `vm.tiktok.com`, `/t/`), legacy TikTok `/v/` links and Instagram `/share/reel/` links are not reliable in the deployed app. Open those links in a browser and copy the final direct post URL before adding them.
+
+Creator profiles, Live pages, hashtag/explore pages and Instagram Stories are intentionally rejected because they are not individual posts. See [Link compatibility](docs/LINK_COMPATIBILITY.md) for the tested matrix and limitations.
+
 ## Models
 
 - **Gemini 3.1 Flash-Lite** — recommended default
@@ -70,6 +81,7 @@ Public Instagram metrics depend on what the selected Apify actor and Instagram e
 - [Code map](docs/CODE_MAP.md)
 - [Project context](docs/PROJECT_CONTEXT.md)
 - [Validation and limitations](docs/VALIDATION.md)
+- [Link compatibility](docs/LINK_COMPATIBILITY.md)
 - [Changelog](CHANGELOG.md)
 
 ## Tests

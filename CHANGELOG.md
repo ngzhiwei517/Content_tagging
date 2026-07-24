@@ -6,6 +6,7 @@ This file keeps only the current release line. Older milestones are summarized i
 
 - Removed the Streamlit entry point's dependency on package-level version metadata during startup.
 - Kept one canonical runtime version in the UI/backend adapter and added a regression contract for the import path.
+- Documented the verified TikTok and Instagram post-link compatibility boundary from the 23-case deployed-app smoke test.
 - Changed no tagging, review, scraping, metrics or export behaviour.
 
 ## v68.42.4 — Instagram Reels finalization candidate
