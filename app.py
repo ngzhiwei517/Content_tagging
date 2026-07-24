@@ -58,6 +58,12 @@ from ugc_tagger.instagram_reels_adapter import (
     is_supported_post_url,
     post_identifier as platform_post_identifier,
 )
+from ugc_tagger.manual_metrics import (
+    MANUAL_METRIC_AUDIT_COLUMNS,
+    METRIC_COLUMNS,
+    build_manual_metric_updates,
+    missing_metric_names,
+)
 
 try:
     import plotly.express as px
@@ -4685,56 +4691,46 @@ elif st.session_state.step == 5:
             else:
                 details = st.text_area("Content Details", height=130, key=details_key)
 
-            # final_update_2 manual-metrics workflow. Scraper exception/sensitive
-            # rows often retain a usable post link but have no engagement data.
-            metric_values = {
-                "Views": clean_num(row.get("Views")),
-                "Likes": clean_num(row.get("Likes")),
-                "Comments": clean_num(row.get("Comments")),
-                "Shares": clean_num(row.get("Shares")),
-                "Saves": clean_num(row.get("Saves")),
+            # Missing public metrics are optional. Only unavailable fields appear,
+            # and leaving them blank preserves Not available rather than zero.
+            missing_metrics = missing_metric_names(row.to_dict())
+            metric_keys = {
+                name: f"review_metric_{name.lower()}_v68_42_9_{original_idx}"
+                for name in missing_metrics
             }
-            needs_manual_metrics = not restricted_manual_review and (
-                bool(row.get("Manual Metrics Required", False))
-                or safe_str(row.get("Tier Used")) == "scraper_exception"
-                or all(value == 0 for value in metric_values.values())
-            )
-            show_manual_metrics = needs_manual_metrics or restricted_manual_review
-            metric_keys = {name: f"review_metric_{name.lower()}_v56_{original_idx}" for name in metric_values}
-            if show_manual_metrics:
-                if restricted_manual_review:
-                    st.caption("Enter any metrics you can see, or leave them blank to mark them as Not available.")
-                else:
-                    st.markdown(
-                        "<div class='review-note-warn'>Metrics were not captured by the scraper. Open the post and enter the current numbers before saving.</div>",
-                        unsafe_allow_html=True,
+            manual_metric_inputs = {}
+            if missing_metrics:
+                with st.expander("Fill missing metrics (optional)", expanded=False):
+                    st.caption(
+                        "Enter only values you can verify. Leave blank if unavailable. "
+                        "Commas and K/M/B are accepted."
                     )
-                metric_defaults = {
-                    name: (None if restricted_manual_review and not metric_is_available(row, name) else value)
-                    for name, value in metric_values.items()
-                }
-                mc1, mc2 = st.columns(2)
-                with mc1:
-                    manual_views = st.number_input("Views", min_value=0, value=metric_defaults["Views"], step=1, placeholder="Not available", key=metric_keys["Views"])
-                    manual_likes = st.number_input("Likes", min_value=0, value=metric_defaults["Likes"], step=1, placeholder="Not available", key=metric_keys["Likes"])
-                    manual_comments = st.number_input("Comments", min_value=0, value=metric_defaults["Comments"], step=1, placeholder="Not available", key=metric_keys["Comments"])
-                with mc2:
-                    manual_shares = st.number_input("Shares", min_value=0, value=metric_defaults["Shares"], step=1, placeholder="Not available", key=metric_keys["Shares"])
-                    manual_saves = st.number_input("Saves", min_value=0, value=metric_defaults["Saves"], step=1, placeholder="Not available", key=metric_keys["Saves"])
-            else:
-                manual_views = metric_values["Views"]
-                manual_likes = metric_values["Likes"]
-                manual_comments = metric_values["Comments"]
-                manual_shares = metric_values["Shares"]
-                manual_saves = metric_values["Saves"]
+                    metric_columns = st.columns(2)
+                    for position, metric_name in enumerate(missing_metrics):
+                        with metric_columns[position % 2]:
+                            manual_metric_inputs[metric_name] = st.text_input(
+                                metric_name,
+                                placeholder="Not available",
+                                key=metric_keys[metric_name],
+                            )
 
             if st.button("Save & next", type="primary", width="stretch", key=f"review_save_v55_{original_idx}"):
+                metric_updates = {}
+                metric_error = ""
+                try:
+                    metric_updates = build_manual_metric_updates(
+                        row.to_dict(),
+                        manual_metric_inputs,
+                    )
+                except ValueError as exc:
+                    metric_error = str(exc)
+
                 if not narrative or not creative_types or not details:
                     st.error("Please fill Narrative, at least one Creative Type, and Content Details before saving.")
                 elif "Movie/Tv/Drama Edits" in creative_types and not content_categories:
                     st.error("Please choose at least one drama / entertainment content category.")
-                elif needs_manual_metrics and int(manual_views or 0) == 0 and int(manual_likes or 0) == 0 and int(manual_shares or 0) == 0:
-                    st.error("Please enter the available post metrics before saving.")
+                elif metric_error:
+                    st.error(metric_error)
                 else:
                     selected_label_text = ", ".join(creative_types)
                     audit_fields = final_update2_review_audit_update(
@@ -4752,25 +4748,16 @@ elif st.session_state.step == 5:
                     for column, value in drama_updates.items():
                         if column not in {"Narrative", "Creative Type", "Content Details"}:
                             st.session_state.tagged_df.at[original_idx, column] = value
-                    reviewed_metrics = {
-                        "Views": manual_views,
-                        "Likes": manual_likes,
-                        "Comments": manual_comments,
-                        "Shares": manual_shares,
-                        "Saves": manual_saves,
-                    }
-                    for metric_name, metric_value in reviewed_metrics.items():
-                        st.session_state.tagged_df.at[original_idx, metric_name] = (
-                            pd.NA if metric_value is None else int(metric_value)
+                    for column, value in metric_updates.items():
+                        if column in METRIC_COLUMNS and value is None:
+                            value = pd.NA
+                        st.session_state.tagged_df.at[original_idx, column] = value
+                    if any(column in METRIC_COLUMNS for column in metric_updates):
+                        reviewed_row = st.session_state.tagged_df.loc[original_idx]
+                        st.session_state.tagged_df.at[original_idx, "Total Engagement"] = sum(
+                            clean_num(reviewed_row.get(metric_name))
+                            for metric_name in ["Likes", "Comments", "Shares", "Saves"]
                         )
-                    if restricted_manual_review:
-                        unavailable_after_review = [
-                            name for name, value in reviewed_metrics.items() if value is None
-                        ]
-                        st.session_state.tagged_df.at[original_idx, "Metrics Unavailable"] = ", ".join(
-                            unavailable_after_review
-                        )
-                    st.session_state.tagged_df.at[original_idx, "Manual Metrics Required"] = False
                     st.session_state.tagged_df.at[original_idx, "Needs Review"] = False
                     st.session_state.tagged_df.at[original_idx, "Review Action"] = "KEEP"
                     st.session_state.tagged_df.at[original_idx, "Review Note"] = "Reviewed manually"
@@ -5054,6 +5041,7 @@ elif st.session_state.step == 6:
         "App Version", "Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds",
         "Platform", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
+        *MANUAL_METRIC_AUDIT_COLUMNS,
         "Needs Review", "Review Action", "Review Note", "Review Risk",
         "Tier Used", "Validation Status", "Validation Score",
     ]

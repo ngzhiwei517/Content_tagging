@@ -116,9 +116,12 @@ class SensitiveSelectionContractTests(unittest.TestCase):
         self.assertIn("<strong>Manual tagging required.</strong>", APP_SOURCE)
         self.assertIn("TikTok did not provide media or metadata for AI analysis.", APP_SOURCE)
         self.assertIn('if restricted_manual_review:', APP_SOURCE)
+        self.assertIn('st.expander("Fill missing metrics (optional)"', APP_SOURCE)
         self.assertIn('placeholder="Not available"', APP_SOURCE)
-        self.assertIn("if restricted_manual_review and not metric_is_available(row, name)", APP_SOURCE)
-        self.assertIn("needs_manual_metrics = not restricted_manual_review and (", APP_SOURCE)
+        self.assertIn("missing_metrics = missing_metric_names(row.to_dict())", APP_SOURCE)
+        self.assertIn("manual_metric_inputs", APP_SOURCE)
+        self.assertIn('"Total Engagement"] = sum(', APP_SOURCE)
+        self.assertNotIn("Please enter the available post metrics before saving.", APP_SOURCE)
 
 
 class SummaryCopyContractTests(unittest.TestCase):
