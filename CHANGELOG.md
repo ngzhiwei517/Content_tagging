@@ -2,6 +2,13 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.9 — Optional missing-metrics completion
+
+- Added a collapsed Review section only when one or more engagement metrics are unavailable.
+- Allowed reviewers to enter any verified values while leaving the remaining fields blank as `Not available`.
+- Recorded manually completed metric names, source and UTC capture time in the internal QA export.
+- Kept tagging, confidence routing and automatic removal behaviour unchanged.
+
 ## v68.42.8 — Manual review for restricted posts
 
 - Removed the misleading `Others` AI suggestion when TikTok blocks automated media and metadata access.
