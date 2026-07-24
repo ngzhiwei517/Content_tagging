@@ -2,6 +2,15 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## Unreleased — Readability-only cleanup
+
+- Removed the unreachable v43-v55 reference tagging backend from `app.py`.
+- Clarified that the active Streamlit app delegates classification through
+  `ugc_tagger/final_update2_adapter.py`.
+- Updated the code map with safe change boundaries for future maintainers.
+- Changed no prompts, guardrails, confidence thresholds, review policy, UI
+  behavior or export schema.
+
 ## v68.42.9 — Optional missing-metrics completion
 
 - Added a collapsed Review section only when one or more engagement metrics are unavailable.

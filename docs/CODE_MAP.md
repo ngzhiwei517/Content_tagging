@@ -37,10 +37,16 @@ app.py
 2. Session state and runtime checkpoints
 3. Display, metric and input-normalization helpers
 4. Batch assembly and media preview
-5. Gemini calls, Creative KB and guardrails
-6. Temporal video analysis and tagging orchestration
-7. Export and summary helpers
-8. Six Streamlit workflow pages
+5. Selection and the active `final_update2_adapter` call
+6. Export and summary helpers
+7. Six Streamlit workflow pages
+
+`app.py` deliberately does not contain a second copy of the Gemini prompt,
+Creative KB or tagging guardrails. Those responsibilities live behind
+`final_update2_adapter.py`. Historical v43-v55 reference implementations were
+removed from the active entry point because they were unreachable and made it
+unclear which pipeline production actually used; they remain recoverable from
+Git history.
 
 ## Preserved backend sections
 
@@ -54,6 +60,16 @@ The current app does not execute the legacy UI. `ugc_tagger/final_update2_backen
 ## Compatibility note
 
 Some helper names include historical version suffixes such as `_v43` or `_v68_15`. They remain in place because tests and integration code may depend on them. Prefer a small, tested helper over renaming these functions only for style.
+
+## Safe change boundaries
+
+- UI copy, layout or page behavior: start in `app.py`.
+- TikTok/Instagram schema mapping: start in `final_update2_adapter.py` or
+  `instagram_reels_adapter.py`.
+- Prompt, labels or reusable guardrails: start in
+  `final_update2_backend_source.py` and add a focused regression test.
+- Human-review routing: start in `review_routing.py`.
+- Never place a second tagging implementation in `app.py`; call the adapter.
 
 ## Before committing a behavior change
 

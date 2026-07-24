@@ -75,6 +75,28 @@ chmod +x run_mac.command
 
 Public Instagram metrics depend on what the selected Apify actor and Instagram expose. Missing Shares or Saves are shown as `Not available`, never as confirmed zeroes.
 
+## Maintaining the app
+
+Start with the [code map](docs/CODE_MAP.md) before changing the application.
+The active runtime path is:
+
+```text
+app.py
+  → ugc_tagger/final_update2_adapter.py
+    → ugc_tagger/final_update2_backend.py
+      → ugc_tagger/final_update2_backend_source.py
+```
+
+- Keep `app.py` focused on the Streamlit workflow, session state and presentation.
+- Change shared TikTok/Instagram input or output mapping in the adapter modules.
+- Change prompts and reusable tagging guardrails in the backend, with focused
+  regression tests.
+- Change human-review decisions in `ugc_tagger/review_routing.py`.
+- Do not duplicate tagging logic inside `app.py`.
+
+Historical version suffixes remain on some helpers because tests and integration
+code may depend on them. Avoid renaming working functions only for style.
+
 ## Documentation
 
 - [Documentation index](docs/README.md)
