@@ -51,7 +51,6 @@ from ugc_tagger.final_update2_adapter import (
 )
 from ugc_tagger.instagram_reels_adapter import (
     INSTAGRAM_REELS,
-    SUPPORTED_PLATFORMS,
     TIKTOK,
     creator_from_url as platform_creator_from_url,
     detect_platform as platform_for_url,
@@ -69,7 +68,6 @@ st.set_page_config(page_title="UGC Post Tagging", page_icon="", layout="wide")
 
 MARKETS = ["PH", "MY", "ID", "KR", "SG", "VN", "TH"]
 MARKET_OPTIONS = ["Other / no market"] + MARKETS
-PLATFORM_OPTIONS = list(SUPPORTED_PLATFORMS)
 DATE_SCOPE_SHARED = "Same date for all tracks"
 DATE_SCOPE_PER_TRACK = "Different date by track"
 CREATIVE_TYPES = [
@@ -846,7 +844,6 @@ DEFAULT_STATE = {
     "selected_df": pd.DataFrame(),
     "tagged_df": pd.DataFrame(),
     "last_message": "",
-    "input_platform": TIKTOK,
     "review_pointer": 0,
     "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
@@ -903,7 +900,6 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "enable_full_video_fallback_v46",
     "date_filter_scope_v68",
     "track_date_settings_v68",
-    "input_platform",
     "selection_mode",
     "top_n",
     "rank_metrics",
@@ -3835,18 +3831,10 @@ elif st.session_state.step == 2:
         "Without a track name, Audio Version may remain **Unknown**."
     )
 
-    input_platform = st.radio(
-        "Platform to add",
-        PLATFORM_OPTIONS,
-        horizontal=True,
-        key="input_platform",
-    )
-    platform_short = "Instagram" if input_platform == INSTAGRAM_REELS else "TikTok"
-
-    add_tab, paste_tab = st.tabs(["Upload post files", f"Paste extra {platform_short} links"])
+    add_tab, paste_tab = st.tabs(["Upload post files", "Paste post links"])
 
     with add_tab:
-        st.markdown(f"<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with {esc(input_platform)} links. You can select multiple files.</p>", unsafe_allow_html=True)
+        st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok or Instagram post links. You can select multiple files or mix both platforms in one file.</p>", unsafe_allow_html=True)
         st.info(drama_audio_note, icon=":material/info:")
         files = st.file_uploader(
             "Post data files",
@@ -3862,13 +3850,18 @@ elif st.session_state.step == 2:
             for f in files:
                 try:
                     df = read_any_table(f)
-                    std, cols = standardize_file_rows(df, f.name, input_platform)
+                    std, cols = standardize_file_rows(df, f.name)
                     parsed_frames.append(std)
+                    platforms = sorted([
+                        p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
+                        if safe_str(p)
+                    ])
                     markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
                     tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
                     summary_rows.append({
                         "File": f.name,
                         "Posts": len(std),
+                        "Platforms": ", ".join(platforms) if platforms else "Not detected",
                         "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
                         "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
                     })
@@ -3889,11 +3882,11 @@ elif st.session_state.step == 2:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with paste_tab:
-        st.markdown(f"<div class='card'><h3>Paste {esc(input_platform)} links</h3><p class='sub'>Use this to add extra links that are not included in your files.</p>", unsafe_allow_html=True)
+        st.markdown("<div class='card'><h3>Paste post links</h3><p class='sub'>Paste TikTok or Instagram post links together. The platform is detected automatically for each link.</p>", unsafe_allow_html=True)
         st.info(drama_audio_note, icon=":material/info:")
         link_text = st.text_area(
-            f"{input_platform} links",
-            placeholder=f"Paste one {platform_short} post link per line",
+            "Post links",
+            placeholder="Paste one TikTok or Instagram post link per line",
             height=150,
         )
         c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
@@ -3938,17 +3931,18 @@ elif st.session_state.step == 2:
         with c3:
             market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
             paste_market = "" if market_choice == "Other / no market" else market_choice
-        links = parse_links(link_text, input_platform)
+        links = parse_links(link_text)
         market_label = paste_market if paste_market else "Other"
         st.markdown(f"<div class='pill-row'><span class='pill green'>Links detected: {len(links)}</span><span class='pill blue'>Market: {esc(market_label)}</span></div>", unsafe_allow_html=True)
         if st.button("Add pasted links to batch", type="primary", width="stretch"):
             if not links:
-                st.warning(f"Paste at least one valid {input_platform} post link first.")
+                st.warning("Paste at least one valid TikTok or Instagram post link first.")
             else:
                 rows = []
                 for l in links:
+                    detected_platform = post_platform(l)
                     rows.append({
-                        "Platform": input_platform,
+                        "Platform": detected_platform,
                         "Source": "Pasted links",
                         "Input Type": "Pasted",
                         "Link": l,
@@ -3966,7 +3960,7 @@ elif st.session_state.step == 2:
                         "Comments": 0,
                         "Shares": 0,
                         "Saves": 0,
-                        "Metrics Unavailable": "Shares, Saves" if input_platform == INSTAGRAM_REELS else "",
+                        "Metrics Unavailable": "Shares, Saves" if detected_platform == INSTAGRAM_REELS else "",
                         "Total Engagement": 0,
                     })
                 added, skipped = append_to_batch(pd.DataFrame(rows))

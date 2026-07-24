@@ -2,6 +2,12 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.7 — Automatic platform detection
+
+- Replaced the TikTok / Instagram input selector with one mixed post input.
+- Detected each uploaded or pasted link as TikTok or Instagram automatically.
+- Kept mixed-platform posts in the same Current Batch, review queue, summary and exports.
+
 ## v68.42.6 — Entertainment News review routing
 
 - Routed high-confidence Movie/Tv/Drama Edits results to Human Review when the AI's own visual analysis explicitly identifies Entertainment News or real-person reporting evidence.

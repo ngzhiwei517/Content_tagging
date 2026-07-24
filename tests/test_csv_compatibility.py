@@ -15,6 +15,7 @@ from ugc_tagger.instagram_reels_adapter import (
     is_instagram_post_url,
     is_supported_post_url,
 )
+from ugc_tagger.final_update2_adapter import normalize_url as final_update2_normalize_url
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -71,6 +72,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "platform_creator_from_url": platform_creator_from_url,
             "is_instagram_post_url": is_instagram_post_url,
             "is_supported_post_url": is_supported_post_url,
+            "final_update2_normalize_url": final_update2_normalize_url,
         }
         for name in [
             "safe_str",
@@ -80,6 +82,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "post_platform",
             "is_supported_link",
             "extract_creator",
+            "parse_links",
             "display_market",
             "kol_size_for_market",
             "normalize_market",
@@ -108,6 +111,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         namespace["standardize_file_rows"] = load_function("standardize_file_rows", namespace)
         cls.read_any_table = staticmethod(namespace["read_any_table"])
         cls.standardize_file_rows = staticmethod(namespace["standardize_file_rows"])
+        cls.parse_links = staticmethod(namespace["parse_links"])
         cls.kol_size_for_market = staticmethod(namespace["kol_size_for_market"])
         cls.display_market = staticmethod(namespace["display_market"])
         cls.normalize_market = staticmethod(namespace["normalize_market"])
@@ -147,6 +151,32 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Metrics Unavailable"], "Shares, Saves")
         self.assertTrue(pd.isna(rows.loc[0, "Shares"]))
         self.assertTrue(pd.isna(rows.loc[0, "Saves"]))
+
+    def test_mixed_platform_file_detects_each_row_from_its_link(self):
+        text = (
+            "Link,Market,Track Name\n"
+            "https://www.tiktok.com/@alpha/video/7600000000000000001,MY,Track A\n"
+            "https://www.instagram.com/reel/DExampleAbC1/,SG,Track B\n"
+        )
+        rows, _ = self.parse(text, name="mixed_posts.csv")
+        self.assertEqual(rows["Platform"].tolist(), [TIKTOK, INSTAGRAM_REELS])
+        self.assertEqual(rows["Market"].tolist(), ["MY", "SG"])
+
+    def test_mixed_pasted_links_detect_both_platforms_without_a_filter(self):
+        links = self.parse_links(
+            "https://www.tiktok.com/@alpha/video/7600000000000000001\n"
+            "https://www.instagram.com/reel/DExampleAbC1/\n"
+        )
+        self.assertEqual(len(links), 2)
+        self.assertEqual([platform_for_url(link) for link in links], [TIKTOK, INSTAGRAM_REELS])
+
+    def test_add_posts_ui_uses_one_mixed_platform_input(self):
+        self.assertNotIn('"Platform to add"', APP_SOURCE)
+        self.assertNotIn("Paste extra {platform_short} links", APP_SOURCE)
+        self.assertIn('st.tabs(["Upload post files", "Paste post links"])', APP_SOURCE)
+        self.assertIn("standardize_file_rows(df, f.name)", APP_SOURCE)
+        self.assertIn("links = parse_links(link_text)", APP_SOURCE)
+        self.assertIn('"Platform": detected_platform', APP_SOURCE)
 
     def test_full_metrics_actor_csv_aliases_are_preserved(self):
         text = (
