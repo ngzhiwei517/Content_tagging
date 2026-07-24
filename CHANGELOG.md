@@ -2,6 +2,12 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.6 — Entertainment News review routing
+
+- Routed high-confidence Movie/Tv/Drama Edits results to Human Review when the AI's own visual analysis explicitly identifies Entertainment News or real-person reporting evidence.
+- Kept the predicted broad label unchanged so a reviewer confirms the post's purpose instead of relying on an automatic relabel.
+- Added controls for genuine fictional drama edits to avoid routing ordinary scene montages as entertainment reporting.
+
 ## v68.42.5 — Streamlit Cloud startup hotfix
 
 - Removed the Streamlit entry point's dependency on package-level version metadata during startup.
