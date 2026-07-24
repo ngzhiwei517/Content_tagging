@@ -1151,16 +1151,15 @@ def available_metric_rate(row, metric: str) -> float:
 
 
 def preserve_unavailable_metric_blanks(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep unavailable Instagram counts blank instead of converting them to zero."""
+    """Keep explicitly unavailable platform metrics blank instead of showing zero."""
     out = df.copy()
     if out.empty or "Metrics Unavailable" not in out.columns:
         return out
-    share_unavailable = ~out.apply(lambda row: metric_is_available(row, "Shares"), axis=1)
-    save_unavailable = ~out.apply(lambda row: metric_is_available(row, "Saves"), axis=1)
-    if "Shares" in out.columns:
-        out.loc[share_unavailable, "Shares"] = pd.NA
-    if "Saves" in out.columns:
-        out.loc[save_unavailable, "Saves"] = pd.NA
+    for metric in ["Views", "Likes", "Comments", "Shares", "Saves"]:
+        if metric not in out.columns:
+            continue
+        unavailable = ~out.apply(lambda row: metric_is_available(row, metric), axis=1)
+        out.loc[unavailable, metric] = pd.NA
     return out
 
 
@@ -1226,8 +1225,8 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 def format_display_value(col: str, val) -> str:
     unavailable_columns = {
-        "Shares", "Saves", "Shares Rate", "Average Shares Rate",
-        "Saves Rate", "Average Saves Rate",
+        "Views", "Likes", "Comments", "Shares", "Saves",
+        "Shares Rate", "Average Shares Rate", "Saves Rate", "Average Saves Rate",
     }
     try:
         value_is_missing = val is None or bool(pd.isna(val))
@@ -3188,7 +3187,13 @@ def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str
         out.loc[sensitive_mask, "Needs Review"] = True
         out.loc[sensitive_mask, "Validation Status"] = "review"
         out.loc[sensitive_mask, "QA Priority"] = "High"
-        out.loc[sensitive_mask, "Manual Metrics Required"] = True
+        out.loc[sensitive_mask, "Manual Metrics Required"] = False
+        out.loc[sensitive_mask, "Metrics Unavailable"] = "Views, Likes, Comments, Shares, Saves"
+        for column in [
+            "Narrative", "Creative Type", "Content Details",
+            "Original AI Labels", "Final Labels",
+        ]:
+            out.loc[sensitive_mask, column] = ""
         out.loc[sensitive_mask, "Review Note"] = (
             "TikTok restricted automated access to this viewable post. "
             "Open the post and tag it manually."
@@ -4405,6 +4410,8 @@ elif st.session_state.step == 5:
     likes = clean_num(row.get("Likes"))
     shares = clean_num(row.get("Shares"))
     metrics_unavailable = safe_str(row.get("Metrics Unavailable"))
+    views_display = f"{views:,}" if metric_is_available(row, "Views") else "Not available"
+    likes_display = f"{likes:,}" if metric_is_available(row, "Likes") else "Not available"
     shares_display = f"{shares:,}" if metric_is_available(row, "Shares") else "Not available"
     metrics_note_html = (
         f"<div class='review-label'>Not returned by platform</div><div class='review-value'>{esc(metrics_unavailable)}</div>"
@@ -4451,8 +4458,8 @@ elif st.session_state.step == 5:
               <div class='review-label'>Caption</div>
               <div class='review-value' style='white-space:pre-wrap'>{esc(caption)}</div>
               <div class='review-stats'>
-                <div class='review-stat'><div class='num'>{views:,}</div><div class='lbl'>Views</div></div>
-                <div class='review-stat'><div class='num'>{likes:,}</div><div class='lbl'>Likes</div></div>
+                <div class='review-stat'><div class='num'>{esc(views_display)}</div><div class='lbl'>Views</div></div>
+                <div class='review-stat'><div class='num'>{esc(likes_display)}</div><div class='lbl'>Likes</div></div>
                 <div class='review-stat'><div class='num'>{esc(shares_display)}</div><div class='lbl'>Shares</div></div>
               </div>
               {metrics_note_html}
@@ -4544,30 +4551,41 @@ elif st.session_state.step == 5:
                 if key not in st.session_state:
                     st.session_state[key] = drama_defaults[field]
 
-            if st.button("AI Suggest", width="stretch", key=f"review_ai_suggest_v55_{original_idx}"):
-                gemini_key_r = clean_api_secret(st.session_state.get("gemini_key", ""))
-                apify_token_r = clean_api_secret(st.session_state.get("apify_token", ""))
-                if not gemini_key_r:
-                    st.error("Save your Gemini API key in Step 1 first.")
-                else:
-                    with st.spinner("Analysing this post with Gemini..."):
-                        suggestion = _review_ai_suggest_final_update2(row, gemini_key_r, apify_token_r)
-                    st.session_state[ai_result_key] = suggestion
-                    if suggestion.get("parse_error"):
-                        st.error(f"AI Suggest failed: {safe_str(suggestion.get('raw_response'))}")
+            restricted_manual_review = (
+                safe_str(row.get("Tier Used")).strip().lower() == "sensitive_human_review"
+            )
+            if restricted_manual_review:
+                st.markdown(
+                    "<div class='review-note-warn'><strong>Manual tagging required.</strong> "
+                    "TikTok did not provide media or metadata for AI analysis. "
+                    "Open the post, then fill in the fields below.</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button("AI Suggest", width="stretch", key=f"review_ai_suggest_v55_{original_idx}"):
+                    gemini_key_r = clean_api_secret(st.session_state.get("gemini_key", ""))
+                    apify_token_r = clean_api_secret(st.session_state.get("apify_token", ""))
+                    if not gemini_key_r:
+                        st.error("Save your Gemini API key in Step 1 first.")
                     else:
-                        suggested_labels = [x.strip() for x in safe_str(suggestion.get("Creative Type")).split(",") if x.strip() in CREATIVE_TYPES][:2]
-                        st.session_state[narrative_key] = safe_str(suggestion.get("Narrative"))
-                        st.session_state[type_key] = suggested_labels
-                        st.session_state[details_key] = safe_str(suggestion.get("Content Details"))
-                        if "Movie/Tv/Drama Edits" in suggested_labels:
-                            suggested_drama = final_update2_drama_review_defaults(suggestion)
-                            for field, key in drama_keys.items():
-                                st.session_state[key] = suggested_drama[field]
-                        st.rerun()
+                        with st.spinner("Analysing this post with Gemini..."):
+                            suggestion = _review_ai_suggest_final_update2(row, gemini_key_r, apify_token_r)
+                        st.session_state[ai_result_key] = suggestion
+                        if suggestion.get("parse_error"):
+                            st.error(f"AI Suggest failed: {safe_str(suggestion.get('raw_response'))}")
+                        else:
+                            suggested_labels = [x.strip() for x in safe_str(suggestion.get("Creative Type")).split(",") if x.strip() in CREATIVE_TYPES][:2]
+                            st.session_state[narrative_key] = safe_str(suggestion.get("Narrative"))
+                            st.session_state[type_key] = suggested_labels
+                            st.session_state[details_key] = safe_str(suggestion.get("Content Details"))
+                            if "Movie/Tv/Drama Edits" in suggested_labels:
+                                suggested_drama = final_update2_drama_review_defaults(suggestion)
+                                for field, key in drama_keys.items():
+                                    st.session_state[key] = suggested_drama[field]
+                            st.rerun()
 
             ai_prefill = st.session_state.get(ai_result_key, {})
-            if ai_prefill and not ai_prefill.get("parse_error"):
+            if not restricted_manual_review and ai_prefill and not ai_prefill.get("parse_error"):
                 ai_conf = float(ai_prefill.get("Confidence", 0) or 0)
                 ai_labels = safe_str(ai_prefill.get("Creative Type")) or "—"
                 ai_reason = safe_str(ai_prefill.get("Reasoning"))
@@ -4676,23 +4694,33 @@ elif st.session_state.step == 5:
                 "Shares": clean_num(row.get("Shares")),
                 "Saves": clean_num(row.get("Saves")),
             }
-            needs_manual_metrics = bool(row.get("Manual Metrics Required", False)) or safe_str(row.get("Tier Used")) in {
-                "scraper_exception", "sensitive_human_review"
-            } or all(value == 0 for value in metric_values.values())
+            needs_manual_metrics = not restricted_manual_review and (
+                bool(row.get("Manual Metrics Required", False))
+                or safe_str(row.get("Tier Used")) == "scraper_exception"
+                or all(value == 0 for value in metric_values.values())
+            )
+            show_manual_metrics = needs_manual_metrics or restricted_manual_review
             metric_keys = {name: f"review_metric_{name.lower()}_v56_{original_idx}" for name in metric_values}
-            if needs_manual_metrics:
-                st.markdown(
-                    "<div class='review-note-warn'>Metrics were not captured by the scraper. Open the post and enter the current numbers before saving.</div>",
-                    unsafe_allow_html=True,
-                )
+            if show_manual_metrics:
+                if restricted_manual_review:
+                    st.caption("Enter any metrics you can see, or leave them blank to mark them as Not available.")
+                else:
+                    st.markdown(
+                        "<div class='review-note-warn'>Metrics were not captured by the scraper. Open the post and enter the current numbers before saving.</div>",
+                        unsafe_allow_html=True,
+                    )
+                metric_defaults = {
+                    name: (None if restricted_manual_review and not metric_is_available(row, name) else value)
+                    for name, value in metric_values.items()
+                }
                 mc1, mc2 = st.columns(2)
                 with mc1:
-                    manual_views = st.number_input("Views", min_value=0, value=metric_values["Views"], step=1, key=metric_keys["Views"])
-                    manual_likes = st.number_input("Likes", min_value=0, value=metric_values["Likes"], step=1, key=metric_keys["Likes"])
-                    manual_comments = st.number_input("Comments", min_value=0, value=metric_values["Comments"], step=1, key=metric_keys["Comments"])
+                    manual_views = st.number_input("Views", min_value=0, value=metric_defaults["Views"], step=1, placeholder="Not available", key=metric_keys["Views"])
+                    manual_likes = st.number_input("Likes", min_value=0, value=metric_defaults["Likes"], step=1, placeholder="Not available", key=metric_keys["Likes"])
+                    manual_comments = st.number_input("Comments", min_value=0, value=metric_defaults["Comments"], step=1, placeholder="Not available", key=metric_keys["Comments"])
                 with mc2:
-                    manual_shares = st.number_input("Shares", min_value=0, value=metric_values["Shares"], step=1, key=metric_keys["Shares"])
-                    manual_saves = st.number_input("Saves", min_value=0, value=metric_values["Saves"], step=1, key=metric_keys["Saves"])
+                    manual_shares = st.number_input("Shares", min_value=0, value=metric_defaults["Shares"], step=1, placeholder="Not available", key=metric_keys["Shares"])
+                    manual_saves = st.number_input("Saves", min_value=0, value=metric_defaults["Saves"], step=1, placeholder="Not available", key=metric_keys["Saves"])
             else:
                 manual_views = metric_values["Views"]
                 manual_likes = metric_values["Likes"]
@@ -4705,7 +4733,7 @@ elif st.session_state.step == 5:
                     st.error("Please fill Narrative, at least one Creative Type, and Content Details before saving.")
                 elif "Movie/Tv/Drama Edits" in creative_types and not content_categories:
                     st.error("Please choose at least one drama / entertainment content category.")
-                elif needs_manual_metrics and int(manual_views) == 0 and int(manual_likes) == 0 and int(manual_shares) == 0:
+                elif needs_manual_metrics and int(manual_views or 0) == 0 and int(manual_likes or 0) == 0 and int(manual_shares or 0) == 0:
                     st.error("Please enter the available post metrics before saving.")
                 else:
                     selected_label_text = ", ".join(creative_types)
@@ -4724,11 +4752,24 @@ elif st.session_state.step == 5:
                     for column, value in drama_updates.items():
                         if column not in {"Narrative", "Creative Type", "Content Details"}:
                             st.session_state.tagged_df.at[original_idx, column] = value
-                    st.session_state.tagged_df.at[original_idx, "Views"] = int(manual_views)
-                    st.session_state.tagged_df.at[original_idx, "Likes"] = int(manual_likes)
-                    st.session_state.tagged_df.at[original_idx, "Comments"] = int(manual_comments)
-                    st.session_state.tagged_df.at[original_idx, "Shares"] = int(manual_shares)
-                    st.session_state.tagged_df.at[original_idx, "Saves"] = int(manual_saves)
+                    reviewed_metrics = {
+                        "Views": manual_views,
+                        "Likes": manual_likes,
+                        "Comments": manual_comments,
+                        "Shares": manual_shares,
+                        "Saves": manual_saves,
+                    }
+                    for metric_name, metric_value in reviewed_metrics.items():
+                        st.session_state.tagged_df.at[original_idx, metric_name] = (
+                            pd.NA if metric_value is None else int(metric_value)
+                        )
+                    if restricted_manual_review:
+                        unavailable_after_review = [
+                            name for name, value in reviewed_metrics.items() if value is None
+                        ]
+                        st.session_state.tagged_df.at[original_idx, "Metrics Unavailable"] = ", ".join(
+                            unavailable_after_review
+                        )
                     st.session_state.tagged_df.at[original_idx, "Manual Metrics Required"] = False
                     st.session_state.tagged_df.at[original_idx, "Needs Review"] = False
                     st.session_state.tagged_df.at[original_idx, "Review Action"] = "KEEP"
