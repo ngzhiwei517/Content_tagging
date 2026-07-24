@@ -38,7 +38,7 @@ from ugc_tagger.drama_analysis import (
 # to fail when its hot-reload cache briefly exposed the older initializer.
 # ``app.py`` imports this constant with the rest of the adapter API, so startup
 # no longer depends on package metadata being refreshed first.
-APP_VERSION = "v68.42.7"
+APP_VERSION = "v68.42.8"
 
 
 ProgressCallback = Callable[[int, int, str], None]

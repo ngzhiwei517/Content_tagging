@@ -2,6 +2,13 @@
 
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
+## v68.42.8 — Manual review for restricted posts
+
+- Removed the misleading `Others` AI suggestion when TikTok blocks automated media and metadata access.
+- Kept viewable restricted posts in Human Review with blank fields for manual tagging.
+- Allowed unavailable metrics to remain blank while the UI displays `Not available`.
+- Kept deleted, private and unopenable posts on the existing automatic removal path.
+
 ## v68.42.7 — Automatic platform detection
 
 - Replaced the TikTok / Instagram input selector with one mixed post input.

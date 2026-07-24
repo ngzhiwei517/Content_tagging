@@ -71,7 +71,14 @@ class SensitiveSelectionContractTests(unittest.TestCase):
         self.assertTrue(bool(routed.loc[0, "Needs Review"]))
         self.assertEqual(routed.loc[0, "Validation Status"], "review")
         self.assertEqual(routed.loc[0, "QA Priority"], "High")
-        self.assertTrue(bool(routed.loc[0, "Manual Metrics Required"]))
+        self.assertFalse(bool(routed.loc[0, "Manual Metrics Required"]))
+        self.assertEqual(routed.loc[0, "Creative Type"], "")
+        self.assertEqual(routed.loc[0, "Narrative"], "")
+        self.assertEqual(routed.loc[0, "Content Details"], "")
+        self.assertEqual(
+            routed.loc[0, "Metrics Unavailable"],
+            "Views, Likes, Comments, Shares, Saves",
+        )
         self.assertIn("tag it manually", routed.loc[0, "Review Note"])
         self.assertEqual(routed.loc[1, "Review Action"], "KEEP")
 
@@ -104,6 +111,14 @@ class SensitiveSelectionContractTests(unittest.TestCase):
         assignment_index = APP_SOURCE.index(assignment)
         nearby_source = APP_SOURCE[max(0, assignment_index - 260):assignment_index]
         self.assertIn('if st.session_state.selection_mode == "Top posts":', nearby_source)
+
+    def test_restricted_review_has_no_ai_fallback_and_optional_metrics(self):
+        self.assertIn("<strong>Manual tagging required.</strong>", APP_SOURCE)
+        self.assertIn("TikTok did not provide media or metadata for AI analysis.", APP_SOURCE)
+        self.assertIn('if restricted_manual_review:', APP_SOURCE)
+        self.assertIn('placeholder="Not available"', APP_SOURCE)
+        self.assertIn("if restricted_manual_review and not metric_is_available(row, name)", APP_SOURCE)
+        self.assertIn("needs_manual_metrics = not restricted_manual_review and (", APP_SOURCE)
 
 
 class SummaryCopyContractTests(unittest.TestCase):

@@ -259,6 +259,22 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertTrue(pd.isna(summary.loc[0, "Average_Shares_Rate"]))
         self.assertTrue(pd.isna(summary.loc[0, "Average_Saves_Rate"]))
 
+    def test_restricted_post_metrics_remain_missing_instead_of_zero(self):
+        frame = pd.DataFrame([{
+            "Platform": TIKTOK,
+            "Market": "MY",
+            "Views": 0,
+            "Likes": 0,
+            "Comments": 0,
+            "Shares": 0,
+            "Saves": 0,
+            "Metrics Unavailable": "Views, Likes, Comments, Shares, Saves",
+        }])
+        result = self.add_performance_fields(frame)
+        for metric in ["Views", "Likes", "Comments", "Shares", "Saves"]:
+            with self.subTest(metric=metric):
+                self.assertTrue(pd.isna(result.loc[0, metric]))
+
     def test_tiktok_real_zero_share_and_save_metrics_remain_zero(self):
         frame = pd.DataFrame([
             {
