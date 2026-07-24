@@ -824,6 +824,69 @@ class BackendPromptTests(unittest.TestCase):
         reasons = review_risk_reasons(result, VIDEO_ROW)
         self.assertTrue(any("Movie/Tv/Drama Edits" in reason for reason in reasons))
 
+    def test_review_routing_catches_entertainment_news_as_drama_edit(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Idol edit",
+            "content_details": (
+                "A fan-created edit using manipulated imagery of real-life public "
+                "figures, accompanied by text detailing their recent breakup "
+                "announcement.\nContent Category: Behind-the-Scenes Edit, "
+                "Entertainment News"
+            ),
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertTrue(any("Entertainment News evidence" in reason for reason in reasons))
+
+    def test_review_routing_catches_real_actor_news_without_category_line(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Celebrity relationship update",
+            "content_details": (
+                "An entertainment news update reports that two real-life actors "
+                "confirmed their breakup in an official statement."
+            ),
+            "confidence": 0.97,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertTrue(any("reporting purpose" in reason for reason in reasons))
+
+    def test_review_routing_keeps_true_fictional_drama_edit_out_of_news_review(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "K-drama breakup scene edit",
+            "content_details": (
+                "A montage of fictional K-drama scenes shows two characters "
+                "announcing their breakup in the final episode."
+            ),
+            "confidence": 0.95,
+        }
+        reasons = review_risk_reasons(result, VIDEO_ROW)
+        self.assertFalse(any("Entertainment News evidence" in reason for reason in reasons))
+
+    def test_review_policy_routes_high_confidence_entertainment_news_conflict(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Actor breakup update",
+            "content_details": (
+                "Two real-life public figures are shown while text reports their "
+                "breakup announcement. Content Category: Entertainment News"
+            ),
+            "confidence": 0.95,
+        }
+        routed, status, _, issues = self.backend.apply_review_policy(
+            result,
+            VIDEO_ROW,
+            "pass",
+            5,
+            [],
+        )
+        self.assertTrue(routed["needs_human_review"])
+        self.assertEqual(status, "review")
+        self.assertTrue(any("Entertainment News evidence" in issue for issue in issues))
+        self.assertEqual(routed["creative_type"], ["Movie/Tv/Drama Edits"])
+
     def test_review_routing_catches_animated_characters_as_generic_lifestyle(self):
         result = {
             "creative_type": ["Slice of Life"],

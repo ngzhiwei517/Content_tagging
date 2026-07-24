@@ -131,6 +131,39 @@ def _has(blob: str, terms: Iterable[str]) -> bool:
     return any(term in blob for term in terms)
 
 
+def _has_entertainment_news_evidence(visual_blob: str) -> bool:
+    """Return True only for explicit real-world entertainment reporting cues."""
+    explicit_category = bool(re.search(
+        r"\bcontent categor(?:y|ies)\s*:\s*[^\n]{0,120}\bentertainment news\b",
+        visual_blob,
+        flags=re.I,
+    ))
+    if explicit_category:
+        return True
+
+    real_person_subject = bool(re.search(
+        r"\breal[- ]life public figures?\b|\breal public figures?\b|"
+        r"\bcelebrit(?:y|ies)\b|\bidols?\b|\bactors?\b|\bactresses?\b|"
+        r"\bsingers?\b|\bmusic artists?\b",
+        visual_blob,
+        flags=re.I,
+    ))
+    reporting_event = bool(re.search(
+        r"\b(?:entertainment|celebrity|showbiz) (?:news|update|report|coverage)\b|"
+        r"\b(?:news|media|press) (?:report|reports|reported|reporting|coverage|update)\b|"
+        r"\breported by (?:a |an )?(?:news|media|press|entertainment) (?:outlet|account|publication)\b|"
+        r"\b(?:breakup|dating|relationship|marriage|divorce|casting|release) announcement\b|"
+        r"\bofficial statement\b|"
+        r"\b(?:announced|confirmed|reported|revealed).{0,80}"
+        r"(?:breakup|dating|relationship|marriage|divorce|casting|release)\b|"
+        r"\b(?:breakup|dating|relationship|marriage|divorce|casting|release).{0,80}"
+        r"(?:announced|confirmed|reported|revealed)\b",
+        visual_blob,
+        flags=re.I,
+    ))
+    return real_person_subject and reporting_event
+
+
 def _url_type(row) -> str:
     url = _text(
         _get(row, "webVideoUrl")
@@ -620,6 +653,14 @@ def review_risk_reasons(
         reasons.append("Explicit drama/fictional edit evidence is missing Movie/Tv/Drama Edits")
     if celebrity_edit and "Celebrity Edits" not in labels:
         reasons.append("Explicit real-person fan-edit evidence is missing Celebrity Edits")
+    if (
+        "Movie/Tv/Drama Edits" in labels
+        and _has_entertainment_news_evidence(visual_blob)
+    ):
+        reasons.append(
+            "Entertainment News evidence conflicts with Movie/Tv/Drama Edits; "
+            "confirm the post's reporting purpose"
+        )
     public_figure_fanfiction = bool(re.search(
         r"fan[- ]?fiction|fan[- ]written|text[- ]based.{0,45}(?:story|dialogue|slideshow)|"
         r"written.{0,35}(?:fanfiction|dialogue|story)|prose narrative",
