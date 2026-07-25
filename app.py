@@ -2822,17 +2822,32 @@ elif st.session_state.step == 2:
         "Without a track name, Audio Version may remain **Unknown**."
     )
 
+    add_platform = st.radio(
+        "Platform to add",
+        [TIKTOK, INSTAGRAM_REELS],
+        horizontal=True,
+        key="add_platform_v68_43",
+    )
+    platform_key = "tiktok" if add_platform == TIKTOK else "instagram"
+    platform_short = "TikTok" if add_platform == TIKTOK else "Instagram"
+    platform_post_name = "TikTok posts" if add_platform == TIKTOK else "Instagram Reels or posts"
+
     add_tab, paste_tab = st.tabs(["Upload post files", "Paste post links"])
 
     with add_tab:
-        st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok or Instagram post links. You can select multiple files or mix both platforms in one file.</p>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='card'><h3>Upload {esc(platform_short)} files</h3>"
+            f"<p class='sub'>CSV or Excel files containing {esc(platform_post_name)}. "
+            "You can select multiple files.</p>",
+            unsafe_allow_html=True,
+        )
         st.info(drama_audio_note, icon=":material/info:")
         files = st.file_uploader(
             "Post data files",
             type=["csv", "xlsx", "xls"],
             accept_multiple_files=True,
             label_visibility="collapsed",
-            key="files_upload_v24",
+            key=f"files_upload_v68_43_{platform_key}",
         )
         parsed_frames = []
         summary_rows = []
@@ -2841,7 +2856,7 @@ elif st.session_state.step == 2:
             for f in files:
                 try:
                     df = read_any_table(f)
-                    std, cols = standardize_file_rows(df, f.name)
+                    std, cols = standardize_file_rows(df, f.name, platform=add_platform)
                     parsed_frames.append(std)
                     platforms = sorted([
                         p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
@@ -2864,21 +2879,36 @@ elif st.session_state.step == 2:
                 st.markdown("<div class='warn-note'>" + "<br>".join(map(esc, errors)) + "</div>", unsafe_allow_html=True)
             combined_upload = pd.concat(parsed_frames, ignore_index=True) if parsed_frames else pd.DataFrame()
             if not combined_upload.empty:
-                if st.button("Add uploaded rows to batch", type="primary", width="stretch"):
+                if st.button(
+                    f"Add {platform_short} rows to batch",
+                    type="primary",
+                    width="stretch",
+                    key=f"add_uploaded_rows_v68_43_{platform_key}",
+                ):
                     added, skipped = append_to_batch(combined_upload)
                     st.session_state.last_message = f"Added {added} uploaded rows. Skipped {skipped} duplicate rows."
                     st.rerun()
+            else:
+                st.markdown(
+                    f"<div class='warn-note'>No {esc(platform_post_name)} were found in the selected file(s).</div>",
+                    unsafe_allow_html=True,
+                )
         else:
             st.markdown("<p class='sub'>No file selected yet.</p>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with paste_tab:
-        st.markdown("<div class='card'><h3>Paste post links</h3><p class='sub'>Paste TikTok or Instagram post links together. The platform is detected automatically for each link.</p>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='card'><h3>Paste {esc(platform_short)} links</h3>"
+            f"<p class='sub'>Paste one or more {esc(platform_post_name)} links.</p>",
+            unsafe_allow_html=True,
+        )
         st.info(drama_audio_note, icon=":material/info:")
         link_text = st.text_area(
             "Post links",
-            placeholder="Paste one TikTok or Instagram post link per line",
+            placeholder=f"Paste one {platform_short} post link per line",
             height=150,
+            key=f"pasted_links_v68_43_{platform_key}",
         )
         c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
         with c1:
@@ -2886,14 +2916,14 @@ elif st.session_state.step == 2:
                 "Campaign track / sound name (optional)",
                 placeholder="Song title",
                 help="Enter the song title. If left blank, the app will use the detected platform audio name.",
-                key="pasted_campaign_track_v68_39",
+                key=f"pasted_campaign_track_v68_43_{platform_key}",
             )
         with c2:
             paste_artist = st.text_input(
                 "Artist name (optional)",
                 placeholder="Only if needed",
                 help="Add the artist only when songs share the same title or the catalogue match is incorrect.",
-                key="pasted_campaign_artist_v68_39",
+                key=f"pasted_campaign_artist_v68_43_{platform_key}",
             )
         campaign_track_lookup = " - ".join(
             part for part in [safe_str(paste_artist), safe_str(paste_track)] if part
@@ -2920,14 +2950,24 @@ elif st.session_state.step == 2:
                         "or unreleased tracks may not be listed."
                     )
         with c3:
-            market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
+            market_choice = st.selectbox(
+                "Market",
+                MARKET_OPTIONS,
+                index=0,
+                key=f"pasted_market_v68_43_{platform_key}",
+            )
             paste_market = "" if market_choice == "Other / no market" else market_choice
-        links = parse_links(link_text)
+        links = parse_links(link_text, platform=add_platform)
         market_label = paste_market if paste_market else "Other"
         st.markdown(f"<div class='pill-row'><span class='pill green'>Links detected: {len(links)}</span><span class='pill blue'>Market: {esc(market_label)}</span></div>", unsafe_allow_html=True)
-        if st.button("Add pasted links to batch", type="primary", width="stretch"):
+        if st.button(
+            f"Add {platform_short} links to batch",
+            type="primary",
+            width="stretch",
+            key=f"add_pasted_links_v68_43_{platform_key}",
+        ):
             if not links:
-                st.warning("Paste at least one valid TikTok or Instagram post link first.")
+                st.warning(f"Paste at least one valid {platform_short} post link first.")
             else:
                 rows = []
                 for l in links:
