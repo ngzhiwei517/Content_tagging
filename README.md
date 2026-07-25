@@ -45,12 +45,13 @@ The app analyses the cover and metadata first, then checks additional frames or 
 ### Windows
 
 ```bat
-py -3.11 -m venv .venv
+py -3.14 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Or double-click `run_windows.bat`.
+Or double-click `run_windows.bat`. The launcher prefers Python 3.14 and can
+fall back to Python 3.13 or 3.11 when necessary.
 
 ### macOS
 
@@ -100,6 +101,7 @@ code may depend on them. Avoid renaming working functions only for style.
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Technical maintainer handover](docs/HANDOVER.md)
 - [Code map](docs/CODE_MAP.md)
 - [Project context](docs/PROJECT_CONTEXT.md)
 - [Validation and limitations](docs/VALIDATION.md)
