@@ -113,6 +113,9 @@ code may depend on them. Avoid renaming working functions only for style.
 After the first clone, run `git pull origin main` whenever the main repository
 is updated. You do not need to clone the repository again.
 
+If you cloned your own fork, sync the fork with the upstream repository first,
+then pull the updated `main` branch into your local copy.
+
 ## Tests
 
 ```bash
