@@ -8,6 +8,8 @@ This file keeps only the current release line. Older milestones are summarized i
 - Clarified that the active Streamlit app delegates classification through
   `ugc_tagger/final_update2_adapter.py`.
 - Updated the code map with safe change boundaries for future maintainers.
+- Added a clean-account technical handover covering local setup, testing,
+  Codex prompt templates, branches, pull requests, deployment and rollback.
 - Changed no prompts, guardrails, confidence thresholds, review policy, UI
   behavior or export schema.
 
