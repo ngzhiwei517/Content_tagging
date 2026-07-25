@@ -108,6 +108,11 @@ code may depend on them. Avoid renaming working functions only for style.
 - [Link compatibility](docs/LINK_COMPATIBILITY.md)
 - [Changelog](CHANGELOG.md)
 
+## Keeping your local copy updated
+
+After the first clone, run `git pull origin main` whenever the main repository
+is updated. You do not need to clone the repository again.
+
 ## Tests
 
 ```bash
