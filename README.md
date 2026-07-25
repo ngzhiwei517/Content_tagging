@@ -2,6 +2,8 @@
 
 Streamlit application for selecting, tagging, reviewing and reporting TikTok and Instagram Reels content for music-marketing workflows.
 
+This fork was successfully verified through the technical handover rehearsal.
+
 [Open the stable Streamlit demo](https://umgcontenttag.streamlit.app/)
 
 > TikTok and Instagram Reels now use one shared workflow. TikTok retains its established validation baseline; Instagram tagging has encouraging directional pilot results but does not yet have a formal large-sample benchmark.
