@@ -295,10 +295,21 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
-            "final_update2_failed_analysis_review_row(single.iloc[0])",
+            "_failed_analysis_review_row_v68_43(single.iloc[0])",
             self.source,
         )
         self.assertIn("diagnostic code {error_code}", self.source)
+
+    def test_new_failure_helper_is_not_a_fragile_module_level_import(self):
+        import_block = self.source.split(
+            "from ugc_tagger.final_update2_adapter import (",
+            1,
+        )[1].split(")", 1)[0]
+        self.assertNotIn("failed_analysis_review_row", import_block)
+        self.assertIn(
+            'getattr(_final_update2_adapter, "failed_analysis_review_row", None)',
+            self.source,
+        )
 
     def test_server_managed_secrets_are_optional_and_not_hardcoded(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', self.source)

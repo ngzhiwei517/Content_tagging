@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
+import ugc_tagger.final_update2_adapter as _final_update2_adapter
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
@@ -46,7 +47,6 @@ from ugc_tagger.final_update2_adapter import (
     QA_AUDIT_COLUMNS,
     build_review_drama_updates as final_update2_build_review_drama_updates,
     drama_review_defaults as final_update2_drama_review_defaults,
-    failed_analysis_review_row as final_update2_failed_analysis_review_row,
     normalize_url as final_update2_normalize_url,
     review_audit_update as final_update2_review_audit_update,
     review_cache as final_update2_review_cache,
@@ -77,6 +77,61 @@ except Exception:
 st.set_page_config(page_title="UGC Post Tagging", page_icon="", layout="wide")
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _failed_analysis_review_row_v68_43(original) -> Dict:
+    """Use the adapter helper when available, with a hot-reload-safe fallback.
+
+    Streamlit Cloud can briefly run a new ``app.py`` against the previous
+    in-memory adapter module during a deployment. Keeping new adapter symbols
+    out of the module-level ``from ... import`` list prevents that mixed state
+    from crashing the whole app.
+    """
+    helper = getattr(_final_update2_adapter, "failed_analysis_review_row", None)
+    if callable(helper):
+        return helper(original)
+
+    original_dict = (
+        original.to_dict()
+        if hasattr(original, "to_dict")
+        else dict(original)
+    )
+    link = _final_update2_adapter._text(original_dict.get("Link"))
+    platform = (
+        _final_update2_adapter._text(original_dict.get("Platform"))
+        or _final_update2_adapter.detect_platform(link)
+        or _final_update2_adapter.TIKTOK
+    )
+    output = _final_update2_adapter._to_ui_row(
+        original_dict,
+        {
+            "Creative Type": "Others",
+            "Content Details": (
+                "Automated analysis could not finish for this post. "
+                "Open the original post and confirm the tags manually."
+            ),
+            "confidence": 0,
+            "needs_human_review": True,
+            "review_action": "",
+            "review_risk_reasons": "Post-specific analysis interruption",
+            "tier_used": "runtime_manual_review",
+            "validation_status": "review",
+            "validation_score": 0,
+            "validation_issues": (
+                "Automated analysis could not finish for this post; "
+                "manual confirmation is required."
+            ),
+        },
+        {
+            "url": link,
+            "submittedVideoUrl": link,
+            "_platform": platform,
+            "platform": platform,
+        },
+    )
+    output["Gemini Called"] = True
+    return output
+
 
 MARKETS = ["PH", "MY", "ID", "KR", "SG", "VN", "TH"]
 MARKET_OPTIONS = ["Other / no market"] + MARKETS
@@ -2459,7 +2514,7 @@ def _tag_remaining_with_row_isolation_v68_43(
                 chunk_position + 1,
                 failure_type,
             )
-            fallback = final_update2_failed_analysis_review_row(single.iloc[0])
+            fallback = _failed_analysis_review_row_v68_43(single.iloc[0])
             on_result(local_position, fallback, "runtime_manual_review")
             logs.append(
                 f"Post {chunk_position + 1} needs manual review because "
