@@ -38,10 +38,11 @@ from ugc_tagger.drama_analysis import (
 # to fail when its hot-reload cache briefly exposed the older initializer.
 # ``app.py`` imports this constant with the rest of the adapter API, so startup
 # no longer depends on package metadata being refreshed first.
-APP_VERSION = "v68.42.9"
+APP_VERSION = "v68.42.11"
 
 
 ProgressCallback = Callable[[int, int, str], None]
+RowResultCallback = Callable[[int, Dict, str], None]
 
 
 CAMPAIGN_MARKETS = {"PH", "MY", "ID", "KR", "SG", "VN", "TH"}
@@ -748,6 +749,7 @@ def tag_candidates(
     apify_token: str,
     logs: Optional[List[str]] = None,
     on_progress: Optional[ProgressCallback] = None,
+    on_result: Optional[RowResultCallback] = None,
     gemini_model: str = DEFAULT_GEMINI_MODEL,
 ) -> pd.DataFrame:
     """Run final_update_2 by source/market/track and return the current UI schema."""
@@ -789,6 +791,16 @@ def tag_candidates(
 
             def row_done(_done, _group_total, output, tier):
                 nonlocal completed
+                pair_position = int(_done) - 1
+                if on_result and 0 <= pair_position < len(pairs):
+                    input_position, original, raw_record = pairs[pair_position]
+                    converted_row = _to_ui_row(original, output, raw_record)
+                    converted_row["Gemini Model"] = selected_model
+                    converted_row["Gemini Called"] = _text(tier).lower() not in {
+                        "auto_removed_unavailable",
+                        "sensitive_human_review",
+                    }
+                    on_result(input_position, converted_row, _text(tier))
                 completed += 1
                 if on_progress:
                     on_progress(completed, total, _text(tier))
@@ -811,13 +823,18 @@ def tag_candidates(
                 if position < len(tagged_rows):
                     converted.append((input_position, _to_ui_row(original, tagged_rows[position], raw_record)))
                 else:
-                    converted.append((input_position, _to_ui_row(original, {
+                    missing_row = _to_ui_row(original, {
                         "Creative Type": "",
                         "confidence": 0,
                         "needs_human_review": True,
                         "validation_status": "review",
                         "validation_issues": "Backend returned no output row.",
-                    }, raw_record)))
+                    }, raw_record)
+                    missing_row["Gemini Model"] = selected_model
+                    missing_row["Gemini Called"] = True
+                    converted.append((input_position, missing_row))
+                    if on_result:
+                        on_result(input_position, missing_row, "missing_output")
                     completed += 1
                     if on_progress:
                         on_progress(completed, total, "missing_output")
