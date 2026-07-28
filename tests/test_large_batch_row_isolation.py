@@ -1,12 +1,13 @@
 import ast
 import logging
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
 
-from ugc_tagger.final_update2_adapter import failed_analysis_review_row
+import ugc_tagger.final_update2_adapter as adapter_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,16 +32,17 @@ class LargeBatchRowIsolationTests(unittest.TestCase):
     @staticmethod
     def _namespace(fake_tagger):
         namespace = {
+            "_final_update2_adapter": adapter_module,
             "Dict": Dict,
             "List": List,
             "LOGGER": logging.getLogger("large-batch-test"),
-            "final_update2_failed_analysis_review_row": failed_analysis_review_row,
             "final_update2_tag_candidates": fake_tagger,
             "pd": pd,
             "safe_str": lambda value: "" if value is None else str(value),
         }
         load_functions(
             [
+                "_failed_analysis_review_row_v68_43",
                 "_is_quota_interruption_v68_43",
                 "_large_batch_must_pause_v68_43",
                 "_tag_remaining_with_row_isolation_v68_43",
@@ -48,6 +50,37 @@ class LargeBatchRowIsolationTests(unittest.TestCase):
             namespace,
         )
         return namespace
+
+    def test_old_cached_adapter_without_new_helper_still_builds_review_row(self):
+        cached_adapter = SimpleNamespace(
+            TIKTOK=adapter_module.TIKTOK,
+            _text=adapter_module._text,
+            _to_ui_row=adapter_module._to_ui_row,
+            detect_platform=adapter_module.detect_platform,
+        )
+        namespace = {
+            "_final_update2_adapter": cached_adapter,
+            "Dict": Dict,
+        }
+        load_functions(["_failed_analysis_review_row_v68_43"], namespace)
+
+        row = namespace["_failed_analysis_review_row_v68_43"](
+            {
+                "Platform": "Instagram Reels",
+                "Link": "https://www.instagram.com/reel/HOT_RELOAD/",
+                "Market": "SG",
+                "Track": "Scale track",
+                "Creator": "cached_creator",
+            }
+        )
+
+        self.assertEqual(row["Platform"], "Instagram Reels")
+        self.assertEqual(row["Link"], "https://www.instagram.com/reel/HOT_RELOAD/")
+        self.assertEqual(row["Market"], "SG")
+        self.assertEqual(row["Track"], "Scale track")
+        self.assertEqual(row["Creative Type"], "Others")
+        self.assertTrue(row["Needs Review"])
+        self.assertEqual(row["Tier Used"], "runtime_manual_review")
 
     def test_two_hundred_rows_continue_when_one_post_fails(self):
         outputs = {}

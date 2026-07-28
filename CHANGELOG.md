@@ -1,5 +1,14 @@
 # Changelog
 
+## v68.42.12 hotfix — Streamlit deployment import compatibility
+
+- Removed the new large-batch fallback helper from the module-level adapter
+  import list.
+- Added a compatibility wrapper that uses the adapter helper when available
+  and an established-schema fallback during a mixed Streamlit hot reload.
+- Prevented a newly deployed `app.py` from crashing when Streamlit Cloud still
+  holds the previous adapter module in memory.
+
 ## v68.42.12 — Isolate post-specific large-batch failures
 
 - Continued an unfinished 50-post chunk automatically when one post raises a
