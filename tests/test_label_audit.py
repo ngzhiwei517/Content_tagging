@@ -8,6 +8,7 @@ from ugc_tagger.final_update2_adapter import (
     MARKETING_EXPORT_COLUMNS,
     QA_AUDIT_COLUMNS,
     _to_ui_row,
+    failed_analysis_review_row,
     review_audit_update,
 )
 
@@ -37,6 +38,29 @@ class LabelAuditTests(unittest.TestCase):
         history = json.loads(row["Label History"])
         self.assertEqual(history[0]["stage"], "automated")
         self.assertEqual(history[0]["labels"], ["Fashion", "Dance"])
+
+    def test_failed_analysis_row_preserves_context_for_manual_review(self):
+        row = failed_analysis_review_row(
+            {
+                "Platform": "Instagram Reels",
+                "Source": "Scale test",
+                "Link": "https://www.instagram.com/reel/SAFE_TEST/",
+                "Market": "SG",
+                "Track": "Scale track",
+                "Creator": "creator_name",
+            }
+        )
+        self.assertEqual(row["App Version"], APP_VERSION)
+        self.assertEqual(row["Platform"], "Instagram Reels")
+        self.assertEqual(row["Market"], "SG")
+        self.assertEqual(row["Track"], "Scale track")
+        self.assertEqual(row["Creator"], "creator_name")
+        self.assertEqual(row["Creative Type"], "Others")
+        self.assertTrue(row["Needs Review"])
+        self.assertEqual(row["Validation Status"], "review")
+        self.assertEqual(row["Tier Used"], "runtime_manual_review")
+        self.assertEqual(row["Review Action"], "")
+        self.assertIn("confirm the tags manually", row["Content Details"])
 
     def test_verifier_change_preserves_pre_verifier_labels_in_qa_history(self):
         row = _to_ui_row(

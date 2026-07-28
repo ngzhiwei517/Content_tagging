@@ -26,9 +26,14 @@ TikTok and Instagram rows can share one batch, review queue and export. Market a
 
 For `Tag every link` selections above 50 posts, the app collects public data in
 50-post chunks and saves each post immediately after its tagging result is
-complete. If API quota, a browser disconnect or a Streamlit rerun stops the
-job, reopen the same app URL and select **Resume tagging**. The app restarts at
-the first unfinished post; completed Gemini analysis is not repeated.
+complete. Successful chunks advance automatically; users do not need to select
+**Resume tagging** after every 50 posts. If API quota, a browser disconnect or
+a provider interruption stops the job, reopen the same app URL and select
+**Resume tagging** once the interruption is resolved. The app restarts at the
+first unfinished post; completed Gemini analysis is not repeated.
+
+If one individual post cannot be analysed while the providers remain available,
+that post is sent to Human Review and the rest of the batch continues.
 
 Checkpoints are temporary files on the current app instance. They protect
 ordinary reruns and reconnects, but a redeploy or replacement of the hosted

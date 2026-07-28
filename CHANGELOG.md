@@ -1,5 +1,16 @@
 # Changelog
 
+## v68.42.12 — Isolate post-specific large-batch failures
+
+- Continued an unfinished 50-post chunk automatically when one post raises a
+  data/content-specific runtime error.
+- Routed the isolated failed post to Human Review while preserving its original
+  link and campaign context.
+- Kept quota, key, provider-service, checkpoint-storage and repeated systemic
+  failures as safe batch pauses.
+- Added non-sensitive diagnostic codes and server-side traceback logging so a
+  repeated pause can be investigated without exposing credentials.
+
 ## v68.42.11 — Per-post resume and managed deployment keys
 
 - Saved every completed post during large `Tag every link` runs while retaining
