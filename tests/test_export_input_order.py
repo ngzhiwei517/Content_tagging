@@ -109,6 +109,69 @@ class ExportInputOrderTests(unittest.TestCase):
         self.assertEqual(tagged["Link"].tolist(), candidates["Link"].tolist())
         self.assertTrue((tagged["Gemini Model"] == "gemini-3.1-flash-lite").all())
 
+    def test_row_result_callback_preserves_completed_rows_before_failure(self):
+        class InterruptedBackend:
+            @staticmethod
+            @contextmanager
+            def gemini_model_context(_model):
+                yield _model
+
+            @staticmethod
+            def run_pipeline(records, *_args, **kwargs):
+                callback = kwargs["on_row_done"]
+                for position, record in enumerate(records[:2]):
+                    callback(
+                        position + 1,
+                        len(records),
+                        {
+                            "tiktok_url": record["webVideoUrl"],
+                            "Creative Type": "Others",
+                            "Content Details": "Completed before interruption",
+                            "validation_status": "accepted",
+                            "tier_used": "tier1_cover",
+                        },
+                        "tier1_cover",
+                    )
+                raise RuntimeError("simulated interruption")
+
+        candidates = pd.DataFrame([
+            {
+                "Source": "Pasted links",
+                "Market": "SG",
+                "Track": "A",
+                "Link": f"https://www.tiktok.com/@creator/video/80{index}",
+            }
+            for index in range(3)
+        ])
+        records = [
+            {
+                "id": f"80{index}",
+                "webVideoUrl": candidates.loc[index, "Link"],
+            }
+            for index in range(3)
+        ]
+        completed = []
+        with patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=InterruptedBackend(),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                tag_candidates(
+                    candidates,
+                    records,
+                    "key",
+                    "token",
+                    on_result=lambda position, row, tier: completed.append(
+                        (position, row, tier)
+                    ),
+                )
+        self.assertEqual([position for position, _, _ in completed], [0, 1])
+        self.assertEqual(
+            [row["Link"] for _, row, _ in completed],
+            candidates.iloc[:2]["Link"].tolist(),
+        )
+        self.assertTrue(all(row["Gemini Called"] for _, row, _ in completed))
+
 
 if __name__ == "__main__":
     unittest.main()

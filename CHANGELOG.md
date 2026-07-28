@@ -1,5 +1,19 @@
 # Changelog
 
+## v68.42.11 — Per-post resume and managed deployment keys
+
+- Saved every completed post during large `Tag every link` runs while retaining
+  50-post Apify chunks.
+- Resumed an interrupted chunk from its first unfinished post instead of
+  repeating already-completed Gemini analysis.
+- Paused safely on Gemini quota errors and showed a fixed, non-sensitive message
+  with the exact number of saved posts.
+- Added optional server-managed `GEMINI_API_KEY` and `APIFY_TOKEN` Streamlit
+  secrets so marketing users do not need to enter shared deployment keys.
+- Kept local/session key entry as the fallback for installations without
+  deployment secrets.
+- Added interruption/resume, user-isolation and secret-safety regression tests.
+
 ## v68.42.10 — Resumable large-batch tagging
 
 - Added durable 50-post checkpoints for `Tag every link` runs above 50 posts.

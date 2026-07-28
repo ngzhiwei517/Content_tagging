@@ -24,14 +24,36 @@ TikTok and Instagram rows can share one batch, review queue and export. Market a
 
 ### Large batches
 
-For `Tag every link` selections above 50 posts, the app saves progress after
-each 50-post chunk. If a browser or Streamlit session disconnects, reopen the
-same app URL, enter the keys again and select **Resume tagging**. Completed
-chunks are not repeated, and credentials are never written to the checkpoint.
+For `Tag every link` selections above 50 posts, the app collects public data in
+50-post chunks and saves each post immediately after its tagging result is
+complete. If API quota, a browser disconnect or a Streamlit rerun stops the
+job, reopen the same app URL and select **Resume tagging**. The app restarts at
+the first unfinished post; completed Gemini analysis is not repeated.
 
 Checkpoints are temporary files on the current app instance. They protect
 ordinary reruns and reconnects, but a redeploy or replacement of the hosted
-container can remove them.
+container can remove them. Different browser runs use separate checkpoint job
+IDs. A future shared database and user authentication would be required for
+durable cross-redeploy job ownership.
+
+### Deployment-managed API access
+
+A deployment owner can store the shared provider credentials in Streamlit
+Secrets so users do not need to enter them:
+
+```toml
+GEMINI_API_KEY = "replace-with-the-deployment-key"
+APIFY_TOKEN = "replace-with-the-deployment-token"
+```
+
+Add these values in the Streamlit deployment settings, never in GitHub. When
+both are configured, the API Keys page shows that access is managed by the app
+owner. If quota becomes unavailable, completed posts remain saved and the app
+asks the user to contact the owner before resuming. After rotating a deployment
+secret, reboot the hosted app so the next run reads the new value.
+
+Local installations without Streamlit Secrets keep the existing password-field
+flow. Credentials are never written to runtime or tagging checkpoints.
 
 ## Supported post links
 

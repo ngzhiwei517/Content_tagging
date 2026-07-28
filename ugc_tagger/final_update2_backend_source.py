@@ -788,6 +788,24 @@ ENABLE_TARGETED_EVIDENCE_VERIFIER = True
 # Rows that still fail after short retry are flagged for review instead of blocking the batch.
 GEMINI_BACKOFF_SECONDS = 20
 
+
+class GeminiQuotaExhaustedError(RuntimeError):
+    """Signal that the batch must pause until provider quota is restored."""
+
+
+def _is_gemini_quota_error(error) -> bool:
+    text = str(error or "").upper()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "RESOURCE_EXHAUSTED",
+            "QUOTA",
+            "RATE LIMIT",
+            "USAGE LIMIT",
+        )
+    )
+
 NARRATIVE_OPTIONS = [
     'NA', 'Relationship', 'Friendship', 'Family', 'Lifestyle',
     'Dance', 'Simple Dance', 'Dance Tutorial', 'Lip Sync',
@@ -4481,6 +4499,8 @@ def call_gemini(contents, gemini_key, max_retries=2):
                 time.sleep(wait)
             else:
                 return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
+    if _is_gemini_quota_error(last_error):
+        raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
     return {
         'parse_error': True,
         'raw_response': last_error or 'Max retries exceeded',
@@ -4518,6 +4538,8 @@ def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
                 time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
             else:
                 return {'parse_error': True, 'reason': err}
+    if _is_gemini_quota_error(last_error):
+        raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
     return {'parse_error': True, 'reason': last_error or 'Targeted verifier retries exhausted'}
 
 
@@ -4527,6 +4549,7 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
     from google.genai import types
 
     client = genai.Client(api_key=gemini_key)
+    last_error = ''
     for attempt in range(max_retries):
         try:
             _throttle_gemini_request()
@@ -4538,13 +4561,19 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
             return response_from_json_text(response.text)
         except Exception as e:
             err = str(e)
+            last_error = err
             if '429' in err or 'RESOURCE_EXHAUSTED' in err:
                 time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
             elif '503' in err or 'UNAVAILABLE' in err:
                 time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
             else:
                 return {'parse_error': True, 'review_reason': err}
-    return {'parse_error': True, 'review_reason': 'Drama enrichment retries exhausted'}
+    if _is_gemini_quota_error(last_error):
+        raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
+    return {
+        'parse_error': True,
+        'review_reason': last_error or 'Drama enrichment retries exhausted',
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -4590,6 +4619,8 @@ def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id=''
                             video_path,
                             preview_url,
                         )
+        except GeminiQuotaExhaustedError:
+            raise
         except Exception as exc:
             log_list.append(f"  -> Drama scene-frame pass unavailable: {exc}")
             response = {'parse_error': True, 'review_reason': str(exc)}
@@ -4606,6 +4637,8 @@ def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id=''
                     gemini_key,
                 )
                 evidence_source = 'cover image'
+            except GeminiQuotaExhaustedError:
+                raise
             except Exception as exc:
                 response = {'parse_error': True, 'review_reason': str(exc)}
 
@@ -4705,6 +4738,8 @@ def maybe_run_targeted_evidence_verifier(
         # an otherwise 3.1 Flash-Lite run.
         with gemini_model_context(verifier_model):
             response = call(prompt, gemini_key)
+    except GeminiQuotaExhaustedError:
+        raise
     except Exception as exc:
         response = {'parse_error': True, 'reason': str(exc)}
     verified = apply_verifier_response(
@@ -4760,6 +4795,7 @@ If choreography is visible across time, prioritise Dance over Lip Sync.
 Return the same JSON schema only.
 """
 
+        last_error = ''
         for attempt in range(max_retries):
             try:
                 _throttle_gemini_request()
@@ -4779,14 +4815,25 @@ Return the same JSON schema only.
                 }
             except Exception as e:
                 err = str(e)
+                last_error = err
                 if '429' in err or 'RESOURCE_EXHAUSTED' in err:
                     time.sleep(GEMINI_BACKOFF_SECONDS*(attempt+1) + random.randint(0,5))
                 elif '503' in err or 'UNAVAILABLE' in err:
                     time.sleep(max(10, GEMINI_BACKOFF_SECONDS//2)*(attempt+1) + random.randint(0,5))
                 else:
                     return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
-        return {'parse_error': True, 'raw_response': 'Max retries exceeded in video fallback', 'needs_human_review': True}
+        if _is_gemini_quota_error(last_error):
+            raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
+        return {
+            'parse_error': True,
+            'raw_response': last_error or 'Max retries exceeded in video fallback',
+            'needs_human_review': True,
+        }
+    except GeminiQuotaExhaustedError:
+        raise
     except Exception as e:
+        if _is_gemini_quota_error(e):
+            raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED") from None
         return {'parse_error': True, 'raw_response': f'Video fallback failed: {e}', 'needs_human_review': True}
     finally:
         # Best-effort cleanup. Not all SDK/account modes support delete.
@@ -5135,6 +5182,8 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                         tier0_result = call_gemini(contents_v, gemini_key)
                         tier0_result['tier_used'] = 'tier0_visual_frames'
                         log_list.append("  → Tier 0V: video frames sent to Gemini")
+                except GeminiQuotaExhaustedError:
+                    raise
                 except Exception as e:
                     log_list.append(f"  → Tier 0V video failed: {e}")
             # Fallback to cover image if video unavailable or failed
@@ -5147,6 +5196,8 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                         tier0_result = call_gemini(contents_c, gemini_key)
                         tier0_result['tier_used'] = 'tier0_visual_cover'
                         log_list.append("  → Tier 0V: cover image sent to Gemini")
+                    except GeminiQuotaExhaustedError:
+                        raise
                     except Exception as e:
                         log_list.append(f"  → Tier 0V cover failed: {e}")
             # Evaluate result — only flag human if still can't determine
@@ -5332,6 +5383,8 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                                 result, status, score, issues = resultv, statusv, scorev, issuesv
                         elif unresolved_after_frames:
                             log_list.append("  → Tier 2C skipped in runtime-safe mode (prevents long full-video upload waits).")
+                except GeminiQuotaExhaustedError:
+                    raise
                 except Exception as e:
                     log_list.append(f"  → Tier 2 failed: {e}")
 

@@ -1,9 +1,9 @@
 """Durable, secret-free checkpoints for large tagging batches.
 
-The Streamlit entry point processes one chunk per script execution.  This
-module stores completed chunk outputs and the current chunk's scraped records
-under ``.tmp`` so a rerun or reconnect can continue without starting the
-entire batch again.
+The Streamlit entry point processes one chunk per script execution. This
+module stores every completed post, completed chunk outputs and the current
+chunk's scraped records under ``.tmp`` so a rerun or reconnect can continue
+without repeating completed Gemini work.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 DEFAULT_CHUNK_SIZE = 50
 DEFAULT_RETENTION_HOURS = 72
 _SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -143,6 +143,17 @@ class BatchCheckpointStore:
     def _records_path(self, job_id: str, chunk_index: int) -> Path:
         return self._job_dir(job_id) / f"records_{int(chunk_index):05d}.json"
 
+    def _partial_dir(self, job_id: str, chunk_index: int) -> Path:
+        return self._job_dir(job_id) / f"partial_{int(chunk_index):05d}"
+
+    def _partial_row_path(
+        self,
+        job_id: str,
+        chunk_index: int,
+        row_position: int,
+    ) -> Path:
+        return self._partial_dir(job_id, chunk_index) / f"row_{int(row_position):05d}.json"
+
     @staticmethod
     def _atomic_write_json(path: Path, payload) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,10 +214,13 @@ class BatchCheckpointStore:
             "total_chunks": total_chunks,
             "completed_chunks": [],
             "completed_rows": 0,
+            "partial_rows": 0,
+            "saved_rows": 0,
             "comparison_run_id": str(comparison_run_id),
             "comparison_started_utc": str(comparison_started_utc),
             "elapsed_seconds": 0.0,
             "last_error": "",
+            "pause_reason": "",
             "created_at": now,
             "updated_at": now,
         }
@@ -259,14 +273,28 @@ class BatchCheckpointStore:
                 int(reconciled["chunk_size"]),
                 max(0, int(reconciled["total_rows"]) - start),
             )
+        partial_rows = 0
+        for index in range(total_chunks):
+            if index in completed:
+                continue
+            partial_rows += len(self.partial_positions(job_id, index))
+        saved_rows = min(
+            int(reconciled.get("total_rows", 0)),
+            completed_rows + partial_rows,
+        )
         changed = (
             completed != list(reconciled.get("completed_chunks", []))
             or completed_rows != int(reconciled.get("completed_rows", 0))
+            or partial_rows != int(reconciled.get("partial_rows", 0))
+            or saved_rows != int(reconciled.get("saved_rows", 0))
         )
         reconciled["completed_chunks"] = completed
         reconciled["completed_rows"] = completed_rows
+        reconciled["partial_rows"] = partial_rows
+        reconciled["saved_rows"] = saved_rows
         if len(completed) == total_chunks and total_chunks > 0:
             reconciled["status"] = "completed"
+            reconciled["pause_reason"] = ""
         elif reconciled.get("status") == "completed":
             reconciled["status"] = "running"
         return self.save_manifest(reconciled) if changed else reconciled
@@ -314,6 +342,78 @@ class BatchCheckpointStore:
         except OSError:
             pass
 
+    def save_partial_row(
+        self,
+        job_id: str,
+        chunk_index: int,
+        row_position: int,
+        tagged_row,
+    ) -> None:
+        """Atomically save one completed row from the current chunk."""
+        if int(row_position) < 0:
+            raise ValueError("Partial row position must be non-negative.")
+        if isinstance(tagged_row, pd.Series):
+            frame = tagged_row.to_frame().T
+        elif isinstance(tagged_row, dict):
+            frame = pd.DataFrame([tagged_row])
+        elif isinstance(tagged_row, pd.DataFrame):
+            frame = tagged_row.copy()
+        else:
+            raise TypeError("Partial tagged output must be a row or DataFrame.")
+        if len(frame) != 1:
+            raise ValueError("A partial checkpoint must contain exactly one row.")
+        self._atomic_write_json(
+            self._partial_row_path(
+                job_id,
+                chunk_index,
+                row_position,
+            ),
+            _json_safe(dataframe_to_payload(frame.reset_index(drop=True))),
+        )
+
+    def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
+        """Return saved row positions for one incomplete chunk."""
+        directory = self._partial_dir(job_id, chunk_index)
+        if not directory.exists():
+            return []
+        positions: List[int] = []
+        for path in directory.glob("row_*.json"):
+            match = re.fullmatch(r"row_(\d{5})\.json", path.name)
+            if match:
+                positions.append(int(match.group(1)))
+        return sorted(set(positions))
+
+    def load_partial_chunk_results(
+        self,
+        job_id: str,
+        chunk_index: int,
+    ) -> pd.DataFrame:
+        """Restore saved rows for one incomplete chunk in input order."""
+        frames: List[pd.DataFrame] = []
+        for position in self.partial_positions(job_id, chunk_index):
+            path = self._partial_row_path(job_id, chunk_index, position)
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            frame = dataframe_from_payload(payload)
+            if len(frame) == 1:
+                frame = frame.copy()
+                frame["_checkpoint_row_position"] = position
+                frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        output = pd.concat(frames, ignore_index=True)
+        return output.sort_values(
+            "_checkpoint_row_position",
+            kind="stable",
+        ).reset_index(drop=True)
+
+    def discard_partial_results(self, job_id: str, chunk_index: int) -> None:
+        directory = self._partial_dir(job_id, chunk_index)
+        if directory.exists():
+            shutil.rmtree(directory)
+
     def save_completed_chunk(
         self,
         manifest: Dict,
@@ -326,7 +426,7 @@ class BatchCheckpointStore:
         job_id = manifest["job_id"]
         self._atomic_write_json(
             self._chunk_path(job_id, chunk_index),
-            dataframe_to_payload(tagged.reset_index(drop=True)),
+            _json_safe(dataframe_to_payload(tagged.reset_index(drop=True))),
         )
         updated = dict(manifest)
         completed = set(int(index) for index in updated.get("completed_chunks", []))
@@ -342,28 +442,40 @@ class BatchCheckpointStore:
                 for index in completed
             ),
         )
+        updated["partial_rows"] = 0
+        updated["saved_rows"] = updated["completed_rows"]
         updated["elapsed_seconds"] = round(
             float(updated.get("elapsed_seconds", 0.0)) + max(0.0, float(elapsed_seconds)),
             2,
         )
         updated["last_error"] = ""
+        updated["pause_reason"] = ""
         updated["status"] = (
             "completed"
             if len(completed) >= int(updated["total_chunks"])
             else "running"
         )
         updated = self.save_manifest(updated)
+        self.discard_partial_results(job_id, chunk_index)
         self.discard_scraped_records(job_id, chunk_index)
         return updated
 
-    def mark_failed(self, manifest: Dict, error: str = "") -> Dict:
-        """Pause a job without persisting raw exception text or credentials."""
-        updated = dict(manifest)
-        updated["status"] = "failed"
+    def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
+        """Pause without persisting raw provider errors or credentials."""
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        updated["status"] = "paused_quota" if quota else "paused_error"
+        updated["pause_reason"] = "quota" if quota else "interrupted"
         updated["last_error"] = (
-            "The current chunk stopped before completion. Resume is required."
+            "API quota is unavailable. Resume after the app owner restores access."
+            if quota
+            else "Tagging stopped before completion. Resume is required."
         )
         return self.save_manifest(updated)
+
+    def mark_failed(self, manifest: Dict, error: str = "") -> Dict:
+        """Backward-compatible alias for a non-quota pause."""
+        return self.mark_paused(manifest, quota=False)
 
     def load_completed_results(self, manifest: Dict) -> pd.DataFrame:
         frames: List[pd.DataFrame] = []
@@ -377,6 +489,26 @@ class BatchCheckpointStore:
             frame = dataframe_from_payload(payload)
             if not frame.empty:
                 frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def load_saved_results(self, manifest: Dict) -> pd.DataFrame:
+        """Return completed chunks plus saved rows from the first open chunk."""
+        frames: List[pd.DataFrame] = []
+        completed = self.load_completed_results(manifest)
+        if not completed.empty:
+            frames.append(completed)
+        next_index = self.next_chunk_index(manifest)
+        if next_index is not None:
+            partial = self.load_partial_chunk_results(
+                manifest["job_id"],
+                next_index,
+            )
+            if not partial.empty:
+                partial = partial.drop(
+                    columns=["_checkpoint_row_position"],
+                    errors="ignore",
+                )
+                frames.append(partial)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def delete_job(self, job_id: str) -> None:

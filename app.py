@@ -1093,6 +1093,16 @@ def clean_api_secret(v) -> str:
     return s
 
 
+def _managed_api_secret_v68_43(name: str) -> str:
+    """Read a server-managed key without copying it into durable checkpoints."""
+    try:
+        return clean_api_secret(st.secrets.get(name, ""))
+    except Exception:
+        # Local installs without .streamlit/secrets.toml keep the existing
+        # session-input flow.
+        return ""
+
+
 def display_empty(v: str, fallback: str = "Not specified") -> str:
     s = safe_str(v)
     return s if s else fallback
@@ -2253,13 +2263,29 @@ def _attach_comparison_metadata_v68_43(
     return output
 
 
+def _is_quota_interruption_v68_43(error) -> bool:
+    """Recognise provider quota failures without exposing raw error details."""
+    text = safe_str(error).upper()
+    return any(
+        marker in text
+        for marker in (
+            "GEMINI_QUOTA_EXHAUSTED",
+            "RESOURCE_EXHAUSTED",
+            "429",
+            "QUOTA",
+            "RATE LIMIT",
+            "USAGE LIMIT",
+        )
+    )
+
+
 def _run_checkpointed_tag_every_link_v68_43(
     selected: pd.DataFrame,
     gemini_key: str,
     apify_token: str,
     comparison_model: str,
 ) -> Optional[pd.DataFrame]:
-    """Process one durable 50-row chunk and resume safely on the next rerun.
+    """Process one 50-row scrape chunk with a checkpoint after every tagged row.
 
     ``None`` means that a chunk completed and more chunks remain.  An empty
     DataFrame means the current attempt failed and should wait for the user to
@@ -2302,6 +2328,7 @@ def _run_checkpointed_tag_every_link_v68_43(
     )
 
     completed_rows = int(manifest.get("completed_rows", 0))
+    saved_rows = int(manifest.get("saved_rows", completed_rows))
     total_rows = max(1, int(manifest.get("total_rows", len(selected))))
     total_chunks = max(1, int(manifest.get("total_chunks", 1)))
     next_chunk_index = store.next_chunk_index(manifest)
@@ -2316,10 +2343,10 @@ def _run_checkpointed_tag_every_link_v68_43(
         expanded=True,
     )
     status.write(
-        f"Saved progress: {completed_rows:,} of {total_rows:,} posts. "
-        f"Processing the next {len(chunk):,} posts."
+        f"Saved progress: {saved_rows:,} of {total_rows:,} posts. "
+        f"Processing chunk {chunk_number}, which contains {len(chunk):,} posts."
     )
-    progress = st.progress(min(completed_rows / total_rows, 1.0))
+    progress = st.progress(min(saved_rows / total_rows, 1.0))
     log_box = st.empty()
     logs: List[str] = []
     chunk_timer = time.perf_counter()
@@ -2342,30 +2369,80 @@ def _run_checkpointed_tag_every_link_v68_43(
         else:
             status.write("Reusing the saved Apify result for this chunk.")
 
-        def on_progress(done: int, total: int, tier: str):
-            overall_done = completed_rows + done
-            progress.progress(min(overall_done / total_rows, 1.0))
+        existing_positions = set(
+            store.partial_positions(manifest["job_id"], next_chunk_index)
+        )
+        remaining_positions = [
+            position
+            for position in range(len(chunk))
+            if position not in existing_positions
+        ]
+        remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
+        saved_positions = set(existing_positions)
+
+        def on_result(input_position: int, tagged_row: Dict, tier: str):
+            chunk_position = remaining_positions[int(input_position)]
+            routed_row, sensitive_count = _route_sensitive_for_selection_v56(
+                pd.DataFrame([tagged_row]),
+                "Tag every link",
+            )
+            store.save_partial_row(
+                manifest["job_id"],
+                next_chunk_index,
+                chunk_position,
+                routed_row.iloc[0],
+            )
+            saved_positions.add(chunk_position)
+            if sensitive_count:
+                logs.append("Routed 1 sensitive post to human review.")
+            overall_saved = completed_rows + len(saved_positions)
+            progress.progress(min(overall_saved / total_rows, 1.0))
             _render_run_log_v45(log_box, logs)
 
-        status.write("Analysing this chunk with Gemini...")
-        tagged_chunk = final_update2_tag_candidates(
-            chunk,
-            records,
-            gemini_key,
-            apify_token,
-            logs=logs,
-            on_progress=on_progress,
-            gemini_model=comparison_model,
-        )
-        tagged_chunk, sensitive_review_count = _route_sensitive_for_selection_v56(
-            tagged_chunk,
-            "Tag every link",
-        )
-        if sensitive_review_count:
-            logs.append(
-                f"Routed {sensitive_review_count} sensitive post(s) to human review."
-            )
+        def on_progress(done: int, total: int, tier: str):
             _render_run_log_v45(log_box, logs)
+
+        if not remaining_chunk.empty:
+            status.write(
+                f"Analysing {len(remaining_chunk):,} unfinished post(s) with Gemini..."
+            )
+            tagged_remaining = final_update2_tag_candidates(
+                remaining_chunk,
+                records,
+                gemini_key,
+                apify_token,
+                logs=logs,
+                on_progress=on_progress,
+                on_result=on_result,
+                gemini_model=comparison_model,
+            )
+            # Test doubles and older compatible adapters may return rows without
+            # invoking the callback. Save those rows before finalising the chunk.
+            for input_position, (_, tagged_row) in enumerate(
+                tagged_remaining.reset_index(drop=True).iterrows()
+            ):
+                chunk_position = remaining_positions[input_position]
+                if chunk_position not in saved_positions:
+                    on_result(input_position, tagged_row.to_dict(), "")
+
+        partial_chunk = store.load_partial_chunk_results(
+            manifest["job_id"],
+            next_chunk_index,
+        )
+        expected_positions = set(range(len(chunk)))
+        actual_positions = set(
+            int(value)
+            for value in partial_chunk.get(
+                "_checkpoint_row_position",
+                pd.Series(dtype=int),
+            ).tolist()
+        )
+        if actual_positions != expected_positions:
+            raise RuntimeError("PARTIAL_CHECKPOINT_INCOMPLETE")
+        tagged_chunk = partial_chunk.drop(
+            columns=["_checkpoint_row_position"],
+            errors="ignore",
+        ).reset_index(drop=True)
 
         manifest = store.save_completed_chunk(
             manifest,
@@ -2395,19 +2472,28 @@ def _run_checkpointed_tag_every_link_v68_43(
             expanded=False,
         )
     except Exception as exc:
-        manifest = store.mark_failed(manifest)
+        quota_pause = _is_quota_interruption_v68_43(exc)
+        manifest = store.mark_paused(manifest, quota=quota_pause)
         partial = _attach_comparison_metadata_v68_43(
-            store.load_completed_results(manifest),
+            store.load_saved_results(manifest),
             manifest,
         )
         if not partial.empty:
             st.session_state.tagged_df = partial
         _persist_runtime_checkpoint_v68_15()
         status.update(label="Large-batch tagging paused", state="error", expanded=True)
-        st.error(
-            f"Chunk {chunk_number} stopped: {exc}. "
-            "Completed chunks are saved; select Resume tagging to continue."
-        )
+        saved_count = int(manifest.get("saved_rows", len(partial)))
+        if quota_pause:
+            st.error(
+                f"API quota is currently unavailable. {saved_count:,} of "
+                f"{total_rows:,} completed posts are saved. Ask the app owner "
+                "to restore API access, then select Resume tagging."
+            )
+        else:
+            st.error(
+                f"Tagging paused safely. {saved_count:,} of {total_rows:,} "
+                "completed posts are saved. Select Resume tagging to continue."
+            )
         return pd.DataFrame()
 
     if manifest.get("status") == "completed":
@@ -2421,15 +2507,21 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     if df.empty:
         return pd.DataFrame()
 
-    gemini_key = clean_api_secret(
-        st.session_state.get("gemini_key", "")
-        or st.session_state.get("gemini_key_input_v52", "")
-        or st.session_state.get("gemini_key_input", "")
+    gemini_key = (
+        _managed_api_secret_v68_43("GEMINI_API_KEY")
+        or clean_api_secret(
+            st.session_state.get("gemini_key", "")
+            or st.session_state.get("gemini_key_input_v52", "")
+            or st.session_state.get("gemini_key_input", "")
+        )
     )
-    apify_token = clean_api_secret(
-        st.session_state.get("apify_token", "")
-        or st.session_state.get("apify_token_input_v52", "")
-        or st.session_state.get("apify_token_input", "")
+    apify_token = (
+        _managed_api_secret_v68_43("APIFY_TOKEN")
+        or clean_api_secret(
+            st.session_state.get("apify_token", "")
+            or st.session_state.get("apify_token_input_v52", "")
+            or st.session_state.get("apify_token_input", "")
+        )
     )
     st.session_state.gemini_key = gemini_key
     st.session_state.apify_token = apify_token
@@ -2996,6 +3088,12 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
 # -----------------------------------------------------------------------------
 _restore_runtime_checkpoint_v68_15()
 _persist_runtime_checkpoint_v68_15()
+managed_gemini_key_v68_43 = _managed_api_secret_v68_43("GEMINI_API_KEY")
+managed_apify_token_v68_43 = _managed_api_secret_v68_43("APIFY_TOKEN")
+if managed_gemini_key_v68_43:
+    st.session_state.gemini_key = managed_gemini_key_v68_43
+if managed_apify_token_v68_43:
+    st.session_state.apify_token = managed_apify_token_v68_43
 
 st.markdown(
     """
@@ -3018,26 +3116,51 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
 if st.session_state.step == 1:
     st.markdown("<div class='card page-heading'><h2>API Keys</h2></div>", unsafe_allow_html=True)
 
+    managed_gemini = _managed_api_secret_v68_43("GEMINI_API_KEY")
+    managed_apify = _managed_api_secret_v68_43("APIFY_TOKEN")
+
     # Keep the visible input fields separate from the saved runtime keys.
     # This prevents Streamlit reruns/navigation from accidentally using stale or blank values.
     if "gemini_key_input_v52" not in st.session_state:
-        st.session_state.gemini_key_input_v52 = st.session_state.get("gemini_key", "")
+        st.session_state.gemini_key_input_v52 = (
+            "" if managed_gemini else st.session_state.get("gemini_key", "")
+        )
     if "apify_token_input_v52" not in st.session_state:
-        st.session_state.apify_token_input_v52 = st.session_state.get("apify_token", "")
+        st.session_state.apify_token_input_v52 = (
+            "" if managed_apify else st.session_state.get("apify_token", "")
+        )
 
     c1, c2 = st.columns(2)
     with c1:
-        st.text_input("Gemini API key", type="password", key="gemini_key_input_v52")
+        if managed_gemini:
+            st.success("Gemini API access is managed by the app owner.")
+        else:
+            st.text_input("Gemini API key", type="password", key="gemini_key_input_v52")
     with c2:
-        st.text_input("Apify token", type="password", key="apify_token_input_v52")
+        if managed_apify:
+            st.success("Apify access is managed by the app owner.")
+        else:
+            st.text_input("Apify token", type="password", key="apify_token_input_v52")
 
-    if st.button("Save keys and continue", type="primary", width="stretch"):
-        st.session_state.gemini_key = clean_api_secret(st.session_state.get("gemini_key_input_v52", ""))
-        st.session_state.apify_token = clean_api_secret(st.session_state.get("apify_token_input_v52", ""))
+    continue_label = (
+        "Continue"
+        if managed_gemini and managed_apify
+        else "Save keys and continue"
+    )
+    if st.button(continue_label, type="primary", width="stretch"):
+        st.session_state.gemini_key = (
+            managed_gemini
+            or clean_api_secret(st.session_state.get("gemini_key_input_v52", ""))
+        )
+        st.session_state.apify_token = (
+            managed_apify
+            or clean_api_secret(st.session_state.get("apify_token_input_v52", ""))
+        )
         if not st.session_state.gemini_key or not st.session_state.apify_token:
             st.error("Please paste both Gemini API key and Apify token.")
         else:
-            st.success("API keys saved for this session.")
+            if not (managed_gemini and managed_apify):
+                st.success("API keys saved for this session.")
             go(2)
 
 # STEP 2: Add posts
@@ -3552,10 +3675,14 @@ elif st.session_state.step == 4:
     st.session_state.enable_full_video_fallback_v46 = True
     saved_large_batch = _large_batch_manifest_v68_43(selected)
     if _uses_large_batch_checkpoints_v68_43(selected):
-        completed_count = int((saved_large_batch or {}).get("completed_rows", 0))
+        completed_count = int(
+            (saved_large_batch or {}).get(
+                "saved_rows",
+                (saved_large_batch or {}).get("completed_rows", 0),
+            )
+        )
         st.info(
-            f"Large-batch protection is on. Progress is saved every "
-            f"{DEFAULT_CHUNK_SIZE} posts"
+            "Large-batch protection is on. Each completed post is saved"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count
@@ -3593,7 +3720,12 @@ elif st.session_state.step == 4:
         if saved_large_batch:
             if saved_large_batch.get("status") == "completed":
                 start_label = "Use saved results"
-            elif int(saved_large_batch.get("completed_rows", 0)) > 0:
+            elif int(
+                saved_large_batch.get(
+                    "saved_rows",
+                    saved_large_batch.get("completed_rows", 0),
+                )
+            ) > 0:
                 start_label = "Resume tagging"
         c1, c2 = st.columns(2)
         with c1:

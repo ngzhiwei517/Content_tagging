@@ -137,8 +137,100 @@ class BatchCheckpointStoreTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertNotIn(sentinel, raw_manifest)
-            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["status"], "paused_error")
             self.assertIn("Resume is required", failed["last_error"])
+
+    def test_twenty_partial_rows_resume_without_repeating_them(self):
+        selected = self.sample_rows(200)
+        runtime_id = "e" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            store = BatchCheckpointStore(Path(directory), chunk_size=50)
+            manifest = store.prepare(
+                runtime_id,
+                selected,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="partial-test",
+                comparison_started_utc="2026-07-28T00:00:00+00:00",
+            )
+            first_chunk = store.chunk_frame(selected, manifest, 0)
+            for position in range(20):
+                store.save_partial_row(
+                    manifest["job_id"],
+                    0,
+                    position,
+                    first_chunk.iloc[position].to_dict()
+                    | {"Creative Type": "Others"},
+                )
+            paused = store.mark_paused(manifest, quota=True)
+
+            resumed_store = BatchCheckpointStore(Path(directory), chunk_size=50)
+            resumed = resumed_store.find(
+                runtime_id,
+                selected,
+                model="gemini-3.1-flash-lite",
+            )
+            self.assertEqual(paused["status"], "paused_quota")
+            self.assertEqual(resumed["saved_rows"], 20)
+            self.assertEqual(resumed["partial_rows"], 20)
+            self.assertEqual(resumed_store.partial_positions(resumed["job_id"], 0), list(range(20)))
+            saved = resumed_store.load_saved_results(resumed)
+            self.assertEqual(len(saved), 20)
+            self.assertEqual(saved["Link"].tolist(), selected.iloc[:20]["Link"].tolist())
+
+    def test_completed_chunk_replaces_partial_rows_atomically(self):
+        selected = self.sample_rows(60)
+        with tempfile.TemporaryDirectory() as directory:
+            store = BatchCheckpointStore(Path(directory), chunk_size=50)
+            manifest = store.prepare(
+                "f" * 32,
+                selected,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="partial-finalise",
+                comparison_started_utc="2026-07-28T00:00:00+00:00",
+            )
+            chunk = store.chunk_frame(selected, manifest, 0).assign(
+                **{"Creative Type": "Others"}
+            )
+            for position, (_, row) in enumerate(chunk.iterrows()):
+                store.save_partial_row(manifest["job_id"], 0, position, row)
+            manifest = store.save_completed_chunk(
+                manifest,
+                0,
+                chunk,
+                elapsed_seconds=1.0,
+            )
+            self.assertEqual(manifest["completed_rows"], 50)
+            self.assertEqual(manifest["saved_rows"], 50)
+            self.assertEqual(store.partial_positions(manifest["job_id"], 0), [])
+            self.assertEqual(len(store.load_completed_results(manifest)), 50)
+
+    def test_same_input_is_isolated_between_runtime_ids(self):
+        selected = self.sample_rows(60)
+        with tempfile.TemporaryDirectory() as directory:
+            store = BatchCheckpointStore(Path(directory), chunk_size=50)
+            first = store.prepare(
+                "1" * 32,
+                selected,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="first-user",
+                comparison_started_utc="2026-07-28T00:00:00+00:00",
+            )
+            second = store.prepare(
+                "2" * 32,
+                selected,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="second-user",
+                comparison_started_utc="2026-07-28T00:00:00+00:00",
+            )
+            self.assertNotEqual(first["job_id"], second["job_id"])
+            store.save_partial_row(
+                first["job_id"],
+                0,
+                0,
+                selected.iloc[0].to_dict(),
+            )
+            self.assertEqual(store.partial_positions(first["job_id"], 0), [0])
+            self.assertEqual(store.partial_positions(second["job_id"], 0), [])
 
     def test_reconcile_recovers_a_chunk_written_before_manifest_update(self):
         selected = self.sample_rows(100)
@@ -189,11 +281,18 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         self.assertIn("DEFAULT_CHUNK_SIZE", self.source)
         self.assertIn("len(selected) > DEFAULT_CHUNK_SIZE", self.source)
         self.assertIn("store.save_completed_chunk(", self.source)
+        self.assertIn("store.save_partial_row(", self.source)
+        self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
 
     def test_resume_is_explicit_after_an_interrupted_session(self):
         self.assertIn('start_label = "Resume tagging"', self.source)
-        self.assertIn("Completed chunks are saved", self.source)
+        self.assertIn("completed posts are saved", self.source)
+
+    def test_server_managed_secrets_are_optional_and_not_hardcoded(self):
+        self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', self.source)
+        self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', self.source)
+        self.assertIn("managed by the app owner", self.source)
 
 
 if __name__ == "__main__":
