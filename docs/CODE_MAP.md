@@ -20,6 +20,7 @@ app.py
 | Path | Responsibility | Change here when... |
 | --- | --- | --- |
 | `app.py` | Current six-step Streamlit UI, batch state, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
+| `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic progress files for large `Tag every link` runs | Chunk size, retention or resume storage needs to change |
 | `ugc_tagger/final_update2_adapter.py` | Schema boundary between the current UI and the preserved backend | Input/output columns or shared TikTok/Instagram orchestration needs to change |
 | `ugc_tagger/final_update2_backend.py` | Import-safe loader for the preserved backend functions | The backend source boundary changes; ordinary tagging changes do not belong here |
 | `ugc_tagger/final_update2_backend_source.py` | Canonical scraping, Gemini prompt, guardrails, validation and tagging pipeline, followed by the preserved legacy UI | Classification behavior or the core pipeline needs to change |

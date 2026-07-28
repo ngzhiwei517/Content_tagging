@@ -1,5 +1,16 @@
 # Changelog
 
+## v68.42.10 — Resumable large-batch tagging
+
+- Added durable 50-post checkpoints for `Tag every link` runs above 50 posts.
+- Processed one checkpoint per Streamlit execution so large runs no longer depend
+  on one uninterrupted 200- or 800-post request.
+- Added an explicit `Resume tagging` path that preserves completed rows and
+  reuses the current chunk's saved public Apify result when possible.
+- Kept API keys and tokens out of checkpoint files, and automatically removes
+  temporary checkpoint data after 72 hours.
+- Preserved the existing small-batch and Top Posts tagging paths.
+
 This file keeps only the current release line. Older milestones are summarized in [docs/HISTORY.md](docs/HISTORY.md) and remain available in Git history.
 
 ## Unreleased — Readability-only cleanup

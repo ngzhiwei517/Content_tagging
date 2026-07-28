@@ -22,6 +22,17 @@ Add posts → Select posts → Run tagging → Review → Summary → Export
 
 TikTok and Instagram rows can share one batch, review queue and export. Market and Track are optional. Unavailable posts are removed automatically.
 
+### Large batches
+
+For `Tag every link` selections above 50 posts, the app saves progress after
+each 50-post chunk. If a browser or Streamlit session disconnects, reopen the
+same app URL, enter the keys again and select **Resume tagging**. Completed
+chunks are not repeated, and credentials are never written to the checkpoint.
+
+Checkpoints are temporary files on the current app instance. They protect
+ordinary reruns and reconnects, but a redeploy or replacement of the hosted
+container can remove them.
+
 ## Supported post links
 
 For the most reliable scraping, paste the direct post URL:

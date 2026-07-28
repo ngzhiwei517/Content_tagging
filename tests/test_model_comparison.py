@@ -189,9 +189,10 @@ class ModelComparisonTests(unittest.TestCase):
         self.assertIn('"Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds"', source)
         self.assertIn('f"review_qa_report_{export_model_slug}.xlsx"', source)
         self.assertIn("def reset_review_state_for_new_tagging_run()", source)
-        self.assertIn(
-            "reset_review_state_for_new_tagging_run()\n                st.session_state.tagged_df = tagged_result",
+        self.assertRegex(
             source,
+            r"reset_review_state_for_new_tagging_run\(\)\s+"
+            r"st\.session_state\.tagged_df = tagged_result",
         )
         self.assertNotIn('"Continue to Summary without editing"', source)
 
