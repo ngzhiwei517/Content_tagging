@@ -1,3 +1,3 @@
 """Shared ingestion, classification, review and enrichment modules."""
 
-__version__ = "v68.42.11"
+__version__ = "v68.42.12"

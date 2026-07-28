@@ -11,6 +11,7 @@ import re
 import html
 import hashlib
 import inspect
+import logging
 import os
 import json
 import tempfile
@@ -45,6 +46,7 @@ from ugc_tagger.final_update2_adapter import (
     QA_AUDIT_COLUMNS,
     build_review_drama_updates as final_update2_build_review_drama_updates,
     drama_review_defaults as final_update2_drama_review_defaults,
+    failed_analysis_review_row as final_update2_failed_analysis_review_row,
     normalize_url as final_update2_normalize_url,
     review_audit_update as final_update2_review_audit_update,
     review_cache as final_update2_review_cache,
@@ -73,6 +75,8 @@ except Exception:
     px = None
 
 st.set_page_config(page_title="UGC Post Tagging", page_icon="", layout="wide")
+
+LOGGER = logging.getLogger(__name__)
 
 MARKETS = ["PH", "MY", "ID", "KR", "SG", "VN", "TH"]
 MARKET_OPTIONS = ["Other / no market"] + MARKETS
@@ -2279,6 +2283,190 @@ def _is_quota_interruption_v68_43(error) -> bool:
     )
 
 
+def _large_batch_must_pause_v68_43(error) -> bool:
+    """Return True for failures that cannot safely be isolated to one post."""
+    if _is_quota_interruption_v68_43(error):
+        return True
+    if isinstance(
+        error,
+        (
+            ImportError,
+            MemoryError,
+            ModuleNotFoundError,
+            OSError,
+            PermissionError,
+            TimeoutError,
+        ),
+    ):
+        return True
+    text = safe_str(error).upper()
+    return any(
+        marker in text
+        for marker in (
+            "SYSTEMIC_TAGGING_FAILURE",
+            "API_KEY_INVALID",
+            "API KEY NOT VALID",
+            "INVALID API KEY",
+            "UNAUTHENTICATED",
+            "PERMISSION_DENIED",
+            "BILLING",
+            "401",
+            "403",
+            "CONNECTION",
+            "DEADLINE_EXCEEDED",
+            "DNS",
+            "MODEL_NOT_FOUND",
+            "MODEL NOT FOUND",
+            "SERVICE UNAVAILABLE",
+            "SSL",
+            "503",
+        )
+    )
+
+
+def _large_batch_error_code_v68_43(error) -> str:
+    """Return a non-sensitive diagnostic category for the owner."""
+    if _is_quota_interruption_v68_43(error):
+        return "API_QUOTA"
+    text = safe_str(error).upper()
+    if any(
+        marker in text
+        for marker in (
+            "API_KEY",
+            "API KEY",
+            "401",
+            "403",
+            "UNAUTHENTICATED",
+            "PERMISSION_DENIED",
+        )
+    ):
+        return "API_ACCESS"
+    if any(
+        marker in text
+        for marker in (
+            "503",
+            "UNAVAILABLE",
+            "CONNECTION",
+            "DEADLINE",
+            "TIMEOUT",
+            "DNS",
+            "SSL",
+        )
+    ):
+        return "PROVIDER_SERVICE"
+    if isinstance(error, (OSError, PermissionError)):
+        return "CHECKPOINT_STORAGE"
+    if "SYSTEMIC_TAGGING_FAILURE" in text:
+        return "SYSTEMIC_TAGGING"
+    return f"TAGGING_{type(error).__name__.upper()}"
+
+
+def _tag_remaining_with_row_isolation_v68_43(
+    remaining_chunk: pd.DataFrame,
+    records: List[Dict],
+    gemini_key: str,
+    apify_token: str,
+    comparison_model: str,
+    logs: List[str],
+    remaining_positions: List[int],
+    saved_positions: set,
+    on_result,
+    on_progress,
+) -> None:
+    """Retry unfinished rows individually after one post breaks a whole chunk.
+
+    Normal chunks keep the existing grouped backend call. Provider, quota,
+    storage and repeated systemic failures still pause the job.
+    """
+    try:
+        tagged_remaining = final_update2_tag_candidates(
+            remaining_chunk,
+            records,
+            gemini_key,
+            apify_token,
+            logs=logs,
+            on_progress=on_progress,
+            on_result=on_result,
+            gemini_model=comparison_model,
+        )
+        # Test doubles and older compatible adapters may return rows without
+        # invoking the callback. Save those rows before finalising the chunk.
+        for input_position, (_, tagged_row) in enumerate(
+            tagged_remaining.reset_index(drop=True).iterrows()
+        ):
+            chunk_position = remaining_positions[input_position]
+            if chunk_position not in saved_positions:
+                on_result(input_position, tagged_row.to_dict(), "")
+        return
+    except Exception as chunk_error:
+        if _large_batch_must_pause_v68_43(chunk_error):
+            raise
+        LOGGER.warning(
+            "Large-batch chunk switched to per-post isolation after %s.",
+            type(chunk_error).__name__,
+        )
+        logs.append(
+            "A post-specific analysis issue was isolated; unfinished posts "
+            "will continue individually."
+        )
+
+    consecutive_failure_type = ""
+    consecutive_failure_count = 0
+    for local_position in range(len(remaining_chunk)):
+        chunk_position = remaining_positions[local_position]
+        if chunk_position in saved_positions:
+            continue
+
+        single = remaining_chunk.iloc[[local_position]].reset_index(drop=True)
+        callback_used = False
+
+        def single_result(_input_position: int, tagged_row: Dict, tier: str):
+            nonlocal callback_used
+            on_result(local_position, tagged_row, tier)
+            callback_used = True
+
+        try:
+            tagged_single = final_update2_tag_candidates(
+                single,
+                records,
+                gemini_key,
+                apify_token,
+                logs=logs,
+                on_progress=on_progress,
+                on_result=single_result,
+                gemini_model=comparison_model,
+            )
+            if not callback_used and not tagged_single.empty:
+                single_result(0, tagged_single.iloc[0].to_dict(), "")
+            consecutive_failure_type = ""
+            consecutive_failure_count = 0
+        except Exception as row_error:
+            if _large_batch_must_pause_v68_43(row_error):
+                raise
+            failure_type = type(row_error).__name__
+            if failure_type == consecutive_failure_type:
+                consecutive_failure_count += 1
+            else:
+                consecutive_failure_type = failure_type
+                consecutive_failure_count = 1
+            if consecutive_failure_count >= 3:
+                raise RuntimeError(
+                    f"SYSTEMIC_TAGGING_FAILURE:{failure_type}"
+                ) from row_error
+
+            LOGGER.warning(
+                "Post %s routed to manual review after %s.",
+                chunk_position + 1,
+                failure_type,
+            )
+            fallback = final_update2_failed_analysis_review_row(single.iloc[0])
+            on_result(local_position, fallback, "runtime_manual_review")
+            logs.append(
+                f"Post {chunk_position + 1} needs manual review because "
+                "automated analysis could not finish."
+            )
+
+
 def _run_checkpointed_tag_every_link_v68_43(
     selected: pd.DataFrame,
     gemini_key: str,
@@ -2406,24 +2594,18 @@ def _run_checkpointed_tag_every_link_v68_43(
             status.write(
                 f"Analysing {len(remaining_chunk):,} unfinished post(s) with Gemini..."
             )
-            tagged_remaining = final_update2_tag_candidates(
+            _tag_remaining_with_row_isolation_v68_43(
                 remaining_chunk,
                 records,
                 gemini_key,
                 apify_token,
-                logs=logs,
-                on_progress=on_progress,
-                on_result=on_result,
-                gemini_model=comparison_model,
+                comparison_model,
+                logs,
+                remaining_positions,
+                saved_positions,
+                on_result,
+                on_progress,
             )
-            # Test doubles and older compatible adapters may return rows without
-            # invoking the callback. Save those rows before finalising the chunk.
-            for input_position, (_, tagged_row) in enumerate(
-                tagged_remaining.reset_index(drop=True).iterrows()
-            ):
-                chunk_position = remaining_positions[input_position]
-                if chunk_position not in saved_positions:
-                    on_result(input_position, tagged_row.to_dict(), "")
 
         partial_chunk = store.load_partial_chunk_results(
             manifest["job_id"],
@@ -2472,6 +2654,13 @@ def _run_checkpointed_tag_every_link_v68_43(
             expanded=False,
         )
     except Exception as exc:
+        error_code = _large_batch_error_code_v68_43(exc)
+        LOGGER.exception(
+            "Large-batch tagging paused. code=%s saved=%s total=%s",
+            error_code,
+            len(store.load_saved_results(manifest)),
+            total_rows,
+        )
         quota_pause = _is_quota_interruption_v68_43(exc)
         manifest = store.mark_paused(manifest, quota=quota_pause)
         partial = _attach_comparison_metadata_v68_43(
@@ -2492,7 +2681,8 @@ def _run_checkpointed_tag_every_link_v68_43(
         else:
             st.error(
                 f"Tagging paused safely. {saved_count:,} of {total_rows:,} "
-                "completed posts are saved. Select Resume tagging to continue."
+                "completed posts are saved. Ask the app owner to check "
+                f"diagnostic code {error_code} before resuming."
             )
         return pd.DataFrame()
 

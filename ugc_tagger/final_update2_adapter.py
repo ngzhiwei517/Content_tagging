@@ -38,7 +38,7 @@ from ugc_tagger.drama_analysis import (
 # to fail when its hot-reload cache briefly exposed the older initializer.
 # ``app.py`` imports this constant with the rest of the adapter API, so startup
 # no longer depends on package metadata being refreshed first.
-APP_VERSION = "v68.42.11"
+APP_VERSION = "v68.42.12"
 
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -670,6 +670,52 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         verifier_confidence=tagged_dict.get("verifier_confidence", 0),
     ))
     output["Total Engagement"] = sum(output.get(key, 0) for key in ["Likes", "Comments", "Shares", "Saves"])
+    return output
+
+
+def failed_analysis_review_row(original, *, platform: str = "") -> Dict:
+    """Build a safe manual-review row after one post-specific runtime failure.
+
+    The raw exception is deliberately not stored. Reviewers still receive the
+    original link and campaign context, and can open the post to finish tagging.
+    """
+    original_dict = original.to_dict() if hasattr(original, "to_dict") else dict(original)
+    link = _text(original_dict.get("Link"))
+    resolved_platform = (
+        _text(platform)
+        or _text(original_dict.get("Platform"))
+        or detect_platform(link)
+        or TIKTOK
+    )
+    raw_record = {
+        "url": link,
+        "submittedVideoUrl": link,
+        "_platform": resolved_platform,
+        "platform": resolved_platform,
+    }
+    output = _to_ui_row(
+        original_dict,
+        {
+            "Creative Type": "Others",
+            "Content Details": (
+                "Automated analysis could not finish for this post. "
+                "Open the original post and confirm the tags manually."
+            ),
+            "confidence": 0,
+            "needs_human_review": True,
+            "review_action": "",
+            "review_risk_reasons": "Post-specific analysis interruption",
+            "tier_used": "runtime_manual_review",
+            "validation_status": "review",
+            "validation_score": 0,
+            "validation_issues": (
+                "Automated analysis could not finish for this post; "
+                "manual confirmation is required."
+            ),
+        },
+        raw_record,
+    )
+    output["Gemini Called"] = True
     return output
 
 

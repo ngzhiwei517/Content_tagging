@@ -289,6 +289,17 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         self.assertIn('start_label = "Resume tagging"', self.source)
         self.assertIn("completed posts are saved", self.source)
 
+    def test_post_specific_failure_is_isolated_before_pausing_batch(self):
+        self.assertIn(
+            "def _tag_remaining_with_row_isolation_v68_43(",
+            self.source,
+        )
+        self.assertIn(
+            "final_update2_failed_analysis_review_row(single.iloc[0])",
+            self.source,
+        )
+        self.assertIn("diagnostic code {error_code}", self.source)
+
     def test_server_managed_secrets_are_optional_and_not_hardcoded(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', self.source)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', self.source)
