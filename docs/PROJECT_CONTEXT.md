@@ -14,12 +14,14 @@ The tool helps marketing teams tag TikTok and Instagram Reels UGC posts into bro
 
 ## Accepted workflow
 
-1. Setup / API Keys
-2. Add Posts
-3. Select Posts
-4. Run Tagging
-5. Review
-6. Summary & Export
+1. Add Posts
+2. Select Posts
+3. Run Tagging
+4. Review
+5. Summary & Export
+
+Provider credentials are managed through Streamlit Secrets and are not exposed
+as a marketing-facing workflow page.
 
 General UGC is the default. Do not add a General-versus-Drama selector unless explicitly requested.
 

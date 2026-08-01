@@ -903,7 +903,7 @@ table.clean-table tr:hover td{background:#eef4ff !important;}
 # Session state and navigation
 # -----------------------------------------------------------------------------
 DEFAULT_STATE = {
-    "step": 1,
+    "step": 2,
     "mode": "General UGC creative types",
     "gemini_key": "",
     "apify_token": "",
@@ -1123,7 +1123,7 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     if not restored:
         requested_step = _runtime_query_value_v68_15("step")
         try:
-            st.session_state.step = max(1, min(6, int(requested_step)))
+            st.session_state.step = max(2, min(6, int(requested_step)))
         except (TypeError, ValueError):
             pass
     else:
@@ -1885,19 +1885,18 @@ def metric_row(items: List[Tuple[str, str, str]]) -> str:
 
 def step_strip(active: int):
     steps = [
-        (1, "01", "API Keys", "Setup"),
-        (2, "02", "Add Posts", "Files or links"),
-        (3, "03", "Select Posts", "Top or all"),
-        (4, "04", "Run Tagging", "Preview run"),
-        (5, "05", "Review", "Check posts"),
-        (6, "06", "Summary", "Dashboard & export"),
+        (2, "01", "Add Posts", "Files or links"),
+        (3, "02", "Select Posts", "Top or all"),
+        (4, "03", "Run Tagging", "Preview run"),
+        (5, "04", "Review", "Check posts"),
+        (6, "05", "Summary", "Dashboard & export"),
     ]
     html_out = "<div class='step-strip'>"
-    for num, icon, title, desc in steps:
-        cls = "step-card active" if num == active else ("step-card done" if num < active else "step-card")
+    for display_num, (route, icon, title, desc) in enumerate(steps, start=1):
+        cls = "step-card active" if route == active else ("step-card done" if route < active else "step-card")
         html_out += (
             f"<div class='{cls}'>"
-            f"<div class='step-head'><span class='step-icon'>{icon}</span><span class='step-small'>Step {num}</span></div>"
+            f"<div class='step-head'><span class='step-icon'>{icon}</span><span class='step-small'>Step {display_num}</span></div>"
             f"<div class='step-title'>{title}</div><div class='step-desc'>{desc}</div></div>"
         )
     html_out += "</div>"
@@ -2771,7 +2770,10 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     st.session_state.gemini_key = gemini_key
     st.session_state.apify_token = apify_token
     if not gemini_key or not apify_token:
-        st.error("Please enter both Gemini API key and Apify token before running tagging.")
+        st.error(
+            "Provider access is not configured. Contact the app owner to update "
+            "the Gemini and Apify credentials."
+        )
         return pd.DataFrame()
 
     selected = df.copy().reset_index(drop=True)
@@ -3332,6 +3334,10 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
 # Application shell and workflow pages
 # -----------------------------------------------------------------------------
 _restore_runtime_checkpoint_v68_15()
+# Step 1 was the retired credential page. Existing bookmarked sessions and
+# checkpoints should reopen on Add Posts instead of rendering an empty route.
+if st.session_state.get("step") == 1:
+    st.session_state.step = 2
 _persist_runtime_checkpoint_v68_15()
 managed_gemini_key_v68_43 = _managed_api_secret_v68_43("GEMINI_API_KEY")
 managed_apify_token_v68_43 = _managed_api_secret_v68_43("APIFY_TOKEN")
@@ -3357,59 +3363,8 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         unsafe_allow_html=True,
     )
 
-# STEP 1: API keys
-if st.session_state.step == 1:
-    st.markdown("<div class='card page-heading'><h2>API Keys</h2></div>", unsafe_allow_html=True)
-
-    managed_gemini = _managed_api_secret_v68_43("GEMINI_API_KEY")
-    managed_apify = _managed_api_secret_v68_43("APIFY_TOKEN")
-
-    # Keep the visible input fields separate from the saved runtime keys.
-    # This prevents Streamlit reruns/navigation from accidentally using stale or blank values.
-    if "gemini_key_input_v52" not in st.session_state:
-        st.session_state.gemini_key_input_v52 = (
-            "" if managed_gemini else st.session_state.get("gemini_key", "")
-        )
-    if "apify_token_input_v52" not in st.session_state:
-        st.session_state.apify_token_input_v52 = (
-            "" if managed_apify else st.session_state.get("apify_token", "")
-        )
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if managed_gemini:
-            st.success("Gemini API access is managed by the app owner.")
-        else:
-            st.text_input("Gemini API key", type="password", key="gemini_key_input_v52")
-    with c2:
-        if managed_apify:
-            st.success("Apify access is managed by the app owner.")
-        else:
-            st.text_input("Apify token", type="password", key="apify_token_input_v52")
-
-    continue_label = (
-        "Continue"
-        if managed_gemini and managed_apify
-        else "Save keys and continue"
-    )
-    if st.button(continue_label, type="primary", width="stretch"):
-        st.session_state.gemini_key = (
-            managed_gemini
-            or clean_api_secret(st.session_state.get("gemini_key_input_v52", ""))
-        )
-        st.session_state.apify_token = (
-            managed_apify
-            or clean_api_secret(st.session_state.get("apify_token_input_v52", ""))
-        )
-        if not st.session_state.gemini_key or not st.session_state.apify_token:
-            st.error("Please paste both Gemini API key and Apify token.")
-        else:
-            if not (managed_gemini and managed_apify):
-                st.success("API keys saved for this session.")
-            go(2)
-
 # STEP 2: Add posts
-elif st.session_state.step == 2:
+if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
     # The demo keeps the established General UGC pipeline. Drama detail remains
@@ -3576,7 +3531,7 @@ elif st.session_state.step == 2:
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
         st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
                 st.session_state.batch_df = pd.DataFrame()
@@ -3586,9 +3541,6 @@ elif st.session_state.step == 2:
                 reset_date_filter_state_v68()
                 st.rerun()
         with c2:
-            if st.button("Back", width="stretch"):
-                go(1)
-        with c3:
             if st.button("Continue", type="primary", width="stretch"):
                 go(3)
     st.markdown("</div>", unsafe_allow_html=True)
