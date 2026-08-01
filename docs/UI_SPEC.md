@@ -6,12 +6,14 @@ Clean, mature, marketing-friendly and direct. Preserve the accepted v41-style fl
 
 ## Pages
 
-1. Setup / API Keys
-2. Add Posts
-3. Select Posts
-4. Run Tagging
-5. Review
-6. Summary & Export
+1. Add Posts
+2. Select Posts
+3. Run Tagging
+4. Review
+5. Summary & Export
+
+Gemini and Apify credentials are deployment-managed. Do not show a credential
+entry page to marketing users.
 
 ## Product rules
 

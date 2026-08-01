@@ -221,8 +221,13 @@ for the appropriate Project Creator and API-key permissions.
    `UGC tagging local`.
 4. Copy the token and monitor that account's Actor usage and available credits.
 
-Enter both values only on the app's **Setup / API Keys** page.
-The app keeps them in the active Streamlit session; it does not require them to
+Configure both values outside the application UI:
+
+- hosted app: add `GEMINI_API_KEY` and `APIFY_TOKEN` in Streamlit Secrets;
+- local maintenance: add the same values to an uncommitted
+  `.streamlit/secrets.toml` file.
+
+The marketing workflow opens directly on **Add Posts**. Credentials must never
 be written into the repository.
 
 Never:
@@ -258,7 +263,8 @@ Avoid redirect/share URLs for the first test. See
 
 Complete the full workflow:
 
-1. Open **Setup / API Keys** and enter the two test credentials.
+1. Confirm the two test credentials are configured in Streamlit Secrets or the
+   local uncommitted `.streamlit/secrets.toml` file.
 2. Open **Add Posts**.
 3. Upload a small CSV/XLSX file, paste additional links, or do both.
 4. Confirm uploaded and pasted rows appear in one **Current Batch**.

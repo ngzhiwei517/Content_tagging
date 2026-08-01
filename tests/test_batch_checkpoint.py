@@ -311,10 +311,13 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
             self.source,
         )
 
-    def test_server_managed_secrets_are_optional_and_not_hardcoded(self):
+    def test_server_managed_secrets_open_directly_on_add_posts(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', self.source)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', self.source)
-        self.assertIn("managed by the app owner", self.source)
+        self.assertIn('"step": 2', self.source)
+        self.assertIn('(2, "01", "Add Posts", "Files or links")', self.source)
+        self.assertNotIn('(1, "01", "API Keys", "Setup")', self.source)
+        self.assertIn("Contact the app owner to update", self.source)
 
 
 if __name__ == "__main__":

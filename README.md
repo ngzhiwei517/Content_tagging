@@ -51,14 +51,15 @@ GEMINI_API_KEY = "replace-with-the-deployment-key"
 APIFY_TOKEN = "replace-with-the-deployment-token"
 ```
 
-Add these values in the Streamlit deployment settings, never in GitHub. When
-both are configured, the API Keys page shows that access is managed by the app
-owner. If quota becomes unavailable, completed posts remain saved and the app
-asks the user to contact the owner before resuming. After rotating a deployment
-secret, reboot the hosted app so the next run reads the new value.
+Add these values in the Streamlit deployment settings, never in GitHub. The app
+opens directly on **Add Posts** and reads both credentials in the background. If
+quota becomes unavailable, completed posts remain saved and the app asks the
+user to contact the owner before resuming. After rotating a deployment secret,
+reboot the hosted app so the next run reads the new value.
 
-Local installations without Streamlit Secrets keep the existing password-field
-flow. Credentials are never written to runtime or tagging checkpoints.
+For local maintenance, place the same two values in an uncommitted
+`.streamlit/secrets.toml` file. Credentials are never written to runtime or
+tagging checkpoints.
 
 ## Supported post links
 

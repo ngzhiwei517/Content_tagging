@@ -47,7 +47,9 @@ class CloudDeploymentContractTests(unittest.TestCase):
                 self.assertIn(selector, APP_SOURCE)
 
     def test_page_headings_use_the_compact_style(self):
-        self.assertGreaterEqual(APP_SOURCE.count("card page-heading"), 6)
+        # The marketing workflow has five visible pages; API access is managed
+        # through deployment Secrets rather than a separate setup page.
+        self.assertGreaterEqual(APP_SOURCE.count("card page-heading"), 5)
 
     def test_plotly_width_is_compatible_across_streamlit_versions(self):
         self.assertIn("def render_plotly_chart(fig)", APP_SOURCE)
