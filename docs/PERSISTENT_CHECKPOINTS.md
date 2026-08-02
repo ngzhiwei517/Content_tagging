@@ -14,6 +14,11 @@ Direct Postgres, including a Supabase Postgres connection URL:
 database_url = "postgresql://..."
 ```
 
+Direct Postgres is an optional deployment mode and requires installing
+`psycopg[binary]` in that deployment. It is intentionally not part of the
+default Streamlit Cloud requirements because the Supabase REST mode does not
+need a database driver.
+
 Supabase REST:
 
 ```toml
