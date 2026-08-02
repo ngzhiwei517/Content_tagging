@@ -1047,6 +1047,21 @@ def _checkpoint_dataframe_from_payload_v68_15(payload) -> pd.DataFrame:
     return restored
 
 
+def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
+    """Return whether workflow state contains at least one meaningful post."""
+    if not hasattr(state, "get"):
+        return False
+    for key in RUNTIME_DATAFRAME_KEYS_V68_15:
+        value = state.get(key)
+        if isinstance(value, pd.DataFrame) and not value.empty:
+            return True
+        if isinstance(value, dict):
+            rows = value.get("data")
+            if isinstance(rows, list) and bool(rows):
+                return True
+    return False
+
+
 def _runtime_checkpoint_path_v68_15(run_id: str) -> Path:
     return RUNTIME_CHECKPOINT_DIR_V68_15 / f"{run_id}.json"
 
@@ -1243,6 +1258,10 @@ def _persist_runtime_checkpoint_v68_15() -> None:
     except Exception:
         # A checkpoint must never block the tagging workflow.
         pass
+    # Do not create remote rows for anonymous visits or empty test sessions.
+    # Local checkpointing remains available from the first render.
+    if not _runtime_checkpoint_has_posts_v68_44(state_payload):
+        return
     remote_store = _checkpoint_objects_v68_44(run_id)
     if remote_store is not None:
         try:
@@ -3538,12 +3557,13 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         unsafe_allow_html=True,
     )
 
-if st.button(
-    "Save this batch",
-    icon=":material/bookmark:",
-    key="runtime_save_batch_button_v68_44",
-):
-    _show_runtime_save_dialog_v68_44()
+if _runtime_checkpoint_has_posts_v68_44(st.session_state):
+    if st.button(
+        "Save this batch",
+        icon=":material/bookmark:",
+        key="runtime_save_batch_button_v68_44",
+    ):
+        _show_runtime_save_dialog_v68_44()
 
 with st.expander("Open a saved batch", expanded=False):
     st.caption("Normally, just open your saved link. If you only have a recovery ID, paste it here.")

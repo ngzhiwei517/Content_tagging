@@ -192,6 +192,32 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertNotIn("secret-value", serialized)
         self.assertNotIn("downloaded.mp4", serialized)
 
+    def test_remote_checkpoint_waits_until_the_batch_contains_a_post(self):
+        has_posts = load_function(
+            "_runtime_checkpoint_has_posts_v68_44",
+            {
+                "pd": pd,
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df", "selected_df", "tagged_df"},
+            },
+        )
+        empty_state = {
+            "batch_df": pd.DataFrame(),
+            "selected_df": {"columns": ["Link"], "index": [], "data": []},
+        }
+        populated_state = {
+            "batch_df": {
+                "columns": ["Link"],
+                "index": [0],
+                "data": [["https://example.com/post"]],
+            },
+        }
+        self.assertFalse(has_posts(empty_state))
+        self.assertTrue(has_posts(populated_state))
+        self.assertIn(
+            "if not _runtime_checkpoint_has_posts_v68_44(state_payload):",
+            APP_SOURCE,
+        )
+
     def test_latest_managed_secret_and_marketer_recovery_contract_remain(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
@@ -200,6 +226,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertIn('with st.expander("Open a saved batch"', APP_SOURCE)
         self.assertIn("If you only have a recovery ID", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)
+        self.assertIn("if _runtime_checkpoint_has_posts_v68_44(st.session_state):", APP_SOURCE)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', APP_SOURCE)
 
     def test_save_link_hides_recovery_id_inside_the_url(self):

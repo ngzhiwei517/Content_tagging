@@ -39,3 +39,7 @@ Recovery IDs are private bearer identifiers and should not be shared publicly.
 Users normally select **Save this batch** and bookmark or copy the private link.
 The recovery ID stays inside that link. The **Open a saved batch** area accepts
 the raw ID only as a fallback when someone no longer has the full link.
+
+Remote checkpointing starts only after the current workflow contains at least
+one post. Opening an empty app session does not create a Supabase/Postgres row;
+the local fallback remains available from the first render.
