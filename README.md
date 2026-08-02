@@ -35,11 +35,13 @@ first unfinished post; completed Gemini analysis is not repeated.
 If one individual post cannot be analysed while the providers remain available,
 that post is sent to Human Review and the rest of the batch continues.
 
-Checkpoints are temporary files on the current app instance. They protect
-ordinary reruns and reconnects, but a redeploy or replacement of the hosted
-container can remove them. Different browser runs use separate checkpoint job
-IDs. A future shared database and user authentication would be required for
-durable cross-redeploy job ownership.
+Checkpoints are always written to temporary files on the current app instance.
+An app owner may optionally mirror the secret-free workflow and tagging objects
+to Supabase/Postgres so a redeploy or replacement container can restore them.
+Without that configuration, local files continue to protect ordinary reruns and
+reconnects. Each batch has a private recovery link available from **Save this
+batch**; users normally bookmark or copy that link instead of handling an ID. See
+[`docs/PERSISTENT_CHECKPOINTS.md`](docs/PERSISTENT_CHECKPOINTS.md).
 
 ### Deployment-managed API access
 
