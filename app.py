@@ -1910,8 +1910,6 @@ def standardize_file_rows(
     source_name: str,
     platform: str = "",
     fallback_market: str = "",
-    fallback_track: str = "",
-    fallback_artist: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
@@ -1928,13 +1926,9 @@ def standardize_file_rows(
         artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
         if detected_platform == INSTAGRAM_REELS:
             if is_opaque_instagram_sound_id(track):
-                track = safe_str(fallback_track) or filename_track
+                track = filename_track
             if not artist:
-                artist = safe_str(fallback_artist) or filename_artist
-        if not track:
-            track = safe_str(fallback_track)
-        if not artist:
-            artist = safe_str(fallback_artist)
+                artist = filename_artist
         row_market = normalize_market(r.get(cols["market"])) if cols.get("market") else ""
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
@@ -3624,20 +3618,6 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
-            upload_c1, upload_c2 = st.columns([1.05, 0.85])
-            with upload_c1:
-                upload_track = st.text_input(
-                    "Campaign track / sound name (optional)",
-                    placeholder="Applies when a file has no track",
-                    key="uploaded_campaign_track_v68_45",
-                )
-            with upload_c2:
-                upload_artist = st.text_input(
-                    "Artist name (optional)",
-                    placeholder="Applies when a file has no artist",
-                    key="uploaded_campaign_artist_v68_45",
-                )
-
             with st.expander("Confirm markets for uploaded files", expanded=True):
                 st.caption("Markets in the file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
                 for f in files:
@@ -3680,8 +3660,6 @@ if st.session_state.step == 2:
                             df,
                             f.name,
                             fallback_market=fallback_market,
-                            fallback_track=upload_track,
-                            fallback_artist=upload_artist,
                         )
                         parsed_frames.append(std)
                         platforms = sorted([

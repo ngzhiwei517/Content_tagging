@@ -129,8 +129,6 @@ class CsvCompatibilityTests(unittest.TestCase):
         encoding: str = "utf-8",
         name: str = "test.csv",
         fallback_market: str = "",
-        fallback_track: str = "",
-        fallback_artist: str = "",
     ):
         raw = text.encode(encoding)
         frame = self.read_any_table(UploadedFile(name, raw))
@@ -138,8 +136,6 @@ class CsvCompatibilityTests(unittest.TestCase):
             frame,
             name,
             fallback_market=fallback_market,
-            fallback_track=fallback_track,
-            fallback_artist=fallback_artist,
         )
 
     def test_utf8_bom_and_generic_headers(self):
@@ -185,22 +181,6 @@ class CsvCompatibilityTests(unittest.TestCase):
             fallback_market="TH",
         )
         self.assertEqual(rows.loc[0, "Market"], "SG")
-
-    def test_upload_campaign_context_fills_only_missing_values(self):
-        text = (
-            "URL,Track Name,Artist Name\n"
-            "https://www.tiktok.com/@alpha/video/7600000000000000001,,\n"
-            "https://www.tiktok.com/@beta/video/7600000000000000002,Existing Track,Existing Artist\n"
-        )
-        rows, _ = self.parse(
-            text,
-            fallback_track="Love Yourself",
-            fallback_artist="Justin Bieber",
-        )
-        self.assertEqual(rows.loc[0, "Track"], "Love Yourself")
-        self.assertEqual(rows.loc[0, "Campaign Artist"], "Justin Bieber")
-        self.assertEqual(rows.loc[1, "Track"], "Existing Track")
-        self.assertEqual(rows.loc[1, "Campaign Artist"], "Existing Artist")
 
     def test_instagram_reel_file_uses_the_same_canonical_schema(self):
         text = (
