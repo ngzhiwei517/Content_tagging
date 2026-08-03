@@ -921,6 +921,9 @@ DEFAULT_STATE = {
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
     "track_date_settings_v68": {},
+    "date_start_v68": date.today(),
+    "date_end_v68": date.today(),
+    "date_window_days_v68": None,
     "qa_gemini_model_v68_41_4": DEFAULT_GEMINI_MODEL,
     "comparison_run_id_v68_41_4": "",
     "comparison_run_started_utc_v68_41_4": "",
@@ -979,6 +982,11 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "rank_metrics",
     "group_by",
     "use_date_filter",
+    "date_start_v68",
+    "date_end_v68",
+    "date_window_days_v68",
+    # Retained so older recovery links using a centre date and radius can be
+    # migrated to the new inclusive start/end date range.
     "date_window",
     "viral_date",
     "replace_unavailable_posts",
@@ -1292,16 +1300,56 @@ def _restore_runtime_checkpoint_v68_15() -> None:
                     value = saved_state[key]
                     if key in RUNTIME_DATAFRAME_KEYS_V68_15:
                         value = _checkpoint_dataframe_from_payload_v68_15(value)
-                    elif key == "viral_date" and safe_str(value):
+                    elif key in {"viral_date", "date_start_v68", "date_end_v68"} and safe_str(value):
                         parsed = pd.to_datetime(value, errors="coerce")
                         value = parsed.date() if not pd.isna(parsed) else date.today()
                     elif key == "track_date_settings_v68" and isinstance(value, dict):
                         for setting in value.values():
-                            if isinstance(setting, dict) and safe_str(setting.get("date")):
-                                parsed = pd.to_datetime(setting.get("date"), errors="coerce")
+                            if not isinstance(setting, dict):
+                                continue
+                            for date_key in ("date", "start", "end"):
+                                if not safe_str(setting.get(date_key)):
+                                    continue
+                                parsed = pd.to_datetime(setting.get(date_key), errors="coerce")
                                 if not pd.isna(parsed):
-                                    setting["date"] = parsed.date()
+                                    setting[date_key] = parsed.date()
                     st.session_state[key] = value
+
+                # Recovery checkpoints created before the start/end redesign
+                # stored a centre date plus a symmetric radius. Preserve the
+                # exact old range, but leave the new optional duration blank.
+                if "date_start_v68" not in saved_state and safe_str(saved_state.get("viral_date")):
+                    legacy_center = pd.to_datetime(saved_state.get("viral_date"), errors="coerce")
+                    try:
+                        legacy_radius = max(0, int(saved_state.get("date_window", 0) or 0))
+                    except (TypeError, ValueError):
+                        legacy_radius = 0
+                    if not pd.isna(legacy_center):
+                        st.session_state.date_start_v68 = (
+                            legacy_center - pd.Timedelta(days=legacy_radius)
+                        ).date()
+                        st.session_state.date_end_v68 = (
+                            legacy_center + pd.Timedelta(days=legacy_radius)
+                        ).date()
+                        st.session_state.date_window_days_v68 = None
+
+                legacy_track_radius = saved_state.get("date_window", 0)
+                try:
+                    legacy_track_radius = max(0, int(legacy_track_radius or 0))
+                except (TypeError, ValueError):
+                    legacy_track_radius = 0
+                for setting in (st.session_state.get("track_date_settings_v68", {}) or {}).values():
+                    if not isinstance(setting, dict) or "start" in setting or not safe_str(setting.get("date")):
+                        continue
+                    legacy_center = pd.to_datetime(setting.get("date"), errors="coerce")
+                    if pd.isna(legacy_center):
+                        continue
+                    setting["start"] = (
+                        legacy_center - pd.Timedelta(days=legacy_track_radius)
+                    ).date()
+                    setting["end"] = (
+                        legacy_center + pd.Timedelta(days=legacy_track_radius)
+                    ).date()
                 restored = any(
                     isinstance(st.session_state.get(key), pd.DataFrame)
                     and not st.session_state.get(key).empty
@@ -1626,19 +1674,70 @@ def inferred_viral_date_for_track_v68(rows: pd.DataFrame, track_name: str):
     return unique_dates[0] if len(unique_dates) == 1 else None
 
 
+def optional_date_window_days_v68(value) -> Optional[int]:
+    """Return a positive optional duration, or ``None`` for the N/A state."""
+    if value is None or safe_str(value) == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def resolved_date_range_v68(
+    start_date=None,
+    end_date=None,
+    window_days=None,
+    *,
+    legacy_center=None,
+    legacy_radius_days=None,
+):
+    """Return inclusive start/end timestamps for new and legacy date settings.
+
+    New settings use a start date and either a manual end date or an optional
+    inclusive duration (for example, 1 July plus 7 days ends on 7 July). Older
+    checkpoints used a centre date and symmetric radius; those values remain
+    supported so existing recovery links keep the same selected posts.
+    """
+    start = pd.to_datetime(start_date, errors="coerce")
+    if not pd.isna(start):
+        duration = optional_date_window_days_v68(window_days)
+        if duration is not None:
+            return start.normalize(), (start + pd.Timedelta(days=duration - 1)).normalize()
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(end) or end < start:
+            return pd.NaT, pd.NaT
+        return start.normalize(), end.normalize()
+
+    center = pd.to_datetime(legacy_center, errors="coerce")
+    if pd.isna(center):
+        return pd.NaT, pd.NaT
+    try:
+        radius = max(0, int(legacy_radius_days or 0))
+    except (TypeError, ValueError):
+        radius = 0
+    return (
+        (center - pd.Timedelta(days=radius)).normalize(),
+        (center + pd.Timedelta(days=radius)).normalize(),
+    )
+
+
 def filter_posts_by_date_window_v68(
     rows: pd.DataFrame,
     parsed_dates: pd.Series,
-    window_days: int,
+    window_days=None,
     global_date=None,
     track_settings: Optional[Dict[str, Dict]] = None,
     track_col: str = "Track Display",
+    global_start=None,
+    global_end=None,
 ) -> pd.DataFrame:
-    """Apply one shared date window or independent windows for selected tracks.
+    """Apply one shared inclusive date range or independent track ranges.
 
     In per-track mode, a track with ``enabled=False`` is intentionally left
-    unfiltered because not every campaign track is viral. An enabled track with
-    no usable post date is excluded because it cannot be confirmed in-window.
+    unfiltered. An enabled track with no usable date range or post date is
+    excluded because it cannot be confirmed in-range.
     """
     if rows is None or rows.empty:
         return rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame()
@@ -1646,14 +1745,17 @@ def filter_posts_by_date_window_v68(
     out = rows.copy()
     parsed = pd.Series(parsed_dates, index=out.index)
     parsed = pd.to_datetime(parsed, errors="coerce")
-    days = max(0, int(window_days or 0))
 
     if track_settings is None:
-        center = pd.to_datetime(global_date, errors="coerce")
-        if pd.isna(center):
-            return out
-        start = center - pd.Timedelta(days=days)
-        end = center + pd.Timedelta(days=days)
+        start, end = resolved_date_range_v68(
+            global_start,
+            global_end,
+            window_days,
+            legacy_center=global_date,
+            legacy_radius_days=window_days,
+        )
+        if pd.isna(start) or pd.isna(end):
+            return out.iloc[0:0].copy()
         return out.loc[parsed.between(start, end).fillna(False)].copy()
 
     keep = pd.Series(True, index=out.index, dtype=bool)
@@ -1666,12 +1768,17 @@ def filter_posts_by_date_window_v68(
         setting = raw_setting if isinstance(raw_setting, dict) else {}
         if not bool(setting.get("enabled", False)):
             continue
-        center = pd.to_datetime(setting.get("date"), errors="coerce")
-        if pd.isna(center):
-            continue
+        start, end = resolved_date_range_v68(
+            setting.get("start"),
+            setting.get("end"),
+            window_days,
+            legacy_center=setting.get("date"),
+            legacy_radius_days=window_days,
+        )
         track_mask = track_values.eq(str(track_name))
-        start = center - pd.Timedelta(days=days)
-        end = center + pd.Timedelta(days=days)
+        if pd.isna(start) or pd.isna(end):
+            keep.loc[track_mask] = False
+            continue
         keep.loc[track_mask] = parsed.loc[track_mask].between(start, end).fillna(False)
     return out.loc[keep].copy()
 
@@ -1686,11 +1793,27 @@ def reset_date_filter_state_v68() -> None:
     st.session_state.use_date_filter = False
     st.session_state.date_filter_scope_v68 = DATE_SCOPE_SHARED
     st.session_state.track_date_settings_v68 = {}
+    for state_key in (
+        "date_start_v68",
+        "date_end_v68",
+        "date_window_days_v68",
+        "viral_date",
+        "date_window",
+    ):
+        st.session_state.pop(state_key, None)
     for key in list(st.session_state.keys()):
         key_text = str(key)
-        if key_text in {"date_filter_scope_widget_v68", "track_date_window_widget_v68"} or key_text.startswith((
+        if key_text in {
+            "date_filter_scope_widget_v68",
+            "date_start_widget_v68",
+            "date_end_widget_v68",
+            "date_window_days_widget_v68",
+            "track_date_window_widget_v68",
+        } or key_text.startswith((
             "track_date_enabled_v68_",
             "track_date_value_v68_",
+            "track_date_start_v68_",
+            "track_date_end_v68_",
         )):
             del st.session_state[key]
 
@@ -2133,7 +2256,12 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
 
     if st.session_state.get("use_date_filter"):
         parsed = out.apply(canonical_post_date, axis=1)
-        window_days = int(st.session_state.get("date_window", 7))
+        has_new_window_state = "date_window_days_v68" in st.session_state
+        window_days = (
+            st.session_state.get("date_window_days_v68")
+            if has_new_window_state
+            else st.session_state.get("date_window", 7)
+        )
         date_scope = st.session_state.get("date_filter_scope_v68", DATE_SCOPE_SHARED)
         if date_scope == DATE_SCOPE_PER_TRACK:
             out = filter_posts_by_date_window_v68(
@@ -2148,6 +2276,8 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
                 parsed,
                 window_days,
                 global_date=st.session_state.get("viral_date"),
+                global_start=st.session_state.get("date_start_v68"),
+                global_end=st.session_state.get("date_end_v68"),
             )
 
     if out.empty:
@@ -3333,7 +3463,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Views by Creative Type": "V",
         "Source Summary": "S",
         "Market Summary": "M",
-        "KOL Size Performance": "K",
+        "Top Creator Performance": "C",
         "Track Summary": "T",
         "Top Posts": "",
         "Post Summary": "P",
@@ -3414,81 +3544,266 @@ def sort_summary_performance_v68_18(
     return summary.sort_values(by, ascending=ascending)
 
 
-def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
-    """Render KOL reach and average engagement as the final analysis section."""
-    st.markdown("<div class='card'>" + section_title("KOL Size Performance", "#14b8a6"), unsafe_allow_html=True)
-    if filtered is None or filtered.empty:
-        st.markdown("<div class='empty-panel'>No posts are available in the current view.</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+SUMMARY_INTEGER_COLUMNS_V68_46 = {
+    "Posts",
+    "Followers",
+    "Views",
+    "Likes",
+    "Comments",
+    "Shares",
+    "Saves",
+    "Total Engagement",
+    "Total Views",
+    "Average Views",
+    "Average Engagements",
+}
+SUMMARY_PERCENT_COLUMNS_V68_46 = {
+    "Engagement Rate",
+    "Average Engagement Rate",
+    "Likes Rate",
+    "Comments Rate",
+    "Shares Rate",
+    "Saves Rate",
+}
+TOP_POST_TABLE_COLUMNS_V68_46 = [
+    "Platform",
+    "Creator",
+    "Market",
+    "Track",
+    "Creative Type",
+    "Followers",
+    "KOL Size",
+    "Views",
+    "Total Engagement",
+    "Engagement Rate",
+    "Link",
+]
+
+
+def prepare_sortable_summary_table_v68_46(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Select table columns while preserving numeric values for header sorting."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns or [])
+    table = df.copy()
+    if columns:
+        table = table[[column for column in columns if column in table.columns]].copy()
+    for column in table.columns:
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
+            table[column] = table[column].map(clean_num).astype("int64")
+        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
+            table[column] = pd.to_numeric(
+                table[column].astype(str).str.replace("%", "", regex=False),
+                errors="coerce",
+            )
+    return table
+
+
+def render_sortable_summary_table_v68_46(
+    df: pd.DataFrame,
+    *,
+    columns: List[str],
+    max_visible_rows: int,
+) -> None:
+    """Render a Summary table with native ascending/descending header sorting."""
+    table = prepare_sortable_summary_table_v68_46(df, columns)
+    if table.empty:
+        st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
         return
 
-    kol_group_cols = ["KOL Size Display"]
-    if market_filter == "All":
-        kol_group_cols = ["Market Display", "KOL Size Display"]
-    kol_summary = filtered.groupby(kol_group_cols, dropna=False).agg(
-        Posts=("Link", "count"),
-        Average_Views=("Views", "mean"),
-        Average_Engagements=("Total Engagement", "mean"),
-        Average_Engagement_Rate=("Engagement Rate", "mean"),
-        Average_Shares_Rate=("Shares Rate", "mean"),
-        Average_Saves_Rate=("Saves Rate", "mean"),
+    column_config = {}
+    for column in table.columns:
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(column, format="localized")
+        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(column, format="%.2f%%")
+    if "Link" in table.columns:
+        column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open post")
+
+    visible_rows = min(max(len(table), 1), max_visible_rows)
+    st.dataframe(
+        table,
+        hide_index=True,
+        width="stretch",
+        height=38 + (visible_rows * 35),
+        column_config=column_config,
+    )
+
+
+def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep post metrics numeric so Streamlit header sorting is accurate."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=TOP_POST_TABLE_COLUMNS_V68_46)
+
+    top_posts = df.copy()
+    if "Market Display" in top_posts.columns:
+        top_posts["Market"] = top_posts["Market Display"]
+    if "Track Display" in top_posts.columns:
+        top_posts["Track"] = top_posts["Track Display"]
+
+    for column in ["Followers", "Views", "Total Engagement"]:
+        if column not in top_posts.columns:
+            top_posts[column] = 0
+        top_posts[column] = top_posts[column].map(clean_num).astype("int64")
+
+    top_posts["Engagement Rate"] = top_posts.apply(
+        lambda row: (
+            row["Total Engagement"] / row["Views"] * 100
+            if row["Views"] else 0.0
+        ),
+        axis=1,
+    )
+
+    for column in TOP_POST_TABLE_COLUMNS_V68_46:
+        if column not in top_posts.columns:
+            top_posts[column] = ""
+
+    # Preserve the former default view. Users can then click any header to
+    # toggle ascending or descending order without separate controls.
+    return prepare_sortable_summary_table_v68_46(
+        top_posts,
+        TOP_POST_TABLE_COLUMNS_V68_46,
+    ).sort_values(
+        ["Views", "Total Engagement"],
+        ascending=[False, False],
+        kind="stable",
+    )
+
+
+def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    """Aggregate one transparent campaign-performance row per creator.
+
+    Creators stay separate by platform and market. Total engagement prefers the
+    available Likes + Comments + Shares + Saves components so an inconsistent
+    uploaded total cannot inflate the leaderboard; an existing Total Engagement
+    value remains the fallback when no component engagement is available.
+    """
+    columns = [
+        "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
+        "Total Views", "Total Engagement", "Engagement Rate",
+    ]
+    if filtered is None or filtered.empty:
+        return pd.DataFrame(columns=columns), 0
+
+    working = filtered.copy()
+    for column in ["Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Followers"]:
+        if column not in working.columns:
+            working[column] = 0
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+
+    working["Creator Display"] = working.get(
+        "Creator",
+        pd.Series("", index=working.index, dtype=str),
+    ).map(safe_str)
+    missing_creator_posts = int(working["Creator Display"].eq("").sum())
+    working = working[working["Creator Display"].ne("")].copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns), missing_creator_posts
+
+    working["Creator Key"] = (
+        working["Creator Display"]
+        .str.strip()
+        .str.lstrip("@")
+        .str.casefold()
+    )
+    empty_creator_keys = working["Creator Key"].eq("")
+    missing_creator_posts += int(empty_creator_keys.sum())
+    working = working[~empty_creator_keys].copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns), missing_creator_posts
+
+    working["Platform Display"] = working.get(
+        "Platform Display",
+        working.get("Platform", pd.Series(TIKTOK, index=working.index)),
+    ).map(lambda value: display_empty(value, TIKTOK))
+    working["Market Display"] = working.get(
+        "Market Display",
+        working.get("Market", pd.Series("", index=working.index)),
+    ).map(display_market)
+    working["KOL Size Display"] = working.get(
+        "KOL Size Display",
+        working.get("KOL Size", pd.Series("", index=working.index)),
+    ).map(lambda value: display_empty(value, "Unknown"))
+
+    component_engagement = (
+        working[["Likes", "Comments", "Shares", "Saves"]]
+        .fillna(0)
+        .sum(axis=1)
+    )
+    working["Creator Engagement"] = component_engagement.where(
+        component_engagement.gt(0),
+        working["Total Engagement"].fillna(0),
+    )
+
+    def representative_kol_size(values) -> str:
+        available = [
+            safe_str(value)
+            for value in values
+            if safe_str(value) and safe_str(value).lower() != "unknown"
+        ]
+        return available[0] if available else "Unknown"
+
+    summary = working.groupby(
+        ["Platform Display", "Market Display", "Creator Key"],
+        dropna=False,
+    ).agg(
+        Creator=("Creator Display", "first"),
+        Posts=("Creator Key", "size"),
+        Followers=("Followers", "max"),
+        KOL_Size=("KOL Size Display", representative_kol_size),
+        Total_Views=("Views", "sum"),
+        Total_Engagement=("Creator Engagement", "sum"),
     ).reset_index()
-    if market_filter == "All":
-        kol_summary["Performance Group"] = kol_summary.apply(
-            lambda row: f"{display_empty(row.get('Market Display'), 'Other')} · {display_empty(row.get('KOL Size Display'), 'Unknown')}",
-            axis=1,
-        )
-    else:
-        kol_summary["Performance Group"] = kol_summary["KOL Size Display"].map(
-            lambda value: display_empty(value, "Unknown")
-        )
-
-    k1, k2 = st.columns(2)
-    with k1:
-        kol_views_chart = kol_summary[["Performance Group", "Average_Views"]].copy()
-        kol_views_chart["Average Views"] = kol_views_chart["Average_Views"].round().astype(int)
-        chart_bar(
-            kol_views_chart.sort_values("Average Views", ascending=False).head(12),
-            "Performance Group",
-            "Average Views",
-            "Average Views by KOL Size",
-            orientation="h",
-            value_format="integer",
-        )
-    with k2:
-        kol_rate_chart = kol_summary[["Performance Group", "Average_Engagement_Rate"]].copy()
-        kol_rate_chart["Average Engagement Rate"] = kol_rate_chart["Average_Engagement_Rate"].round(2)
-        chart_bar(
-            kol_rate_chart.sort_values("Average Engagement Rate", ascending=False).head(12),
-            "Performance Group",
-            "Average Engagement Rate",
-            "Average Engagement Rate by KOL Size",
-            orientation="h",
-            value_format="percent",
-        )
-
-    kol_table = kol_summary.copy()
-    if market_filter == "All":
-        kol_table = kol_table.rename(columns={"Market Display": "Market", "KOL Size Display": "KOL Size"})
-        kol_cols = [
-            "Market", "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Shares Rate", "Saves Rate",
-        ]
-    else:
-        kol_table = kol_table.rename(columns={"KOL Size Display": "KOL Size"})
-        kol_cols = [
-            "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Shares Rate", "Saves Rate",
-        ]
-    kol_table = kol_table.rename(columns={
-        "Average_Views": "Average Views",
-        "Average_Engagements": "Average Engagements",
-        "Average_Engagement_Rate": "Average Engagement Rate",
-        "Average_Shares_Rate": "Shares Rate",
-        "Average_Saves_Rate": "Saves Rate",
+    summary["Engagement Rate"] = summary.apply(
+        lambda row: (
+            float(row["Total_Engagement"]) / float(row["Total_Views"]) * 100
+            if float(row["Total_Views"] or 0) > 0
+            else 0.0
+        ),
+        axis=1,
+    )
+    summary = summary.rename(columns={
+        "Platform Display": "Platform",
+        "Market Display": "Market",
+        "KOL_Size": "KOL Size",
+        "Total_Views": "Total Views",
+        "Total_Engagement": "Total Engagement",
     })
-    st.markdown(render_table(kol_table, max_rows=40, cols=kol_cols), unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    summary = summary[columns].sort_values(
+        ["Total Engagement", "Total Views", "Posts", "Creator"],
+        ascending=[False, False, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    return summary, missing_creator_posts
+
+
+def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
+    """Render the creator-level campaign contribution leaderboard."""
+    with st.container(border=True):
+        st.markdown(section_title("Top Creator Performance", "#14b8a6"), unsafe_allow_html=True)
+        creator_table, missing_creator_posts = creator_performance_summary_v68_47(filtered)
+        if creator_table.empty:
+            st.markdown(
+                "<div class='empty-panel'>Creator names are not available in the current view.</div>",
+                unsafe_allow_html=True,
+            )
+            return
+        st.caption("One row per creator, ranked by total engagement. Engagement rate uses combined engagement divided by combined views.")
+        if missing_creator_posts:
+            st.caption(
+                f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
+                "are excluded from this ranking."
+            )
+        render_sortable_summary_table_v68_46(
+            creator_table,
+            columns=[
+                "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
+                "Total Views", "Total Engagement", "Engagement Rate",
+            ],
+            max_visible_rows=15,
+        )
 
 
 def bar_list(df: pd.DataFrame, label_col: str, value_col: str, max_rows: int = 10, value_suffix: str = "", show_share: bool = False) -> str:
@@ -3939,7 +4254,7 @@ elif st.session_state.step == 3:
                 unsafe_allow_html=True,
             )
 
-        st.session_state.use_date_filter = st.checkbox("Limit posts to a date window", value=st.session_state.get("use_date_filter", False))
+        st.session_state.use_date_filter = st.checkbox("Limit posts to a date range", value=st.session_state.get("use_date_filter", False))
         if st.session_state.use_date_filter:
             # Only show tracks still eligible after the optional Market/Track/Source
             # filters. This keeps the per-track date form short and relevant.
@@ -3988,62 +4303,156 @@ elif st.session_state.step == 3:
                 date_scope = DATE_SCOPE_SHARED
             st.session_state.date_filter_scope_v68 = date_scope
 
+            window_widget_key = "date_window_days_widget_v68"
+            if window_widget_key not in st.session_state:
+                st.session_state[window_widget_key] = optional_date_window_days_v68(
+                    st.session_state.get("date_window_days_v68")
+                )
+            current_window_days = optional_date_window_days_v68(
+                st.session_state.get(window_widget_key)
+            )
+
             if date_scope == DATE_SCOPE_PER_TRACK:
-                st.session_state.date_window = st.number_input(
-                    "Date window (± days)",
+                selected_window_days = st.number_input(
+                    "Window length (days, optional)",
                     min_value=1,
                     max_value=60,
-                    value=int(st.session_state.get("date_window", 7)),
-                    key="track_date_window_widget_v68",
+                    step=1,
+                    placeholder="N/A",
+                    key=window_widget_key,
+                    help="Leave blank to choose an end date for every track.",
                 )
-                st.caption("Choose a date for each track. Turn off Include for non-viral tracks.")
+                current_window_days = optional_date_window_days_v68(selected_window_days)
+                st.session_state.date_window_days_v68 = current_window_days
+                st.caption(
+                    "Choose a start and end date for each track. If a window length is entered, "
+                    "each end date is calculated automatically. Turn off Include to leave a track unfiltered."
+                )
                 old_settings = st.session_state.get("track_date_settings_v68", {}) or {}
                 next_settings: Dict[str, Dict] = {}
                 for track_name in date_track_names:
                     old_setting = old_settings.get(track_name, {}) if isinstance(old_settings, dict) else {}
                     inferred_date = inferred_viral_date_for_track_v68(date_scope_df, track_name)
-                    stored_date = input_post_date(old_setting.get("date"))
-                    default_date = (
-                        stored_date.date()
-                        if not pd.isna(stored_date)
-                        else inferred_date or st.session_state.get("viral_date", date.today())
+                    stored_start = input_post_date(old_setting.get("start"))
+                    stored_end = input_post_date(old_setting.get("end"))
+                    legacy_center = input_post_date(old_setting.get("date"))
+                    if pd.isna(stored_start) and not pd.isna(legacy_center):
+                        legacy_radius = int(st.session_state.get("date_window", 0) or 0)
+                        stored_start = legacy_center - pd.Timedelta(days=legacy_radius)
+                        stored_end = legacy_center + pd.Timedelta(days=legacy_radius)
+                    default_start = (
+                        stored_start.date()
+                        if not pd.isna(stored_start)
+                        else inferred_date or st.session_state.get("date_start_v68", date.today())
                     )
+                    default_end = stored_end.date() if not pd.isna(stored_end) else default_start
                     suffix = track_date_widget_suffix_v68(track_name)
+                    include_key = f"track_date_enabled_v68_{suffix}"
+                    start_key = f"track_date_start_v68_{suffix}"
+                    end_key = f"track_date_end_v68_{suffix}"
+                    if include_key not in st.session_state:
+                        st.session_state[include_key] = bool(old_setting.get("enabled", True))
+                    if start_key not in st.session_state:
+                        st.session_state[start_key] = default_start
+                    if end_key not in st.session_state:
+                        st.session_state[end_key] = default_end
+                    if current_window_days is not None:
+                        st.session_state[end_key] = (
+                            pd.Timestamp(st.session_state[start_key])
+                            + pd.Timedelta(days=current_window_days - 1)
+                        ).date()
                     with st.container(border=True):
-                        track_col, use_col, date_col = st.columns([2.2, 0.75, 1.05], vertical_alignment="bottom")
+                        track_col, use_col, start_col, end_col = st.columns(
+                            [1.9, 0.7, 1.05, 1.05],
+                            vertical_alignment="bottom",
+                        )
                         with track_col:
                             st.markdown(f"**{esc(track_name)}**")
                         with use_col:
                             use_track_date = st.checkbox(
                                 "Include",
-                                value=bool(old_setting.get("enabled", True)),
-                                key=f"track_date_enabled_v68_{suffix}",
+                                key=include_key,
                             )
-                        with date_col:
-                            track_date = st.date_input(
-                                f"Viral date for {track_name}",
-                                value=default_date,
+                        with start_col:
+                            track_start = st.date_input(
+                                f"Start date for {track_name}",
                                 disabled=not use_track_date,
-                                key=f"track_date_value_v68_{suffix}",
+                                key=start_key,
+                                label_visibility="collapsed",
+                            )
+                        with end_col:
+                            track_end = st.date_input(
+                                f"End date for {track_name}",
+                                disabled=not use_track_date or current_window_days is not None,
+                                key=end_key,
                                 label_visibility="collapsed",
                             )
                     next_settings[track_name] = {
                         "enabled": bool(use_track_date),
-                        "date": track_date.isoformat(),
+                        "start": track_start.isoformat(),
+                        "end": track_end.isoformat(),
                     }
+                    if use_track_date and current_window_days is None and track_end < track_start:
+                        st.error(f"End date must be on or after the start date for {track_name}.")
                 st.session_state.track_date_settings_v68 = next_settings
             else:
-                c1, c2 = st.columns(2)
+                start_widget_key = "date_start_widget_v68"
+                end_widget_key = "date_end_widget_v68"
+                if start_widget_key not in st.session_state:
+                    st.session_state[start_widget_key] = st.session_state.get("date_start_v68", date.today())
+                if end_widget_key not in st.session_state:
+                    st.session_state[end_widget_key] = st.session_state.get(
+                        "date_end_v68",
+                        st.session_state[start_widget_key],
+                    )
+                if current_window_days is not None:
+                    st.session_state[end_widget_key] = (
+                        pd.Timestamp(st.session_state[start_widget_key])
+                        + pd.Timedelta(days=current_window_days - 1)
+                    ).date()
+
+                c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.session_state.viral_date = st.date_input("Date", value=st.session_state.get("viral_date", date.today()))
+                    selected_start = st.date_input("Start date", key=start_widget_key)
                 with c2:
-                    st.session_state.date_window = st.number_input("Date window (± days)", min_value=1, max_value=60, value=int(st.session_state.get("date_window", 7)))
-                window_start = pd.Timestamp(st.session_state.viral_date) - pd.Timedelta(days=int(st.session_state.date_window))
-                window_end = pd.Timestamp(st.session_state.viral_date) + pd.Timedelta(days=int(st.session_state.date_window))
-                st.caption(
-                    f"Date range: {window_start.strftime('%d %b %Y')} to {window_end.strftime('%d %b %Y')}. "
-                    "Post dates from links or uploaded files are used when available."
+                    selected_end = st.date_input(
+                        "End date",
+                        disabled=current_window_days is not None,
+                        key=end_widget_key,
+                        help="Calculated automatically when a window length is entered.",
+                    )
+                with c3:
+                    selected_window_days = st.number_input(
+                        "Window length (days, optional)",
+                        min_value=1,
+                        max_value=60,
+                        step=1,
+                        placeholder="N/A",
+                        key=window_widget_key,
+                        help="Leave blank to use the end date. Seven days includes the start date.",
+                    )
+                current_window_days = optional_date_window_days_v68(selected_window_days)
+                resolved_start, resolved_end = resolved_date_range_v68(
+                    selected_start,
+                    selected_end,
+                    current_window_days,
                 )
+                st.session_state.date_start_v68 = selected_start
+                st.session_state.date_end_v68 = selected_end
+                st.session_state.date_window_days_v68 = current_window_days
+                if pd.isna(resolved_start) or pd.isna(resolved_end):
+                    st.error("End date must be on or after the start date.")
+                else:
+                    source_note = (
+                        f"{current_window_days}-day window; end date calculated automatically"
+                        if current_window_days is not None
+                        else "start and end dates selected manually"
+                    )
+                    st.caption(
+                        f"Date range: {resolved_start.strftime('%d %b %Y')} to "
+                        f"{resolved_end.strftime('%d %b %Y')} ({source_note}). "
+                        "Post dates from links or uploaded files are used when available."
+                    )
         if st.session_state.selection_mode == "Top posts":
             # Top N must remain complete, so genuinely unavailable posts are
             # always replaced by the next eligible ranked candidate.
@@ -4060,17 +4469,35 @@ elif st.session_state.step == 3:
                 track: setting for track, setting in active_settings.items()
                 if isinstance(setting, dict) and bool(setting.get("enabled", False))
             }
+            active_window_days = optional_date_window_days_v68(
+                st.session_state.get("date_window_days_v68")
+            )
+            range_label = (
+                f"{active_window_days}-day windows"
+                if active_window_days is not None
+                else "manual start/end dates"
+            )
             st.markdown(
                 "<div class='good-note'><b>Date filter on</b> · "
-                f"{len(enabled_settings)} tracks · ±{int(st.session_state.get('date_window', 7))} days</div>",
+                f"{len(enabled_settings)} tracks · {range_label}</div>",
                 unsafe_allow_html=True,
             )
-        elif st.session_state.get("viral_date"):
-            active_window_start = pd.Timestamp(st.session_state.viral_date) - pd.Timedelta(days=int(st.session_state.get("date_window", 7)))
-            active_window_end = pd.Timestamp(st.session_state.viral_date) + pd.Timedelta(days=int(st.session_state.get("date_window", 7)))
+        else:
+            active_window_start, active_window_end = resolved_date_range_v68(
+                st.session_state.get("date_start_v68"),
+                st.session_state.get("date_end_v68"),
+                st.session_state.get("date_window_days_v68"),
+                legacy_center=st.session_state.get("viral_date"),
+                legacy_radius_days=st.session_state.get("date_window"),
+            )
+            active_label = (
+                f"{active_window_start.strftime('%d %b %Y')}–{active_window_end.strftime('%d %b %Y')}"
+                if not pd.isna(active_window_start) and not pd.isna(active_window_end)
+                else "invalid date range"
+            )
             st.markdown(
                 "<div class='good-note'><b>Date filter on</b> · "
-                f"{active_window_start.strftime('%d %b %Y')}–{active_window_end.strftime('%d %b %Y')}</div>",
+                f"{active_label}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -4675,12 +5102,11 @@ elif st.session_state.step == 6:
     with f4:
         type_opts = ["All"] + sorted(work["Primary Creative Type"].dropna().unique().tolist())
         type_filter = st.selectbox("Creative Type", type_opts, key="summary_type_v55")
-    m1, m2 = st.columns([1, 1])
-    metric_choices = ["Views", "Total Engagement", "Likes", "Comments", "Shares", "Saves", "Followers", "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate"]
-    with m1:
-        focus_metric = st.selectbox("Sort post table by", metric_choices, key="summary_metric_v28")
-    with m2:
-        sort_order = st.selectbox("Order", ["Highest first", "Lowest first"], key="summary_sort_v28")
+    # Summary sections retain the former default order. Every Summary table
+    # can then be sorted directly from its column headings.
+    focus_metric = "Views"
+    sort_order = "Highest first"
+    st.caption("Click any table column heading to sort ascending or descending.")
 
     filtered = work.copy()
     if platform_filter != "All":
@@ -4753,11 +5179,11 @@ elif st.session_state.step == 6:
             "Average_Saves_Rate": "Saves Rate",
         })
         platform_summary = sort_summary_performance_v68_18(platform_summary, focus_metric, sort_order)
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             platform_summary,
-            max_rows=4,
-            cols=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=4,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
@@ -4773,11 +5199,11 @@ elif st.session_state.step == 6:
         market_summary = sort_summary_performance_v68_18(
             market_summary, focus_metric, sort_order
         )
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             market_summary,
-            max_rows=12,
-            cols=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=12,
+        )
     else:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -4795,11 +5221,11 @@ elif st.session_state.step == 6:
     track_summary = sort_summary_performance_v68_18(
         track_summary, focus_metric, sort_order
     )
-    st.markdown(render_table(
+    render_sortable_summary_table_v68_46(
         track_summary,
-        max_rows=12,
-        cols=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-    ), unsafe_allow_html=True)
+        columns=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        max_visible_rows=12,
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
@@ -4835,34 +5261,31 @@ elif st.session_state.step == 6:
         source_summary = sort_summary_performance_v68_18(
             source_summary, focus_metric, sort_order
         )
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             source_summary,
-            max_rows=12,
-            cols=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=12,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     if has_metrics:
-        st.markdown("<div class='card'>" + section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
-        top_posts = filtered.copy()
-        sort_col = focus_metric if focus_metric in top_posts.columns else "Views"
-        top_posts = top_posts.sort_values([sort_col, "Total Engagement"], ascending=[sort_order == "Lowest first", False])
-        top_posts["Engagement Rate"] = top_posts.apply(lambda r: f"{(r['Total Engagement']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
-        top_posts["Track"] = top_posts["Track Display"]
-        top_posts["Market"] = top_posts["Market Display"]
-        st.markdown(render_table(top_posts, max_rows=15, cols=["Platform", "Creator", "Market", "Track", "Creative Type", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate", "Link"]), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
+            top_posts = prepare_sortable_top_posts_v68_46(filtered)
+            render_sortable_summary_table_v68_46(
+                top_posts,
+                columns=TOP_POST_TABLE_COLUMNS_V68_46,
+                max_visible_rows=15,
+            )
 
-    # Keep KOL performance last among the analytical sections.
-    render_kol_size_performance_v68_15(filtered, market_filter)
+    # Keep creator contribution last among the analytical sections.
+    render_top_creator_performance_v68_47(filtered)
 
     # Post-level checking is handled by the Review page and final downloads.
     # Keep the marketing Summary focused on performance, mix, market/track/source summaries, and downloads.
     summary_df = filtered.copy()
     summary_df["Market"] = summary_df["Market Display"]
     summary_df["Track"] = summary_df["Track Display"]
-    sort_col = focus_metric if focus_metric in summary_df.columns else "Views"
-
     st.markdown("<div class='card'>" + section_title("Downloads", "#6254e8"), unsafe_allow_html=True)
     # Clean marketing export: no QA/debug columns here.
     # QA Priority / QA Reason / validation details belong only in the Review / QA Report.

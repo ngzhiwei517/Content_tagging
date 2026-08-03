@@ -139,11 +139,11 @@ class SummaryCopyContractTests(unittest.TestCase):
 
     def test_section_heading_has_title_without_explanation(self):
         market = self.section_title("Market Summary", "#10b981")
-        kol = self.section_title("KOL Size Performance", "#14b8a6")
+        creator = self.section_title("Top Creator Performance", "#14b8a6")
         self.assertIn("Market Summary", market)
-        self.assertIn("KOL Size Performance", kol)
+        self.assertIn("Top Creator Performance", creator)
         self.assertNotIn("<span>", market)
-        self.assertNotIn("<span>", kol)
+        self.assertNotIn("<span>", creator)
 
     def test_removed_summary_copy_is_absent(self):
         removed = [
@@ -168,11 +168,14 @@ class SummaryCopyContractTests(unittest.TestCase):
             "summary_market_v28",
             "summary_track_v28",
             "summary_type_v55",
-            "summary_metric_v28",
-            "summary_sort_v28",
         ]:
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)
+
+    def test_separate_summary_sort_controls_are_removed(self):
+        self.assertNotIn('"Sort post table by"', APP_SOURCE)
+        self.assertNotIn('key="summary_metric_v28"', APP_SOURCE)
+        self.assertNotIn('key="summary_sort_v28"', APP_SOURCE)
 
     def test_blank_card_explanations_are_not_rendered(self):
         kpi = self.summary_kpi_row([("Views", "38.7M", "", "kpi-blue")])

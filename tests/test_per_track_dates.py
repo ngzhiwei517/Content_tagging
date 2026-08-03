@@ -40,8 +40,53 @@ class SessionState(dict):
 class PerTrackDateHelperTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        namespace = {"pd": pd, "Optional": Optional, "Dict": Dict}
+        namespace = {
+            "pd": pd,
+            "Optional": Optional,
+            "Dict": Dict,
+            "safe_str": lambda value: "" if value is None else str(value).strip(),
+        }
+        namespace["optional_date_window_days_v68"] = load_function(
+            "optional_date_window_days_v68", namespace
+        )
+        namespace["resolved_date_range_v68"] = load_function(
+            "resolved_date_range_v68", namespace
+        )
         cls.filter_dates = staticmethod(load_function("filter_posts_by_date_window_v68", namespace))
+
+    def test_manual_start_and_end_range_is_inclusive(self):
+        rows = pd.DataFrame({"Name": ["start", "end", "outside"]})
+        dates = pd.Series(pd.to_datetime(["2026-01-01", "2026-01-07", "2026-01-08"]))
+        result = self.filter_dates(
+            rows,
+            dates,
+            global_start="2026-01-01",
+            global_end="2026-01-07",
+        )
+        self.assertEqual(result["Name"].tolist(), ["start", "end"])
+
+    def test_optional_seven_day_window_calculates_inclusive_end(self):
+        rows = pd.DataFrame({"Name": ["start", "day seven", "day eight"]})
+        dates = pd.Series(pd.to_datetime(["2026-01-01", "2026-01-07", "2026-01-08"]))
+        result = self.filter_dates(
+            rows,
+            dates,
+            7,
+            global_start="2026-01-01",
+            global_end="2026-12-31",
+        )
+        self.assertEqual(result["Name"].tolist(), ["start", "day seven"])
+
+    def test_invalid_manual_range_selects_no_posts(self):
+        rows = pd.DataFrame({"Name": ["post"]})
+        dates = pd.Series(pd.to_datetime(["2026-01-05"]))
+        result = self.filter_dates(
+            rows,
+            dates,
+            global_start="2026-01-10",
+            global_end="2026-01-01",
+        )
+        self.assertTrue(result.empty)
 
     def test_global_window_remains_inclusive(self):
         rows = pd.DataFrame({"Name": ["start", "end", "outside"]})
@@ -58,6 +103,18 @@ class PerTrackDateHelperTests(unittest.TestCase):
         result = self.filter_dates(rows, dates, 7, track_settings={
             "A": {"enabled": True, "date": "2026-01-01"},
             "B": {"enabled": True, "date": "2026-03-01"},
+        })
+        self.assertEqual(result["Name"].tolist(), ["A in", "B in"])
+
+    def test_tracks_use_independent_manual_ranges(self):
+        rows = pd.DataFrame({
+            "Track Display": ["A", "A", "B", "B"],
+            "Name": ["A in", "A out", "B in", "B out"],
+        })
+        dates = pd.Series(pd.to_datetime(["2026-01-03", "2026-01-09", "2026-03-03", "2026-03-09"]))
+        result = self.filter_dates(rows, dates, None, track_settings={
+            "A": {"enabled": True, "start": "2026-01-01", "end": "2026-01-07"},
+            "B": {"enabled": True, "start": "2026-03-01", "end": "2026-03-07"},
         })
         self.assertEqual(result["Name"].tolist(), ["A in", "B in"])
 
@@ -118,7 +175,14 @@ class PerTrackDateSelectionTests(unittest.TestCase):
             "canonical_post_date": lambda row: pd.to_datetime(row.get("Date"), errors="coerce"),
             "clean_num": lambda value: int(float(value or 0)),
             "calculate_engagement_rate": lambda row: 0,
+            "safe_str": lambda value: "" if value is None else str(value).strip(),
         }
+        namespace["optional_date_window_days_v68"] = load_function(
+            "optional_date_window_days_v68", namespace
+        )
+        namespace["resolved_date_range_v68"] = load_function(
+            "resolved_date_range_v68", namespace
+        )
         namespace["filter_posts_by_date_window_v68"] = load_function(
             "filter_posts_by_date_window_v68", namespace
         )
@@ -171,6 +235,14 @@ class PerTrackDateStateAndSourceTests(unittest.TestCase):
             "track_date_window_widget_v68": 7,
             "track_date_enabled_v68_abc": True,
             "track_date_value_v68_abc": pd.Timestamp("2026-01-01").date(),
+            "track_date_start_v68_abc": pd.Timestamp("2026-01-01").date(),
+            "track_date_end_v68_abc": pd.Timestamp("2026-01-07").date(),
+            "date_start_widget_v68": pd.Timestamp("2026-01-01").date(),
+            "date_end_widget_v68": pd.Timestamp("2026-01-07").date(),
+            "date_window_days_widget_v68": None,
+            "date_start_v68": pd.Timestamp("2026-01-01").date(),
+            "date_end_v68": pd.Timestamp("2026-01-07").date(),
+            "date_window_days_v68": None,
             "unrelated": "keep",
         })
         reset = load_function(
@@ -186,12 +258,23 @@ class PerTrackDateStateAndSourceTests(unittest.TestCase):
         self.assertEqual(state["track_date_settings_v68"], {})
         self.assertNotIn("track_date_enabled_v68_abc", state)
         self.assertNotIn("track_date_window_widget_v68", state)
+        self.assertNotIn("track_date_start_v68_abc", state)
+        self.assertNotIn("track_date_end_v68_abc", state)
+        self.assertNotIn("date_start_widget_v68", state)
+        self.assertNotIn("date_end_widget_v68", state)
+        self.assertNotIn("date_window_days_widget_v68", state)
+        self.assertNotIn("date_start_v68", state)
+        self.assertNotIn("date_end_v68", state)
+        self.assertNotIn("date_window_days_v68", state)
         self.assertEqual(state["unrelated"], "keep")
 
     def test_ui_and_upload_contracts_are_present(self):
         for phrase in [
             "Different date by track",
-            "Choose a date for each track",
+            "Choose a start and end date for each track",
+            "Window length (days, optional)",
+            'placeholder="N/A"',
+            'disabled=current_window_days is not None',
             "<b>Date filter on</b>",
             "with st.container(border=True):",
             '"viral_date": detect_col',
@@ -200,6 +283,14 @@ class PerTrackDateStateAndSourceTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, APP_SOURCE)
         self.assertGreaterEqual(APP_SOURCE.count("reset_date_filter_state_v68()"), 2)
+
+    def test_new_date_range_state_is_persisted_for_recovery(self):
+        checkpoint_block = APP_SOURCE.split(
+            "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15", 1
+        )[1].split(")", 1)[0]
+        for key in ("date_start_v68", "date_end_v68", "date_window_days_v68"):
+            with self.subTest(key=key):
+                self.assertIn(f'"{key}"', checkpoint_block)
 
     def test_date_scope_uses_stateful_primary_secondary_buttons(self):
         calls = [
