@@ -3,7 +3,7 @@ import json
 import re
 import unittest
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -74,7 +74,7 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["Optional"] = __import__("typing").Optional
         namespace["SUMMARY_INTEGER_COLUMNS_V68_46"] = {
             "Posts", "Followers", "Views", "Likes", "Comments", "Shares",
-            "Saves", "Total Engagement", "Average Views", "Average Engagements",
+            "Saves", "Total Engagement", "Total Views", "Average Views", "Average Engagements",
         }
         namespace["SUMMARY_PERCENT_COLUMNS_V68_46"] = {
             "Engagement Rate", "Average Engagement Rate", "Likes Rate",
@@ -88,6 +88,11 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.prepare_summary_table = staticmethod(load_function("prepare_sortable_summary_table_v68_46", namespace))
         namespace["prepare_sortable_summary_table_v68_46"] = cls.prepare_summary_table
         cls.prepare_top_posts = staticmethod(load_function("prepare_sortable_top_posts_v68_46", namespace))
+        namespace["Tuple"] = Tuple
+        namespace["TIKTOK"] = "TikTok"
+        namespace["display_empty"] = lambda value, fallback="Not specified": namespace["safe_str"](value) or fallback
+        namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
+        cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -118,7 +123,7 @@ class SummaryV6815Tests(unittest.TestCase):
             step_six.index('section_title("Track Summary"'),
             step_six.index('section_title("Creative Type Mix"'),
             step_six.index('section_title("Top Posts"'),
-            step_six.index("render_kol_size_performance_v68_15(filtered, market_filter)"),
+            step_six.index("render_top_creator_performance_v68_47(filtered)"),
             step_six.index('section_title("Downloads"'),
         ]
         self.assertEqual(positions, sorted(positions))
@@ -170,7 +175,7 @@ class SummaryV6815Tests(unittest.TestCase):
     def test_top_posts_use_native_clickable_header_table(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         top_posts_block = step_six.split('section_title("Top Posts"', 1)[1].split(
-            "render_kol_size_performance_v68_15", 1
+            "render_top_creator_performance_v68_47", 1
         )[0]
         self.assertIn("render_sortable_summary_table_v68_46(", top_posts_block)
         self.assertIn("st.dataframe(", APP_SOURCE)
@@ -183,10 +188,53 @@ class SummaryV6815Tests(unittest.TestCase):
             with self.subTest(title=title):
                 section = step_six.split(f'section_title("{title}"', 1)[1]
                 self.assertIn("render_sortable_summary_table_v68_46(", section)
-        kol_function = APP_SOURCE.split("def render_kol_size_performance_v68_15", 1)[1].split(
+        creator_function = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
             "def bar_list", 1
         )[0]
-        self.assertIn("render_sortable_summary_table_v68_46(", kol_function)
+        self.assertIn("render_sortable_summary_table_v68_46(", creator_function)
+
+    def test_creator_performance_groups_handles_and_uses_weighted_engagement(self):
+        rows = pd.DataFrame([
+            {
+                "Platform": "TikTok", "Market": "SG", "Creator": "@Alice", "Link": "a",
+                "Views": 1_000, "Likes": 80, "Comments": 10, "Shares": 5, "Saves": 5,
+                "Total Engagement": 9_999, "Followers": 10_000, "KOL Size": "Micro",
+            },
+            {
+                "Platform": "TikTok", "Market": "SG", "Creator": "alice", "Link": "b",
+                "Views": 100, "Likes": 10, "Comments": 5, "Shares": 3, "Saves": 2,
+                "Total Engagement": 9_999, "Followers": 12_000, "KOL Size": "Micro",
+            },
+        ])
+        summary, missing = self.creator_summary(rows)
+        self.assertEqual(missing, 0)
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(int(summary.loc[0, "Posts"]), 2)
+        self.assertEqual(int(summary.loc[0, "Followers"]), 12_000)
+        self.assertEqual(int(summary.loc[0, "Total Views"]), 1_100)
+        self.assertEqual(int(summary.loc[0, "Total Engagement"]), 120)
+        self.assertAlmostEqual(float(summary.loc[0, "Engagement Rate"]), 120 / 1_100 * 100)
+
+    def test_creator_performance_ranks_engagement_and_keeps_market_platform_separate(self):
+        rows = pd.DataFrame([
+            {"Platform": "TikTok", "Market": "SG", "Creator": "Alice", "Views": 100, "Likes": 10},
+            {"Platform": "Instagram Reels", "Market": "MY", "Creator": "Alice", "Views": 200, "Likes": 20},
+            {"Platform": "TikTok", "Market": "SG", "Creator": "Bob", "Views": 500, "Likes": 80},
+            {"Platform": "TikTok", "Market": "SG", "Creator": "", "Views": 900, "Likes": 500},
+            {"Platform": "TikTok", "Market": "SG", "Creator": "@", "Views": 900, "Likes": 500},
+        ])
+        summary, missing = self.creator_summary(rows)
+        self.assertEqual(missing, 2)
+        self.assertEqual(summary["Creator"].tolist()[0], "Bob")
+        self.assertEqual(len(summary[summary["Creator"].str.casefold() == "alice"]), 2)
+
+    def test_creator_performance_falls_back_to_supplied_total_when_components_are_missing(self):
+        summary, _ = self.creator_summary(pd.DataFrame([{
+            "Platform": "TikTok", "Market": "PH", "Creator": "Creator A",
+            "Views": 1_000, "Total Engagement": 75,
+        }]))
+        self.assertEqual(int(summary.loc[0, "Total Engagement"]), 75)
+        self.assertAlmostEqual(float(summary.loc[0, "Engagement Rate"]), 7.5)
 
     def test_group_summary_metrics_remain_numeric_for_header_sorting(self):
         table = self.prepare_summary_table(

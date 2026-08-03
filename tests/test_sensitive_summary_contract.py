@@ -139,11 +139,11 @@ class SummaryCopyContractTests(unittest.TestCase):
 
     def test_section_heading_has_title_without_explanation(self):
         market = self.section_title("Market Summary", "#10b981")
-        kol = self.section_title("KOL Size Performance", "#14b8a6")
+        creator = self.section_title("Top Creator Performance", "#14b8a6")
         self.assertIn("Market Summary", market)
-        self.assertIn("KOL Size Performance", kol)
+        self.assertIn("Top Creator Performance", creator)
         self.assertNotIn("<span>", market)
-        self.assertNotIn("<span>", kol)
+        self.assertNotIn("<span>", creator)
 
     def test_removed_summary_copy_is_absent(self):
         removed = [

@@ -3463,7 +3463,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Views by Creative Type": "V",
         "Source Summary": "S",
         "Market Summary": "M",
-        "KOL Size Performance": "K",
+        "Top Creator Performance": "C",
         "Track Summary": "T",
         "Top Posts": "",
         "Post Summary": "P",
@@ -3553,6 +3553,7 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Shares",
     "Saves",
     "Total Engagement",
+    "Total Views",
     "Average Views",
     "Average Engagements",
 }
@@ -3671,85 +3672,138 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
-    """Render KOL reach and average engagement as the final analysis section."""
-    st.markdown("<div class='card'>" + section_title("KOL Size Performance", "#14b8a6"), unsafe_allow_html=True)
+def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    """Aggregate one transparent campaign-performance row per creator.
+
+    Creators stay separate by platform and market. Total engagement prefers the
+    available Likes + Comments + Shares + Saves components so an inconsistent
+    uploaded total cannot inflate the leaderboard; an existing Total Engagement
+    value remains the fallback when no component engagement is available.
+    """
+    columns = [
+        "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
+        "Total Views", "Total Engagement", "Engagement Rate",
+    ]
     if filtered is None or filtered.empty:
-        st.markdown("<div class='empty-panel'>No posts are available in the current view.</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+        return pd.DataFrame(columns=columns), 0
 
-    kol_group_cols = ["KOL Size Display"]
-    if market_filter == "All":
-        kol_group_cols = ["Market Display", "KOL Size Display"]
-    kol_summary = filtered.groupby(kol_group_cols, dropna=False).agg(
-        Posts=("Link", "count"),
-        Average_Views=("Views", "mean"),
-        Average_Engagements=("Total Engagement", "mean"),
-        Average_Engagement_Rate=("Engagement Rate", "mean"),
-        Average_Shares_Rate=("Shares Rate", "mean"),
-        Average_Saves_Rate=("Saves Rate", "mean"),
-    ).reset_index()
-    if market_filter == "All":
-        kol_summary["Performance Group"] = kol_summary.apply(
-            lambda row: f"{display_empty(row.get('Market Display'), 'Other')} · {display_empty(row.get('KOL Size Display'), 'Unknown')}",
-            axis=1,
-        )
-    else:
-        kol_summary["Performance Group"] = kol_summary["KOL Size Display"].map(
-            lambda value: display_empty(value, "Unknown")
-        )
+    working = filtered.copy()
+    for column in ["Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Followers"]:
+        if column not in working.columns:
+            working[column] = 0
+        working[column] = pd.to_numeric(working[column], errors="coerce")
 
-    k1, k2 = st.columns(2)
-    with k1:
-        kol_views_chart = kol_summary[["Performance Group", "Average_Views"]].copy()
-        kol_views_chart["Average Views"] = kol_views_chart["Average_Views"].round().astype(int)
-        chart_bar(
-            kol_views_chart.sort_values("Average Views", ascending=False).head(12),
-            "Performance Group",
-            "Average Views",
-            "Average Views by KOL Size",
-            orientation="h",
-            value_format="integer",
-        )
-    with k2:
-        kol_rate_chart = kol_summary[["Performance Group", "Average_Engagement_Rate"]].copy()
-        kol_rate_chart["Average Engagement Rate"] = kol_rate_chart["Average_Engagement_Rate"].round(2)
-        chart_bar(
-            kol_rate_chart.sort_values("Average Engagement Rate", ascending=False).head(12),
-            "Performance Group",
-            "Average Engagement Rate",
-            "Average Engagement Rate by KOL Size",
-            orientation="h",
-            value_format="percent",
-        )
+    working["Creator Display"] = working.get(
+        "Creator",
+        pd.Series("", index=working.index, dtype=str),
+    ).map(safe_str)
+    missing_creator_posts = int(working["Creator Display"].eq("").sum())
+    working = working[working["Creator Display"].ne("")].copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns), missing_creator_posts
 
-    kol_table = kol_summary.copy()
-    if market_filter == "All":
-        kol_table = kol_table.rename(columns={"Market Display": "Market", "KOL Size Display": "KOL Size"})
-        kol_cols = [
-            "Market", "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Shares Rate", "Saves Rate",
-        ]
-    else:
-        kol_table = kol_table.rename(columns={"KOL Size Display": "KOL Size"})
-        kol_cols = [
-            "KOL Size", "Posts", "Average Views", "Average Engagements",
-            "Average Engagement Rate", "Shares Rate", "Saves Rate",
-        ]
-    kol_table = kol_table.rename(columns={
-        "Average_Views": "Average Views",
-        "Average_Engagements": "Average Engagements",
-        "Average_Engagement_Rate": "Average Engagement Rate",
-        "Average_Shares_Rate": "Shares Rate",
-        "Average_Saves_Rate": "Saves Rate",
-    })
-    render_sortable_summary_table_v68_46(
-        kol_table,
-        columns=kol_cols,
-        max_visible_rows=12,
+    working["Creator Key"] = (
+        working["Creator Display"]
+        .str.strip()
+        .str.lstrip("@")
+        .str.casefold()
     )
-    st.markdown("</div>", unsafe_allow_html=True)
+    empty_creator_keys = working["Creator Key"].eq("")
+    missing_creator_posts += int(empty_creator_keys.sum())
+    working = working[~empty_creator_keys].copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns), missing_creator_posts
+
+    working["Platform Display"] = working.get(
+        "Platform Display",
+        working.get("Platform", pd.Series(TIKTOK, index=working.index)),
+    ).map(lambda value: display_empty(value, TIKTOK))
+    working["Market Display"] = working.get(
+        "Market Display",
+        working.get("Market", pd.Series("", index=working.index)),
+    ).map(display_market)
+    working["KOL Size Display"] = working.get(
+        "KOL Size Display",
+        working.get("KOL Size", pd.Series("", index=working.index)),
+    ).map(lambda value: display_empty(value, "Unknown"))
+
+    component_engagement = (
+        working[["Likes", "Comments", "Shares", "Saves"]]
+        .fillna(0)
+        .sum(axis=1)
+    )
+    working["Creator Engagement"] = component_engagement.where(
+        component_engagement.gt(0),
+        working["Total Engagement"].fillna(0),
+    )
+
+    def representative_kol_size(values) -> str:
+        available = [
+            safe_str(value)
+            for value in values
+            if safe_str(value) and safe_str(value).lower() != "unknown"
+        ]
+        return available[0] if available else "Unknown"
+
+    summary = working.groupby(
+        ["Platform Display", "Market Display", "Creator Key"],
+        dropna=False,
+    ).agg(
+        Creator=("Creator Display", "first"),
+        Posts=("Creator Key", "size"),
+        Followers=("Followers", "max"),
+        KOL_Size=("KOL Size Display", representative_kol_size),
+        Total_Views=("Views", "sum"),
+        Total_Engagement=("Creator Engagement", "sum"),
+    ).reset_index()
+    summary["Engagement Rate"] = summary.apply(
+        lambda row: (
+            float(row["Total_Engagement"]) / float(row["Total_Views"]) * 100
+            if float(row["Total_Views"] or 0) > 0
+            else 0.0
+        ),
+        axis=1,
+    )
+    summary = summary.rename(columns={
+        "Platform Display": "Platform",
+        "Market Display": "Market",
+        "KOL_Size": "KOL Size",
+        "Total_Views": "Total Views",
+        "Total_Engagement": "Total Engagement",
+    })
+    summary = summary[columns].sort_values(
+        ["Total Engagement", "Total Views", "Posts", "Creator"],
+        ascending=[False, False, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    return summary, missing_creator_posts
+
+
+def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
+    """Render the creator-level campaign contribution leaderboard."""
+    with st.container(border=True):
+        st.markdown(section_title("Top Creator Performance", "#14b8a6"), unsafe_allow_html=True)
+        creator_table, missing_creator_posts = creator_performance_summary_v68_47(filtered)
+        if creator_table.empty:
+            st.markdown(
+                "<div class='empty-panel'>Creator names are not available in the current view.</div>",
+                unsafe_allow_html=True,
+            )
+            return
+        st.caption("One row per creator, ranked by total engagement. Engagement rate uses combined engagement divided by combined views.")
+        if missing_creator_posts:
+            st.caption(
+                f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
+                "are excluded from this ranking."
+            )
+        render_sortable_summary_table_v68_46(
+            creator_table,
+            columns=[
+                "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
+                "Total Views", "Total Engagement", "Engagement Rate",
+            ],
+            max_visible_rows=15,
+        )
 
 
 def bar_list(df: pd.DataFrame, label_col: str, value_col: str, max_rows: int = 10, value_suffix: str = "", show_share: bool = False) -> str:
@@ -5224,8 +5278,8 @@ elif st.session_state.step == 6:
                 max_visible_rows=15,
             )
 
-    # Keep KOL performance last among the analytical sections.
-    render_kol_size_performance_v68_15(filtered, market_filter)
+    # Keep creator contribution last among the analytical sections.
+    render_top_creator_performance_v68_47(filtered)
 
     # Post-level checking is handled by the Review page and final downloads.
     # Keep the marketing Summary focused on performance, mix, market/track/source summaries, and downloads.
