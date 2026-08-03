@@ -74,7 +74,8 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["Optional"] = __import__("typing").Optional
         namespace["SUMMARY_INTEGER_COLUMNS_V68_46"] = {
             "Posts", "Followers", "Views", "Likes", "Comments", "Shares",
-            "Saves", "Total Engagement", "Total Views", "Average Views", "Average Engagements",
+            "Saves", "Total Engagement", "Total Views", "Average Engagement",
+            "Average Views", "Average Engagements",
         }
         namespace["SUMMARY_PERCENT_COLUMNS_V68_46"] = {
             "Engagement Rate", "Average Engagement Rate", "Likes Rate",
@@ -92,7 +93,9 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["TIKTOK"] = "TikTok"
         namespace["display_empty"] = lambda value, fallback="Not specified": namespace["safe_str"](value) or fallback
         namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
+        namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
+        cls.creator_kol_summary = staticmethod(load_function("creator_kol_size_summary_v68_50", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -213,7 +216,32 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(int(summary.loc[0, "Followers"]), 12_000)
         self.assertEqual(int(summary.loc[0, "Total Views"]), 1_100)
         self.assertEqual(int(summary.loc[0, "Total Engagement"]), 120)
-        self.assertAlmostEqual(float(summary.loc[0, "Engagement Rate"]), 120 / 1_100 * 100)
+        self.assertEqual(int(summary.loc[0, "Average Engagement"]), 60)
+        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 15.0)
+
+    def test_creator_performance_uses_latest_three_months_in_available_data(self):
+        rows = pd.DataFrame([
+            {
+                "Platform": "TikTok", "Market": "SG", "Creator": "Alice",
+                "Date": "2026-02-01", "Views": 1_000, "Likes": 500,
+            },
+            {
+                "Platform": "TikTok", "Market": "SG", "Creator": "Alice",
+                "Date": "2026-04-01", "Views": 1_000, "Likes": 100,
+            },
+            {
+                "Platform": "TikTok", "Market": "SG", "Creator": "Alice",
+                "Date": "2026-06-30", "Views": 500, "Likes": 100,
+            },
+        ])
+        summary, _ = self.creator_summary(rows)
+        self.assertEqual(int(summary.loc[0, "Posts"]), 2)
+        self.assertEqual(int(summary.loc[0, "Total Views"]), 1_500)
+        self.assertEqual(int(summary.loc[0, "Total Engagement"]), 200)
+        self.assertEqual(int(summary.loc[0, "Average Engagement"]), 100)
+        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 15.0)
+        self.assertEqual(summary.attrs["date_window_start"], "2026-03-30")
+        self.assertEqual(summary.attrs["date_window_end"], "2026-06-30")
 
     def test_creator_performance_ranks_engagement_and_keeps_market_platform_separate(self):
         rows = pd.DataFrame([
@@ -234,7 +262,29 @@ class SummaryV6815Tests(unittest.TestCase):
             "Views": 1_000, "Total Engagement": 75,
         }]))
         self.assertEqual(int(summary.loc[0, "Total Engagement"]), 75)
-        self.assertAlmostEqual(float(summary.loc[0, "Engagement Rate"]), 7.5)
+        self.assertEqual(int(summary.loc[0, "Average Engagement"]), 75)
+        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 7.5)
+
+    def test_kol_size_charts_average_creator_results_from_same_table(self):
+        creator_table = pd.DataFrame([
+            {"Creator": "Alice", "KOL Size": "Micro", "Total Views": 1_000, "Average Engagement Rate": 10.0},
+            {"Creator": "Bob", "KOL Size": "Micro", "Total Views": 3_000, "Average Engagement Rate": 20.0},
+            {"Creator": "Cara", "KOL Size": "Macro", "Total Views": 5_000, "Average Engagement Rate": 8.0},
+        ])
+        summary = self.creator_kol_summary(creator_table).set_index("KOL Size")
+        self.assertEqual(int(summary.loc["Micro", "Creator Groups"]), 2)
+        self.assertEqual(int(summary.loc["Micro", "Average Creator Views"]), 2_000)
+        self.assertAlmostEqual(
+            float(summary.loc["Micro", "Average Creator Engagement Rate"]),
+            15.0,
+        )
+
+    def test_creator_section_contains_both_kol_size_charts(self):
+        creator_section = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
+            "def bar_list", 1
+        )[0]
+        self.assertIn("Average Creator Views by KOL Size", creator_section)
+        self.assertIn("Average Creator Engagement Rate by KOL Size", creator_section)
 
     def test_group_summary_metrics_remain_numeric_for_header_sorting(self):
         table = self.prepare_summary_table(
