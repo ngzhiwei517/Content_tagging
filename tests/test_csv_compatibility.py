@@ -86,6 +86,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "display_market",
             "kol_size_for_market",
             "normalize_market",
+            "infer_market_from_filename",
             "unique_columns",
             "detect_csv_delimiter",
             "read_any_table",
@@ -115,15 +116,31 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.kol_size_for_market = staticmethod(namespace["kol_size_for_market"])
         cls.display_market = staticmethod(namespace["display_market"])
         cls.normalize_market = staticmethod(namespace["normalize_market"])
+        cls.infer_market_from_filename = staticmethod(namespace["infer_market_from_filename"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
         cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
         cls.format_display_value = staticmethod(namespace["format_display_value"])
         cls.aggregate_summary_performance = staticmethod(namespace["aggregate_summary_performance_v68_15"])
 
-    def parse(self, text: str, *, encoding: str = "utf-8", name: str = "test.csv"):
+    def parse(
+        self,
+        text: str,
+        *,
+        encoding: str = "utf-8",
+        name: str = "test.csv",
+        fallback_market: str = "",
+        fallback_track: str = "",
+        fallback_artist: str = "",
+    ):
         raw = text.encode(encoding)
         frame = self.read_any_table(UploadedFile(name, raw))
-        return self.standardize_file_rows(frame, name)
+        return self.standardize_file_rows(
+            frame,
+            name,
+            fallback_market=fallback_market,
+            fallback_track=fallback_track,
+            fallback_artist=fallback_artist,
+        )
 
     def test_utf8_bom_and_generic_headers(self):
         text = (
@@ -136,6 +153,54 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(rows.loc[0, "Market"], "MY")
         self.assertEqual(rows.loc[0, "Track"], "Track A")
         self.assertEqual(rows.loc[0, "Views"], 1234)
+
+    def test_filename_market_prefix_is_detected(self):
+        self.assertEqual(
+            self.infer_market_from_filename("[TH] Justin Bieber - Love Yourself.csv"),
+            "TH",
+        )
+        self.assertEqual(self.infer_market_from_filename("(Malaysia) campaign.xlsx"), "MY")
+        self.assertEqual(self.infer_market_from_filename("campaign.csv"), "")
+
+    def test_file_market_fallback_fills_missing_market(self):
+        text = (
+            "URL,Views\n"
+            "https://www.tiktok.com/@alpha/video/7600000000000000001,1234\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="[VN] campaign.csv",
+            fallback_market="VN",
+        )
+        self.assertEqual(rows.loc[0, "Market"], "VN")
+
+    def test_explicit_row_market_beats_file_fallback(self):
+        text = (
+            "URL,Market\n"
+            "https://www.tiktok.com/@alpha/video/7600000000000000001,SG\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="[TH] campaign.csv",
+            fallback_market="TH",
+        )
+        self.assertEqual(rows.loc[0, "Market"], "SG")
+
+    def test_upload_campaign_context_fills_only_missing_values(self):
+        text = (
+            "URL,Track Name,Artist Name\n"
+            "https://www.tiktok.com/@alpha/video/7600000000000000001,,\n"
+            "https://www.tiktok.com/@beta/video/7600000000000000002,Existing Track,Existing Artist\n"
+        )
+        rows, _ = self.parse(
+            text,
+            fallback_track="Love Yourself",
+            fallback_artist="Justin Bieber",
+        )
+        self.assertEqual(rows.loc[0, "Track"], "Love Yourself")
+        self.assertEqual(rows.loc[0, "Campaign Artist"], "Justin Bieber")
+        self.assertEqual(rows.loc[1, "Track"], "Existing Track")
+        self.assertEqual(rows.loc[1, "Campaign Artist"], "Existing Artist")
 
     def test_instagram_reel_file_uses_the_same_canonical_schema(self):
         text = (
@@ -174,7 +239,9 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertNotIn('"Platform to add"', APP_SOURCE)
         self.assertNotIn("Paste extra {platform_short} links", APP_SOURCE)
         self.assertIn('st.tabs(["Upload post files", "Paste post links"])', APP_SOURCE)
-        self.assertIn("standardize_file_rows(df, f.name)", APP_SOURCE)
+        self.assertIn("fallback_market=fallback_market", APP_SOURCE)
+        self.assertIn('st.expander("Confirm markets for uploaded files"', APP_SOURCE)
+        self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)
         self.assertIn("links = parse_links(link_text)", APP_SOURCE)
         self.assertIn('"Platform": detected_platform', APP_SOURCE)
 

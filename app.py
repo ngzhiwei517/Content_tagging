@@ -1750,6 +1750,13 @@ def normalize_market(v: str) -> str:
     return mapping.get(s, "")
 
 
+def infer_market_from_filename(source_name: str) -> str:
+    """Return a campaign market from a leading filename tag such as ``[TH]``."""
+    basename = re.split(r"[\\/]", safe_str(source_name))[-1]
+    match = re.match(r"^\s*[\[(]\s*([^\])]+?)\s*[\])]", basename)
+    return normalize_market(match.group(1)) if match else ""
+
+
 def unique_columns(cols: List[str]) -> List[str]:
     seen: Dict[str, int] = {}
     out: List[str] = []
@@ -1902,6 +1909,9 @@ def standardize_file_rows(
     df: pd.DataFrame,
     source_name: str,
     platform: str = "",
+    fallback_market: str = "",
+    fallback_track: str = "",
+    fallback_artist: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
@@ -1918,9 +1928,14 @@ def standardize_file_rows(
         artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
         if detected_platform == INSTAGRAM_REELS:
             if is_opaque_instagram_sound_id(track):
-                track = filename_track
+                track = safe_str(fallback_track) or filename_track
             if not artist:
-                artist = filename_artist
+                artist = safe_str(fallback_artist) or filename_artist
+        if not track:
+            track = safe_str(fallback_track)
+        if not artist:
+            artist = safe_str(fallback_artist)
+        row_market = normalize_market(r.get(cols["market"])) if cols.get("market") else ""
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
         shares = clean_num(r.get(cols["shares"])) if cols.get("shares") else 0
@@ -1937,7 +1952,9 @@ def standardize_file_rows(
             "Source": source_name,
             "Input Type": "CSV/XLSX",
             "Link": link,
-            "Market": normalize_market(r.get(cols["market"])) if cols.get("market") else "",
+            # Explicit row data remains authoritative. The per-file selector is
+            # only a fallback for exports that keep market context in filenames.
+            "Market": row_market or normalize_market(fallback_market),
             "Track": track,
             "Campaign Artist": artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
@@ -3607,26 +3624,82 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
-            for f in files:
-                try:
-                    df = read_any_table(f)
-                    std, cols = standardize_file_rows(df, f.name)
-                    parsed_frames.append(std)
-                    platforms = sorted([
-                        p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
-                        if safe_str(p)
-                    ])
-                    markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
-                    tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
-                    summary_rows.append({
-                        "File": f.name,
-                        "Posts": len(std),
-                        "Platforms": ", ".join(platforms) if platforms else "Not detected",
-                        "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
-                        "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
-                    })
-                except Exception as e:
-                    errors.append(f"{f.name}: {e}")
+            upload_c1, upload_c2 = st.columns([1.05, 0.85])
+            with upload_c1:
+                upload_track = st.text_input(
+                    "Campaign track / sound name (optional)",
+                    placeholder="Applies when a file has no track",
+                    key="uploaded_campaign_track_v68_45",
+                )
+            with upload_c2:
+                upload_artist = st.text_input(
+                    "Artist name (optional)",
+                    placeholder="Applies when a file has no artist",
+                    key="uploaded_campaign_artist_v68_45",
+                )
+
+            with st.expander("Confirm markets for uploaded files", expanded=True):
+                st.caption("Markets in the file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
+                for f in files:
+                    try:
+                        df = read_any_table(f)
+                        detected_cols = detect_columns(df)
+                        explicit_markets = []
+                        if detected_cols.get("market"):
+                            explicit_markets = sorted({
+                                normalize_market(value)
+                                for value in df[detected_cols["market"]].tolist()
+                                if normalize_market(value)
+                            })
+
+                        fallback_market = ""
+                        market_source = "From file"
+                        if explicit_markets:
+                            st.caption(f"{f.name} — Market in file: {', '.join(explicit_markets)}")
+                        else:
+                            filename_market = infer_market_from_filename(f.name)
+                            default_choice = filename_market or "Other / no market"
+                            file_key = hashlib.sha1(
+                                f"{f.name}:{len(f.getvalue())}".encode("utf-8")
+                            ).hexdigest()[:12]
+                            market_choice = st.selectbox(
+                                f.name,
+                                MARKET_OPTIONS,
+                                index=MARKET_OPTIONS.index(default_choice),
+                                key=f"uploaded_file_market_v68_45_{file_key}",
+                                help=(
+                                    "Detected from the filename. Change it if needed."
+                                    if filename_market
+                                    else "No market was found in the file or filename. Select one if applicable."
+                                ),
+                            )
+                            fallback_market = "" if market_choice == "Other / no market" else market_choice
+                            market_source = "Filename / selection" if fallback_market else "Not specified"
+
+                        std, cols = standardize_file_rows(
+                            df,
+                            f.name,
+                            fallback_market=fallback_market,
+                            fallback_track=upload_track,
+                            fallback_artist=upload_artist,
+                        )
+                        parsed_frames.append(std)
+                        platforms = sorted([
+                            p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
+                            if safe_str(p)
+                        ])
+                        markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
+                        tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        summary_rows.append({
+                            "File": f.name,
+                            "Posts": len(std),
+                            "Platforms": ", ".join(platforms) if platforms else "Not detected",
+                            "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
+                            "Market source": market_source,
+                            "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                        })
+                    except Exception as e:
+                        errors.append(f"{f.name}: {e}")
             if summary_rows:
                 st.markdown(render_table(pd.DataFrame(summary_rows), max_rows=10), unsafe_allow_html=True)
             if errors:
