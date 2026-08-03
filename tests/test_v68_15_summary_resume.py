@@ -71,6 +71,23 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.summary_sort_column = staticmethod(load_function("summary_sort_column_v68_15", namespace))
         namespace["summary_sort_column_v68_15"] = cls.summary_sort_column
         cls.sort_summary = staticmethod(load_function("sort_summary_performance_v68_18", namespace))
+        namespace["Optional"] = __import__("typing").Optional
+        namespace["SUMMARY_INTEGER_COLUMNS_V68_46"] = {
+            "Posts", "Followers", "Views", "Likes", "Comments", "Shares",
+            "Saves", "Total Engagement", "Average Views", "Average Engagements",
+        }
+        namespace["SUMMARY_PERCENT_COLUMNS_V68_46"] = {
+            "Engagement Rate", "Average Engagement Rate", "Likes Rate",
+            "Comments Rate", "Shares Rate", "Saves Rate",
+        }
+        namespace["TOP_POST_TABLE_COLUMNS_V68_46"] = [
+            "Platform", "Creator", "Market", "Track", "Creative Type",
+            "Followers", "KOL Size", "Views", "Total Engagement",
+            "Engagement Rate", "Link",
+        ]
+        cls.prepare_summary_table = staticmethod(load_function("prepare_sortable_summary_table_v68_46", namespace))
+        namespace["prepare_sortable_summary_table_v68_46"] = cls.prepare_summary_table
+        cls.prepare_top_posts = staticmethod(load_function("prepare_sortable_top_posts_v68_46", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -125,6 +142,65 @@ class SummaryV6815Tests(unittest.TestCase):
             self.summary_sort_column("Followers", columns),
             "Average Engagements",
         )
+
+    def test_top_posts_keep_numeric_columns_for_header_sorting(self):
+        rows = pd.DataFrame([
+            {
+                "Platform": "TikTok", "Creator": "a", "Market Display": "MY",
+                "Track Display": "Song", "Creative Type": "Performance",
+                "Followers": "41,700", "KOL Size": "Micro", "Views": "8,300,000",
+                "Total Engagement": "84,583", "Link": "https://example.com/a",
+            },
+            {
+                "Platform": "TikTok", "Creator": "b", "Market Display": "SG",
+                "Track Display": "Song", "Creative Type": "Dance",
+                "Followers": "51,500", "KOL Size": "Macro", "Views": "8,200,000",
+                "Total Engagement": "61,659", "Link": "https://example.com/b",
+            },
+        ])
+        top_posts = self.prepare_top_posts(rows)
+        self.assertEqual(top_posts["Views"].tolist(), [8_300_000, 8_200_000])
+        self.assertIn(top_posts["Views"].dtype.kind, "iu")
+        self.assertIn(top_posts["Followers"].dtype.kind, "iu")
+        self.assertIn(top_posts["Total Engagement"].dtype.kind, "iu")
+        self.assertIn(top_posts["Engagement Rate"].dtype.kind, "f")
+        self.assertEqual(top_posts.iloc[0]["Market"], "MY")
+        self.assertEqual(top_posts.iloc[0]["Link"], "https://example.com/a")
+
+    def test_top_posts_use_native_clickable_header_table(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        top_posts_block = step_six.split('section_title("Top Posts"', 1)[1].split(
+            "render_kol_size_performance_v68_15", 1
+        )[0]
+        self.assertIn("render_sortable_summary_table_v68_46(", top_posts_block)
+        self.assertIn("st.dataframe(", APP_SOURCE)
+        self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
+        self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
+
+    def test_every_summary_table_uses_clickable_header_sorting(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        for title in ["Platform Summary", "Market Summary", "Track Summary", "Source Summary"]:
+            with self.subTest(title=title):
+                section = step_six.split(f'section_title("{title}"', 1)[1]
+                self.assertIn("render_sortable_summary_table_v68_46(", section)
+        kol_function = APP_SOURCE.split("def render_kol_size_performance_v68_15", 1)[1].split(
+            "def bar_list", 1
+        )[0]
+        self.assertIn("render_sortable_summary_table_v68_46(", kol_function)
+
+    def test_group_summary_metrics_remain_numeric_for_header_sorting(self):
+        table = self.prepare_summary_table(
+            pd.DataFrame([{
+                "Track": "Song", "Posts": "2", "Average Views": "1,100,000",
+                "Average Engagements": "66,000", "Average Engagement Rate": "6.00%",
+                "Shares Rate": "0.21%", "Saves Rate": "0.33%",
+            }]),
+            ["Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        )
+        for column in ["Posts", "Average Views", "Average Engagements"]:
+            self.assertIn(table[column].dtype.kind, "iu")
+        for column in ["Average Engagement Rate", "Shares Rate", "Saves Rate"]:
+            self.assertIn(table[column].dtype.kind, "f")
 
 
 if __name__ == "__main__":

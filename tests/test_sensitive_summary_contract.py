@@ -168,11 +168,14 @@ class SummaryCopyContractTests(unittest.TestCase):
             "summary_market_v28",
             "summary_track_v28",
             "summary_type_v55",
-            "summary_metric_v28",
-            "summary_sort_v28",
         ]:
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)
+
+    def test_separate_summary_sort_controls_are_removed(self):
+        self.assertNotIn('"Sort post table by"', APP_SOURCE)
+        self.assertNotIn('key="summary_metric_v28"', APP_SOURCE)
+        self.assertNotIn('key="summary_sort_v28"', APP_SOURCE)
 
     def test_blank_card_explanations_are_not_rendered(self):
         kpi = self.summary_kpi_row([("Views", "38.7M", "", "kpi-blue")])

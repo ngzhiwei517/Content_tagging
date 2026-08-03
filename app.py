@@ -3414,6 +3414,133 @@ def sort_summary_performance_v68_18(
     return summary.sort_values(by, ascending=ascending)
 
 
+SUMMARY_INTEGER_COLUMNS_V68_46 = {
+    "Posts",
+    "Followers",
+    "Views",
+    "Likes",
+    "Comments",
+    "Shares",
+    "Saves",
+    "Total Engagement",
+    "Average Views",
+    "Average Engagements",
+}
+SUMMARY_PERCENT_COLUMNS_V68_46 = {
+    "Engagement Rate",
+    "Average Engagement Rate",
+    "Likes Rate",
+    "Comments Rate",
+    "Shares Rate",
+    "Saves Rate",
+}
+TOP_POST_TABLE_COLUMNS_V68_46 = [
+    "Platform",
+    "Creator",
+    "Market",
+    "Track",
+    "Creative Type",
+    "Followers",
+    "KOL Size",
+    "Views",
+    "Total Engagement",
+    "Engagement Rate",
+    "Link",
+]
+
+
+def prepare_sortable_summary_table_v68_46(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Select table columns while preserving numeric values for header sorting."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns or [])
+    table = df.copy()
+    if columns:
+        table = table[[column for column in columns if column in table.columns]].copy()
+    for column in table.columns:
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
+            table[column] = table[column].map(clean_num).astype("int64")
+        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
+            table[column] = pd.to_numeric(
+                table[column].astype(str).str.replace("%", "", regex=False),
+                errors="coerce",
+            )
+    return table
+
+
+def render_sortable_summary_table_v68_46(
+    df: pd.DataFrame,
+    *,
+    columns: List[str],
+    max_visible_rows: int,
+) -> None:
+    """Render a Summary table with native ascending/descending header sorting."""
+    table = prepare_sortable_summary_table_v68_46(df, columns)
+    if table.empty:
+        st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
+        return
+
+    column_config = {}
+    for column in table.columns:
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(column, format="localized")
+        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(column, format="%.2f%%")
+    if "Link" in table.columns:
+        column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open post")
+
+    visible_rows = min(max(len(table), 1), max_visible_rows)
+    st.dataframe(
+        table,
+        hide_index=True,
+        width="stretch",
+        height=38 + (visible_rows * 35),
+        column_config=column_config,
+    )
+
+
+def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep post metrics numeric so Streamlit header sorting is accurate."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=TOP_POST_TABLE_COLUMNS_V68_46)
+
+    top_posts = df.copy()
+    if "Market Display" in top_posts.columns:
+        top_posts["Market"] = top_posts["Market Display"]
+    if "Track Display" in top_posts.columns:
+        top_posts["Track"] = top_posts["Track Display"]
+
+    for column in ["Followers", "Views", "Total Engagement"]:
+        if column not in top_posts.columns:
+            top_posts[column] = 0
+        top_posts[column] = top_posts[column].map(clean_num).astype("int64")
+
+    top_posts["Engagement Rate"] = top_posts.apply(
+        lambda row: (
+            row["Total Engagement"] / row["Views"] * 100
+            if row["Views"] else 0.0
+        ),
+        axis=1,
+    )
+
+    for column in TOP_POST_TABLE_COLUMNS_V68_46:
+        if column not in top_posts.columns:
+            top_posts[column] = ""
+
+    # Preserve the former default view. Users can then click any header to
+    # toggle ascending or descending order without separate controls.
+    return prepare_sortable_summary_table_v68_46(
+        top_posts,
+        TOP_POST_TABLE_COLUMNS_V68_46,
+    ).sort_values(
+        ["Views", "Total Engagement"],
+        ascending=[False, False],
+        kind="stable",
+    )
+
+
 def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: str) -> None:
     """Render KOL reach and average engagement as the final analysis section."""
     st.markdown("<div class='card'>" + section_title("KOL Size Performance", "#14b8a6"), unsafe_allow_html=True)
@@ -3487,7 +3614,11 @@ def render_kol_size_performance_v68_15(filtered: pd.DataFrame, market_filter: st
         "Average_Shares_Rate": "Shares Rate",
         "Average_Saves_Rate": "Saves Rate",
     })
-    st.markdown(render_table(kol_table, max_rows=40, cols=kol_cols), unsafe_allow_html=True)
+    render_sortable_summary_table_v68_46(
+        kol_table,
+        columns=kol_cols,
+        max_visible_rows=12,
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -4675,12 +4806,11 @@ elif st.session_state.step == 6:
     with f4:
         type_opts = ["All"] + sorted(work["Primary Creative Type"].dropna().unique().tolist())
         type_filter = st.selectbox("Creative Type", type_opts, key="summary_type_v55")
-    m1, m2 = st.columns([1, 1])
-    metric_choices = ["Views", "Total Engagement", "Likes", "Comments", "Shares", "Saves", "Followers", "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate"]
-    with m1:
-        focus_metric = st.selectbox("Sort post table by", metric_choices, key="summary_metric_v28")
-    with m2:
-        sort_order = st.selectbox("Order", ["Highest first", "Lowest first"], key="summary_sort_v28")
+    # Summary sections retain the former default order. Every Summary table
+    # can then be sorted directly from its column headings.
+    focus_metric = "Views"
+    sort_order = "Highest first"
+    st.caption("Click any table column heading to sort ascending or descending.")
 
     filtered = work.copy()
     if platform_filter != "All":
@@ -4753,11 +4883,11 @@ elif st.session_state.step == 6:
             "Average_Saves_Rate": "Saves Rate",
         })
         platform_summary = sort_summary_performance_v68_18(platform_summary, focus_metric, sort_order)
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             platform_summary,
-            max_rows=4,
-            cols=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=4,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
@@ -4773,11 +4903,11 @@ elif st.session_state.step == 6:
         market_summary = sort_summary_performance_v68_18(
             market_summary, focus_metric, sort_order
         )
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             market_summary,
-            max_rows=12,
-            cols=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=12,
+        )
     else:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -4795,11 +4925,11 @@ elif st.session_state.step == 6:
     track_summary = sort_summary_performance_v68_18(
         track_summary, focus_metric, sort_order
     )
-    st.markdown(render_table(
+    render_sortable_summary_table_v68_46(
         track_summary,
-        max_rows=12,
-        cols=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-    ), unsafe_allow_html=True)
+        columns=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        max_visible_rows=12,
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
@@ -4835,23 +4965,22 @@ elif st.session_state.step == 6:
         source_summary = sort_summary_performance_v68_18(
             source_summary, focus_metric, sort_order
         )
-        st.markdown(render_table(
+        render_sortable_summary_table_v68_46(
             source_summary,
-            max_rows=12,
-            cols=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-        ), unsafe_allow_html=True)
+            columns=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+            max_visible_rows=12,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     if has_metrics:
-        st.markdown("<div class='card'>" + section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
-        top_posts = filtered.copy()
-        sort_col = focus_metric if focus_metric in top_posts.columns else "Views"
-        top_posts = top_posts.sort_values([sort_col, "Total Engagement"], ascending=[sort_order == "Lowest first", False])
-        top_posts["Engagement Rate"] = top_posts.apply(lambda r: f"{(r['Total Engagement']/r['Views']*100):.1f}%" if r["Views"] else "—", axis=1)
-        top_posts["Track"] = top_posts["Track Display"]
-        top_posts["Market"] = top_posts["Market Display"]
-        st.markdown(render_table(top_posts, max_rows=15, cols=["Platform", "Creator", "Market", "Track", "Creative Type", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate", "Link"]), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
+            top_posts = prepare_sortable_top_posts_v68_46(filtered)
+            render_sortable_summary_table_v68_46(
+                top_posts,
+                columns=TOP_POST_TABLE_COLUMNS_V68_46,
+                max_visible_rows=15,
+            )
 
     # Keep KOL performance last among the analytical sections.
     render_kol_size_performance_v68_15(filtered, market_filter)
@@ -4861,8 +4990,6 @@ elif st.session_state.step == 6:
     summary_df = filtered.copy()
     summary_df["Market"] = summary_df["Market Display"]
     summary_df["Track"] = summary_df["Track Display"]
-    sort_col = focus_metric if focus_metric in summary_df.columns else "Views"
-
     st.markdown("<div class='card'>" + section_title("Downloads", "#6254e8"), unsafe_allow_html=True)
     # Clean marketing export: no QA/debug columns here.
     # QA Priority / QA Reason / validation details belong only in the Review / QA Report.
