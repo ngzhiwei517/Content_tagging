@@ -95,7 +95,6 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
         namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
-        cls.creator_kol_summary = staticmethod(load_function("creator_kol_size_summary_v68_50", namespace))
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -265,25 +264,12 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(int(summary.loc[0, "Average Engagement"]), 75)
         self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 7.5)
 
-    def test_kol_size_chart_averages_creator_rates_from_same_table(self):
-        creator_table = pd.DataFrame([
-            {"Creator": "Alice", "KOL Size": "Micro", "Total Views": 1_000, "Average Engagement Rate": 10.0},
-            {"Creator": "Bob", "KOL Size": "Micro", "Total Views": 3_000, "Average Engagement Rate": 20.0},
-            {"Creator": "Cara", "KOL Size": "Macro", "Total Views": 5_000, "Average Engagement Rate": 8.0},
-        ])
-        summary = self.creator_kol_summary(creator_table).set_index("KOL Size")
-        self.assertEqual(int(summary.loc["Micro", "Creator Groups"]), 2)
-        self.assertAlmostEqual(
-            float(summary.loc["Micro", "Average Creator Engagement Rate"]),
-            15.0,
-        )
-
-    def test_creator_section_contains_only_engagement_rate_kol_size_chart(self):
+    def test_creator_section_does_not_render_kol_size_comparison(self):
         creator_section = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
             "def bar_list", 1
         )[0]
-        self.assertNotIn("Average Creator Views by KOL Size", creator_section)
-        self.assertIn("Creator Engagement Rate by KOL Size", creator_section)
+        self.assertNotIn("KOL Size Performance", creator_section)
+        self.assertNotIn("by KOL Size", creator_section)
 
     def test_group_summary_metrics_remain_numeric_for_header_sorting(self):
         table = self.prepare_summary_table(

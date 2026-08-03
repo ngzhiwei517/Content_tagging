@@ -3836,35 +3836,6 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
     return summary, missing_creator_posts
 
 
-def creator_kol_size_summary_v68_50(creator_table: pd.DataFrame) -> pd.DataFrame:
-    """Summarize three-month creator performance by KOL size for charts."""
-    columns = [
-        "KOL Size", "Creator Groups", "Average Creator Engagement Rate",
-    ]
-    if creator_table is None or creator_table.empty:
-        return pd.DataFrame(columns=columns)
-
-    working = creator_table.copy()
-    for column in ["Average Engagement Rate"]:
-        if column not in working.columns:
-            working[column] = 0
-        working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0)
-    if "KOL Size" not in working.columns:
-        working["KOL Size"] = "Unknown"
-    working["KOL Size"] = working["KOL Size"].map(
-        lambda value: display_empty(value, "Unknown")
-    )
-
-    summary = working.groupby("KOL Size", dropna=False).agg(
-        Creator_Groups=("KOL Size", "size"),
-        Average_Creator_Engagement_Rate=("Average Engagement Rate", "mean"),
-    ).reset_index().rename(columns={
-        "Creator_Groups": "Creator Groups",
-        "Average_Creator_Engagement_Rate": "Average Creator Engagement Rate",
-    })
-    return summary[columns]
-
-
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
     """Render the creator-level campaign contribution leaderboard."""
     with st.container(border=True):
@@ -3900,21 +3871,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             st.caption(
                 f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
                 "are excluded from this ranking."
-            )
-
-        kol_summary = creator_kol_size_summary_v68_50(creator_table)
-        if not kol_summary.empty:
-            st.markdown("**KOL Size Performance**")
-            chart_bar(
-                kol_summary.sort_values(
-                    "Average Creator Engagement Rate",
-                    ascending=False,
-                ),
-                "KOL Size",
-                "Average Creator Engagement Rate",
-                "Creator Engagement Rate by KOL Size",
-                orientation="h",
-                value_format="percent",
             )
 
         render_sortable_summary_table_v68_46(
