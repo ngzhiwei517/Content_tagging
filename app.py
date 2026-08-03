@@ -3582,6 +3582,7 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Saves",
     "Total Engagement",
     "Total Views",
+    "Average Engagement",
     "Average Views",
     "Average Engagements",
 }
@@ -3701,16 +3702,19 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
-    """Aggregate one transparent campaign-performance row per creator.
+    """Aggregate the latest three months available per creator.
 
     Creators stay separate by platform and market. Total engagement prefers the
     available Likes + Comments + Shares + Saves components so an inconsistent
     uploaded total cannot inflate the leaderboard; an existing Total Engagement
-    value remains the fallback when no component engagement is available.
+    value remains the fallback when no component engagement is available. The
+    three-month window ends on the newest dated post in the current filtered
+    data, allowing historical campaign batches to retain a meaningful window.
     """
     columns = [
         "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
-        "Total Views", "Total Engagement", "Engagement Rate",
+        "Total Views", "Total Engagement", "Average Engagement",
+        "Average Engagement Rate",
     ]
     if filtered is None or filtered.empty:
         return pd.DataFrame(columns=columns), 0
@@ -3720,6 +3724,22 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         if column not in working.columns:
             working[column] = 0
         working[column] = pd.to_numeric(working[column], errors="coerce")
+
+    parsed_dates = pd.to_datetime(
+        working.apply(canonical_post_date, axis=1),
+        errors="coerce",
+        utc=True,
+    ).dt.tz_convert(None).dt.normalize()
+    valid_dates = parsed_dates.dropna()
+    window_start = None
+    window_end = None
+    undated_posts = 0
+    if not valid_dates.empty:
+        window_end = valid_dates.max()
+        window_start = window_end - pd.DateOffset(months=3)
+        in_window = parsed_dates.between(window_start, window_end, inclusive="both")
+        undated_posts = int(parsed_dates.isna().sum())
+        working = working[in_window].copy()
 
     working["Creator Display"] = working.get(
         "Creator",
@@ -3764,6 +3784,12 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         component_engagement.gt(0),
         working["Total Engagement"].fillna(0),
     )
+    working["Creator Engagement Rate"] = (
+        working["Creator Engagement"]
+        .div(working["Views"].where(working["Views"].gt(0)))
+        .mul(100)
+        .fillna(0.0)
+    )
 
     def representative_kol_size(values) -> str:
         available = [
@@ -3783,28 +3809,60 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         KOL_Size=("KOL Size Display", representative_kol_size),
         Total_Views=("Views", "sum"),
         Total_Engagement=("Creator Engagement", "sum"),
+        Average_Engagement=("Creator Engagement", "mean"),
+        Average_Engagement_Rate=("Creator Engagement Rate", "mean"),
     ).reset_index()
-    summary["Engagement Rate"] = summary.apply(
-        lambda row: (
-            float(row["Total_Engagement"]) / float(row["Total_Views"]) * 100
-            if float(row["Total_Views"] or 0) > 0
-            else 0.0
-        ),
-        axis=1,
-    )
     summary = summary.rename(columns={
         "Platform Display": "Platform",
         "Market Display": "Market",
         "KOL_Size": "KOL Size",
         "Total_Views": "Total Views",
         "Total_Engagement": "Total Engagement",
+        "Average_Engagement": "Average Engagement",
+        "Average_Engagement_Rate": "Average Engagement Rate",
     })
     summary = summary[columns].sort_values(
         ["Total Engagement", "Total Views", "Posts", "Creator"],
         ascending=[False, False, False, True],
         kind="stable",
     ).reset_index(drop=True)
+    summary.attrs["date_window_start"] = (
+        window_start.date().isoformat() if window_start is not None else ""
+    )
+    summary.attrs["date_window_end"] = (
+        window_end.date().isoformat() if window_end is not None else ""
+    )
+    summary.attrs["undated_posts_excluded"] = undated_posts
     return summary, missing_creator_posts
+
+
+def creator_kol_size_summary_v68_50(creator_table: pd.DataFrame) -> pd.DataFrame:
+    """Summarize three-month creator performance by KOL size for charts."""
+    columns = [
+        "KOL Size", "Creator Groups", "Average Creator Engagement Rate",
+    ]
+    if creator_table is None or creator_table.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = creator_table.copy()
+    for column in ["Average Engagement Rate"]:
+        if column not in working.columns:
+            working[column] = 0
+        working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0)
+    if "KOL Size" not in working.columns:
+        working["KOL Size"] = "Unknown"
+    working["KOL Size"] = working["KOL Size"].map(
+        lambda value: display_empty(value, "Unknown")
+    )
+
+    summary = working.groupby("KOL Size", dropna=False).agg(
+        Creator_Groups=("KOL Size", "size"),
+        Average_Creator_Engagement_Rate=("Average Engagement Rate", "mean"),
+    ).reset_index().rename(columns={
+        "Creator_Groups": "Creator Groups",
+        "Average_Creator_Engagement_Rate": "Average Creator Engagement Rate",
+    })
+    return summary[columns]
 
 
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
@@ -3818,17 +3876,53 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 unsafe_allow_html=True,
             )
             return
-        st.caption("One row per creator, ranked by total engagement. Engagement rate uses combined engagement divided by combined views.")
+        window_start = creator_table.attrs.get("date_window_start")
+        window_end = creator_table.attrs.get("date_window_end")
+        undated_posts = int(creator_table.attrs.get("undated_posts_excluded", 0) or 0)
+        if window_start and window_end:
+            st.caption(
+                "Creator metrics use the latest three months available in this data "
+                f"({pd.Timestamp(window_start).strftime('%d %b %Y')} to "
+                f"{pd.Timestamp(window_end).strftime('%d %b %Y')}) "
+                "and are ranked by total engagement."
+            )
+        else:
+            st.caption(
+                "Post dates are unavailable, so creator metrics use all posts in the current view. "
+                "Rows are ranked by total engagement."
+            )
+        if undated_posts:
+            st.caption(
+                f"{undated_posts:,} post{'s' if undated_posts != 1 else ''} without a date "
+                "are excluded from the three-month creator metrics."
+            )
         if missing_creator_posts:
             st.caption(
                 f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
                 "are excluded from this ranking."
             )
+
+        kol_summary = creator_kol_size_summary_v68_50(creator_table)
+        if not kol_summary.empty:
+            st.markdown("**KOL Size Performance**")
+            chart_bar(
+                kol_summary.sort_values(
+                    "Average Creator Engagement Rate",
+                    ascending=False,
+                ),
+                "KOL Size",
+                "Average Creator Engagement Rate",
+                "Creator Engagement Rate by KOL Size",
+                orientation="h",
+                value_format="percent",
+            )
+
         render_sortable_summary_table_v68_46(
             creator_table,
             columns=[
                 "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
-                "Total Views", "Total Engagement", "Engagement Rate",
+                "Total Views", "Total Engagement", "Average Engagement",
+                "Average Engagement Rate",
             ],
             max_visible_rows=15,
         )
