@@ -921,6 +921,9 @@ DEFAULT_STATE = {
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
     "track_date_settings_v68": {},
+    "date_start_v68": date.today(),
+    "date_end_v68": date.today(),
+    "date_window_days_v68": None,
     "qa_gemini_model_v68_41_4": DEFAULT_GEMINI_MODEL,
     "comparison_run_id_v68_41_4": "",
     "comparison_run_started_utc_v68_41_4": "",
@@ -979,6 +982,11 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "rank_metrics",
     "group_by",
     "use_date_filter",
+    "date_start_v68",
+    "date_end_v68",
+    "date_window_days_v68",
+    # Retained so older recovery links using a centre date and radius can be
+    # migrated to the new inclusive start/end date range.
     "date_window",
     "viral_date",
     "replace_unavailable_posts",
@@ -1292,16 +1300,56 @@ def _restore_runtime_checkpoint_v68_15() -> None:
                     value = saved_state[key]
                     if key in RUNTIME_DATAFRAME_KEYS_V68_15:
                         value = _checkpoint_dataframe_from_payload_v68_15(value)
-                    elif key == "viral_date" and safe_str(value):
+                    elif key in {"viral_date", "date_start_v68", "date_end_v68"} and safe_str(value):
                         parsed = pd.to_datetime(value, errors="coerce")
                         value = parsed.date() if not pd.isna(parsed) else date.today()
                     elif key == "track_date_settings_v68" and isinstance(value, dict):
                         for setting in value.values():
-                            if isinstance(setting, dict) and safe_str(setting.get("date")):
-                                parsed = pd.to_datetime(setting.get("date"), errors="coerce")
+                            if not isinstance(setting, dict):
+                                continue
+                            for date_key in ("date", "start", "end"):
+                                if not safe_str(setting.get(date_key)):
+                                    continue
+                                parsed = pd.to_datetime(setting.get(date_key), errors="coerce")
                                 if not pd.isna(parsed):
-                                    setting["date"] = parsed.date()
+                                    setting[date_key] = parsed.date()
                     st.session_state[key] = value
+
+                # Recovery checkpoints created before the start/end redesign
+                # stored a centre date plus a symmetric radius. Preserve the
+                # exact old range, but leave the new optional duration blank.
+                if "date_start_v68" not in saved_state and safe_str(saved_state.get("viral_date")):
+                    legacy_center = pd.to_datetime(saved_state.get("viral_date"), errors="coerce")
+                    try:
+                        legacy_radius = max(0, int(saved_state.get("date_window", 0) or 0))
+                    except (TypeError, ValueError):
+                        legacy_radius = 0
+                    if not pd.isna(legacy_center):
+                        st.session_state.date_start_v68 = (
+                            legacy_center - pd.Timedelta(days=legacy_radius)
+                        ).date()
+                        st.session_state.date_end_v68 = (
+                            legacy_center + pd.Timedelta(days=legacy_radius)
+                        ).date()
+                        st.session_state.date_window_days_v68 = None
+
+                legacy_track_radius = saved_state.get("date_window", 0)
+                try:
+                    legacy_track_radius = max(0, int(legacy_track_radius or 0))
+                except (TypeError, ValueError):
+                    legacy_track_radius = 0
+                for setting in (st.session_state.get("track_date_settings_v68", {}) or {}).values():
+                    if not isinstance(setting, dict) or "start" in setting or not safe_str(setting.get("date")):
+                        continue
+                    legacy_center = pd.to_datetime(setting.get("date"), errors="coerce")
+                    if pd.isna(legacy_center):
+                        continue
+                    setting["start"] = (
+                        legacy_center - pd.Timedelta(days=legacy_track_radius)
+                    ).date()
+                    setting["end"] = (
+                        legacy_center + pd.Timedelta(days=legacy_track_radius)
+                    ).date()
                 restored = any(
                     isinstance(st.session_state.get(key), pd.DataFrame)
                     and not st.session_state.get(key).empty
@@ -1626,19 +1674,70 @@ def inferred_viral_date_for_track_v68(rows: pd.DataFrame, track_name: str):
     return unique_dates[0] if len(unique_dates) == 1 else None
 
 
+def optional_date_window_days_v68(value) -> Optional[int]:
+    """Return a positive optional duration, or ``None`` for the N/A state."""
+    if value is None or safe_str(value) == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def resolved_date_range_v68(
+    start_date=None,
+    end_date=None,
+    window_days=None,
+    *,
+    legacy_center=None,
+    legacy_radius_days=None,
+):
+    """Return inclusive start/end timestamps for new and legacy date settings.
+
+    New settings use a start date and either a manual end date or an optional
+    inclusive duration (for example, 1 July plus 7 days ends on 7 July). Older
+    checkpoints used a centre date and symmetric radius; those values remain
+    supported so existing recovery links keep the same selected posts.
+    """
+    start = pd.to_datetime(start_date, errors="coerce")
+    if not pd.isna(start):
+        duration = optional_date_window_days_v68(window_days)
+        if duration is not None:
+            return start.normalize(), (start + pd.Timedelta(days=duration - 1)).normalize()
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(end) or end < start:
+            return pd.NaT, pd.NaT
+        return start.normalize(), end.normalize()
+
+    center = pd.to_datetime(legacy_center, errors="coerce")
+    if pd.isna(center):
+        return pd.NaT, pd.NaT
+    try:
+        radius = max(0, int(legacy_radius_days or 0))
+    except (TypeError, ValueError):
+        radius = 0
+    return (
+        (center - pd.Timedelta(days=radius)).normalize(),
+        (center + pd.Timedelta(days=radius)).normalize(),
+    )
+
+
 def filter_posts_by_date_window_v68(
     rows: pd.DataFrame,
     parsed_dates: pd.Series,
-    window_days: int,
+    window_days=None,
     global_date=None,
     track_settings: Optional[Dict[str, Dict]] = None,
     track_col: str = "Track Display",
+    global_start=None,
+    global_end=None,
 ) -> pd.DataFrame:
-    """Apply one shared date window or independent windows for selected tracks.
+    """Apply one shared inclusive date range or independent track ranges.
 
     In per-track mode, a track with ``enabled=False`` is intentionally left
-    unfiltered because not every campaign track is viral. An enabled track with
-    no usable post date is excluded because it cannot be confirmed in-window.
+    unfiltered. An enabled track with no usable date range or post date is
+    excluded because it cannot be confirmed in-range.
     """
     if rows is None or rows.empty:
         return rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame()
@@ -1646,14 +1745,17 @@ def filter_posts_by_date_window_v68(
     out = rows.copy()
     parsed = pd.Series(parsed_dates, index=out.index)
     parsed = pd.to_datetime(parsed, errors="coerce")
-    days = max(0, int(window_days or 0))
 
     if track_settings is None:
-        center = pd.to_datetime(global_date, errors="coerce")
-        if pd.isna(center):
-            return out
-        start = center - pd.Timedelta(days=days)
-        end = center + pd.Timedelta(days=days)
+        start, end = resolved_date_range_v68(
+            global_start,
+            global_end,
+            window_days,
+            legacy_center=global_date,
+            legacy_radius_days=window_days,
+        )
+        if pd.isna(start) or pd.isna(end):
+            return out.iloc[0:0].copy()
         return out.loc[parsed.between(start, end).fillna(False)].copy()
 
     keep = pd.Series(True, index=out.index, dtype=bool)
@@ -1666,12 +1768,17 @@ def filter_posts_by_date_window_v68(
         setting = raw_setting if isinstance(raw_setting, dict) else {}
         if not bool(setting.get("enabled", False)):
             continue
-        center = pd.to_datetime(setting.get("date"), errors="coerce")
-        if pd.isna(center):
-            continue
+        start, end = resolved_date_range_v68(
+            setting.get("start"),
+            setting.get("end"),
+            window_days,
+            legacy_center=setting.get("date"),
+            legacy_radius_days=window_days,
+        )
         track_mask = track_values.eq(str(track_name))
-        start = center - pd.Timedelta(days=days)
-        end = center + pd.Timedelta(days=days)
+        if pd.isna(start) or pd.isna(end):
+            keep.loc[track_mask] = False
+            continue
         keep.loc[track_mask] = parsed.loc[track_mask].between(start, end).fillna(False)
     return out.loc[keep].copy()
 
@@ -1686,11 +1793,27 @@ def reset_date_filter_state_v68() -> None:
     st.session_state.use_date_filter = False
     st.session_state.date_filter_scope_v68 = DATE_SCOPE_SHARED
     st.session_state.track_date_settings_v68 = {}
+    for state_key in (
+        "date_start_v68",
+        "date_end_v68",
+        "date_window_days_v68",
+        "viral_date",
+        "date_window",
+    ):
+        st.session_state.pop(state_key, None)
     for key in list(st.session_state.keys()):
         key_text = str(key)
-        if key_text in {"date_filter_scope_widget_v68", "track_date_window_widget_v68"} or key_text.startswith((
+        if key_text in {
+            "date_filter_scope_widget_v68",
+            "date_start_widget_v68",
+            "date_end_widget_v68",
+            "date_window_days_widget_v68",
+            "track_date_window_widget_v68",
+        } or key_text.startswith((
             "track_date_enabled_v68_",
             "track_date_value_v68_",
+            "track_date_start_v68_",
+            "track_date_end_v68_",
         )):
             del st.session_state[key]
 
@@ -2133,7 +2256,12 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
 
     if st.session_state.get("use_date_filter"):
         parsed = out.apply(canonical_post_date, axis=1)
-        window_days = int(st.session_state.get("date_window", 7))
+        has_new_window_state = "date_window_days_v68" in st.session_state
+        window_days = (
+            st.session_state.get("date_window_days_v68")
+            if has_new_window_state
+            else st.session_state.get("date_window", 7)
+        )
         date_scope = st.session_state.get("date_filter_scope_v68", DATE_SCOPE_SHARED)
         if date_scope == DATE_SCOPE_PER_TRACK:
             out = filter_posts_by_date_window_v68(
@@ -2148,6 +2276,8 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
                 parsed,
                 window_days,
                 global_date=st.session_state.get("viral_date"),
+                global_start=st.session_state.get("date_start_v68"),
+                global_end=st.session_state.get("date_end_v68"),
             )
 
     if out.empty:
@@ -4070,7 +4200,7 @@ elif st.session_state.step == 3:
                 unsafe_allow_html=True,
             )
 
-        st.session_state.use_date_filter = st.checkbox("Limit posts to a date window", value=st.session_state.get("use_date_filter", False))
+        st.session_state.use_date_filter = st.checkbox("Limit posts to a date range", value=st.session_state.get("use_date_filter", False))
         if st.session_state.use_date_filter:
             # Only show tracks still eligible after the optional Market/Track/Source
             # filters. This keeps the per-track date form short and relevant.
@@ -4119,62 +4249,156 @@ elif st.session_state.step == 3:
                 date_scope = DATE_SCOPE_SHARED
             st.session_state.date_filter_scope_v68 = date_scope
 
+            window_widget_key = "date_window_days_widget_v68"
+            if window_widget_key not in st.session_state:
+                st.session_state[window_widget_key] = optional_date_window_days_v68(
+                    st.session_state.get("date_window_days_v68")
+                )
+            current_window_days = optional_date_window_days_v68(
+                st.session_state.get(window_widget_key)
+            )
+
             if date_scope == DATE_SCOPE_PER_TRACK:
-                st.session_state.date_window = st.number_input(
-                    "Date window (± days)",
+                selected_window_days = st.number_input(
+                    "Window length (days, optional)",
                     min_value=1,
                     max_value=60,
-                    value=int(st.session_state.get("date_window", 7)),
-                    key="track_date_window_widget_v68",
+                    step=1,
+                    placeholder="N/A",
+                    key=window_widget_key,
+                    help="Leave blank to choose an end date for every track.",
                 )
-                st.caption("Choose a date for each track. Turn off Include for non-viral tracks.")
+                current_window_days = optional_date_window_days_v68(selected_window_days)
+                st.session_state.date_window_days_v68 = current_window_days
+                st.caption(
+                    "Choose a start and end date for each track. If a window length is entered, "
+                    "each end date is calculated automatically. Turn off Include to leave a track unfiltered."
+                )
                 old_settings = st.session_state.get("track_date_settings_v68", {}) or {}
                 next_settings: Dict[str, Dict] = {}
                 for track_name in date_track_names:
                     old_setting = old_settings.get(track_name, {}) if isinstance(old_settings, dict) else {}
                     inferred_date = inferred_viral_date_for_track_v68(date_scope_df, track_name)
-                    stored_date = input_post_date(old_setting.get("date"))
-                    default_date = (
-                        stored_date.date()
-                        if not pd.isna(stored_date)
-                        else inferred_date or st.session_state.get("viral_date", date.today())
+                    stored_start = input_post_date(old_setting.get("start"))
+                    stored_end = input_post_date(old_setting.get("end"))
+                    legacy_center = input_post_date(old_setting.get("date"))
+                    if pd.isna(stored_start) and not pd.isna(legacy_center):
+                        legacy_radius = int(st.session_state.get("date_window", 0) or 0)
+                        stored_start = legacy_center - pd.Timedelta(days=legacy_radius)
+                        stored_end = legacy_center + pd.Timedelta(days=legacy_radius)
+                    default_start = (
+                        stored_start.date()
+                        if not pd.isna(stored_start)
+                        else inferred_date or st.session_state.get("date_start_v68", date.today())
                     )
+                    default_end = stored_end.date() if not pd.isna(stored_end) else default_start
                     suffix = track_date_widget_suffix_v68(track_name)
+                    include_key = f"track_date_enabled_v68_{suffix}"
+                    start_key = f"track_date_start_v68_{suffix}"
+                    end_key = f"track_date_end_v68_{suffix}"
+                    if include_key not in st.session_state:
+                        st.session_state[include_key] = bool(old_setting.get("enabled", True))
+                    if start_key not in st.session_state:
+                        st.session_state[start_key] = default_start
+                    if end_key not in st.session_state:
+                        st.session_state[end_key] = default_end
+                    if current_window_days is not None:
+                        st.session_state[end_key] = (
+                            pd.Timestamp(st.session_state[start_key])
+                            + pd.Timedelta(days=current_window_days - 1)
+                        ).date()
                     with st.container(border=True):
-                        track_col, use_col, date_col = st.columns([2.2, 0.75, 1.05], vertical_alignment="bottom")
+                        track_col, use_col, start_col, end_col = st.columns(
+                            [1.9, 0.7, 1.05, 1.05],
+                            vertical_alignment="bottom",
+                        )
                         with track_col:
                             st.markdown(f"**{esc(track_name)}**")
                         with use_col:
                             use_track_date = st.checkbox(
                                 "Include",
-                                value=bool(old_setting.get("enabled", True)),
-                                key=f"track_date_enabled_v68_{suffix}",
+                                key=include_key,
                             )
-                        with date_col:
-                            track_date = st.date_input(
-                                f"Viral date for {track_name}",
-                                value=default_date,
+                        with start_col:
+                            track_start = st.date_input(
+                                f"Start date for {track_name}",
                                 disabled=not use_track_date,
-                                key=f"track_date_value_v68_{suffix}",
+                                key=start_key,
+                                label_visibility="collapsed",
+                            )
+                        with end_col:
+                            track_end = st.date_input(
+                                f"End date for {track_name}",
+                                disabled=not use_track_date or current_window_days is not None,
+                                key=end_key,
                                 label_visibility="collapsed",
                             )
                     next_settings[track_name] = {
                         "enabled": bool(use_track_date),
-                        "date": track_date.isoformat(),
+                        "start": track_start.isoformat(),
+                        "end": track_end.isoformat(),
                     }
+                    if use_track_date and current_window_days is None and track_end < track_start:
+                        st.error(f"End date must be on or after the start date for {track_name}.")
                 st.session_state.track_date_settings_v68 = next_settings
             else:
-                c1, c2 = st.columns(2)
+                start_widget_key = "date_start_widget_v68"
+                end_widget_key = "date_end_widget_v68"
+                if start_widget_key not in st.session_state:
+                    st.session_state[start_widget_key] = st.session_state.get("date_start_v68", date.today())
+                if end_widget_key not in st.session_state:
+                    st.session_state[end_widget_key] = st.session_state.get(
+                        "date_end_v68",
+                        st.session_state[start_widget_key],
+                    )
+                if current_window_days is not None:
+                    st.session_state[end_widget_key] = (
+                        pd.Timestamp(st.session_state[start_widget_key])
+                        + pd.Timedelta(days=current_window_days - 1)
+                    ).date()
+
+                c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.session_state.viral_date = st.date_input("Date", value=st.session_state.get("viral_date", date.today()))
+                    selected_start = st.date_input("Start date", key=start_widget_key)
                 with c2:
-                    st.session_state.date_window = st.number_input("Date window (± days)", min_value=1, max_value=60, value=int(st.session_state.get("date_window", 7)))
-                window_start = pd.Timestamp(st.session_state.viral_date) - pd.Timedelta(days=int(st.session_state.date_window))
-                window_end = pd.Timestamp(st.session_state.viral_date) + pd.Timedelta(days=int(st.session_state.date_window))
-                st.caption(
-                    f"Date range: {window_start.strftime('%d %b %Y')} to {window_end.strftime('%d %b %Y')}. "
-                    "Post dates from links or uploaded files are used when available."
+                    selected_end = st.date_input(
+                        "End date",
+                        disabled=current_window_days is not None,
+                        key=end_widget_key,
+                        help="Calculated automatically when a window length is entered.",
+                    )
+                with c3:
+                    selected_window_days = st.number_input(
+                        "Window length (days, optional)",
+                        min_value=1,
+                        max_value=60,
+                        step=1,
+                        placeholder="N/A",
+                        key=window_widget_key,
+                        help="Leave blank to use the end date. Seven days includes the start date.",
+                    )
+                current_window_days = optional_date_window_days_v68(selected_window_days)
+                resolved_start, resolved_end = resolved_date_range_v68(
+                    selected_start,
+                    selected_end,
+                    current_window_days,
                 )
+                st.session_state.date_start_v68 = selected_start
+                st.session_state.date_end_v68 = selected_end
+                st.session_state.date_window_days_v68 = current_window_days
+                if pd.isna(resolved_start) or pd.isna(resolved_end):
+                    st.error("End date must be on or after the start date.")
+                else:
+                    source_note = (
+                        f"{current_window_days}-day window; end date calculated automatically"
+                        if current_window_days is not None
+                        else "start and end dates selected manually"
+                    )
+                    st.caption(
+                        f"Date range: {resolved_start.strftime('%d %b %Y')} to "
+                        f"{resolved_end.strftime('%d %b %Y')} ({source_note}). "
+                        "Post dates from links or uploaded files are used when available."
+                    )
         if st.session_state.selection_mode == "Top posts":
             # Top N must remain complete, so genuinely unavailable posts are
             # always replaced by the next eligible ranked candidate.
@@ -4191,17 +4415,35 @@ elif st.session_state.step == 3:
                 track: setting for track, setting in active_settings.items()
                 if isinstance(setting, dict) and bool(setting.get("enabled", False))
             }
+            active_window_days = optional_date_window_days_v68(
+                st.session_state.get("date_window_days_v68")
+            )
+            range_label = (
+                f"{active_window_days}-day windows"
+                if active_window_days is not None
+                else "manual start/end dates"
+            )
             st.markdown(
                 "<div class='good-note'><b>Date filter on</b> · "
-                f"{len(enabled_settings)} tracks · ±{int(st.session_state.get('date_window', 7))} days</div>",
+                f"{len(enabled_settings)} tracks · {range_label}</div>",
                 unsafe_allow_html=True,
             )
-        elif st.session_state.get("viral_date"):
-            active_window_start = pd.Timestamp(st.session_state.viral_date) - pd.Timedelta(days=int(st.session_state.get("date_window", 7)))
-            active_window_end = pd.Timestamp(st.session_state.viral_date) + pd.Timedelta(days=int(st.session_state.get("date_window", 7)))
+        else:
+            active_window_start, active_window_end = resolved_date_range_v68(
+                st.session_state.get("date_start_v68"),
+                st.session_state.get("date_end_v68"),
+                st.session_state.get("date_window_days_v68"),
+                legacy_center=st.session_state.get("viral_date"),
+                legacy_radius_days=st.session_state.get("date_window"),
+            )
+            active_label = (
+                f"{active_window_start.strftime('%d %b %Y')}–{active_window_end.strftime('%d %b %Y')}"
+                if not pd.isna(active_window_start) and not pd.isna(active_window_end)
+                else "invalid date range"
+            )
             st.markdown(
                 "<div class='good-note'><b>Date filter on</b> · "
-                f"{active_window_start.strftime('%d %b %Y')}–{active_window_end.strftime('%d %b %Y')}</div>",
+                f"{active_label}</div>",
                 unsafe_allow_html=True,
             )
 
