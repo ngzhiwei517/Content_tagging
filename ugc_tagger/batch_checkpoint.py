@@ -34,6 +34,8 @@ def _utc_now() -> str:
 
 def _json_safe(value):
     """Return a JSON-compatible value without serialising credentials."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return None
     if isinstance(value, dict):
         cleaned = {}
         for key, item in value.items():
@@ -43,6 +45,17 @@ def _json_safe(value):
                 "token" in key_normalized
                 or "api_key" in key_normalized
                 or key_normalized in {"authorization", "cookie", "cookies", "password", "secret"}
+                or key_normalized in {
+                    "downloaded_media",
+                    "media_bytes",
+                    "video_bytes",
+                    "image_bytes",
+                    "audio_bytes",
+                    "local_media_path",
+                    "local_video_path",
+                    "local_image_path",
+                    "local_audio_path",
+                }
             ):
                 continue
             cleaned[key_text] = _json_safe(item)
@@ -63,6 +76,15 @@ def dataframe_to_payload(df: pd.DataFrame) -> Dict:
     """Convert a DataFrame to a portable JSON payload without pickle."""
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame()
+    blocked = re.compile(
+        r"api[ _-]*key|token|secret|password|authorization|database[ _-]*url|connection[ _-]*string|"
+        r"download(?:ed)?[ _-]*media|(?:media|video|image|audio)[ _-]*(?:bytes|blob)|"
+        r"local[ _-]*(?:media|video|image|audio)[ _-]*path",
+        re.IGNORECASE,
+    )
+    safe_columns = [column for column in df.columns if not blocked.search(str(column).strip())]
+    df = df.loc[:, safe_columns].copy()
+    df = df.map(lambda item: None if isinstance(item, (bytes, bytearray, memoryview)) else item)
     return json.loads(
         df.to_json(
             orient="split",
@@ -116,10 +138,12 @@ class BatchCheckpointStore:
         *,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         retention_hours: int = DEFAULT_RETENTION_HOURS,
+        persistent_store=None,
     ) -> None:
         self.root = Path(root)
         self.chunk_size = max(1, int(chunk_size))
         self.retention_hours = max(1, int(retention_hours))
+        self.persistent_store = persistent_store
 
     def _job_id(self, runtime_id: str, fingerprint: str) -> str:
         seed = f"{runtime_id}:{fingerprint}:{self.chunk_size}"
@@ -155,7 +179,7 @@ class BatchCheckpointStore:
         return self._partial_dir(job_id, chunk_index) / f"row_{int(row_position):05d}.json"
 
     @staticmethod
-    def _atomic_write_json(path: Path, payload) -> None:
+    def _write_local_json(path: Path, payload) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(
@@ -163,6 +187,62 @@ class BatchCheckpointStore:
             encoding="utf-8",
         )
         os.replace(temporary, path)
+
+    def _object_key(self, path: Path) -> str:
+        return path.relative_to(self.root).as_posix()
+
+    def _atomic_write_json(self, path: Path, payload) -> None:
+        self._write_local_json(path, payload)
+        if self.persistent_store is not None:
+            try:
+                self.persistent_store.save(self._object_key(path), payload)
+            except Exception:
+                pass
+
+    def _read_json(self, path: Path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+        if self.persistent_store is None:
+            return None
+        try:
+            payload = self.persistent_store.load(self._object_key(path))
+            if isinstance(payload, (dict, list)):
+                self._write_local_json(path, payload)
+                return payload
+        except Exception:
+            pass
+        return None
+
+    def _hydrate_prefix(self, prefix: str) -> None:
+        if self.persistent_store is None:
+            return
+        try:
+            objects = self.persistent_store.list_prefix(prefix)
+        except Exception:
+            return
+        for key, payload in objects.items():
+            try:
+                destination = self.root / Path(key)
+                destination.relative_to(self.root)
+                self._write_local_json(destination, payload)
+            except (OSError, ValueError, TypeError):
+                continue
+
+    def _delete_remote(self, key: str) -> None:
+        if self.persistent_store is not None:
+            try:
+                self.persistent_store.delete(key)
+            except Exception:
+                pass
+
+    def _delete_remote_prefix(self, prefix: str) -> None:
+        if self.persistent_store is not None:
+            try:
+                self.persistent_store.delete_prefix(prefix)
+            except Exception:
+                pass
 
     def cleanup_old_jobs(self) -> None:
         """Remove abandoned runtime data after the retention window."""
@@ -242,12 +322,7 @@ class BatchCheckpointStore:
 
     def load_manifest(self, job_id: str) -> Optional[Dict]:
         path = self._manifest_path(job_id)
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        payload = self._read_json(path)
         return payload if isinstance(payload, dict) else None
 
     def save_manifest(self, manifest: Dict) -> Dict:
@@ -260,6 +335,7 @@ class BatchCheckpointStore:
         """Recover chunk files written immediately before an interruption."""
         reconciled = dict(manifest)
         job_id = reconciled["job_id"]
+        self._hydrate_prefix(f"{job_id}/")
         total_chunks = int(reconciled.get("total_chunks", 0))
         completed = [
             index
@@ -328,19 +404,16 @@ class BatchCheckpointStore:
 
     def load_scraped_records(self, job_id: str, chunk_index: int) -> Optional[List[Dict]]:
         path = self._records_path(job_id, chunk_index)
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        payload = self._read_json(path)
         return payload if isinstance(payload, list) else None
 
     def discard_scraped_records(self, job_id: str, chunk_index: int) -> None:
+        path = self._records_path(job_id, chunk_index)
         try:
-            self._records_path(job_id, chunk_index).unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError:
             pass
+        self._delete_remote(self._object_key(path))
 
     def save_partial_row(
         self,
@@ -374,6 +447,7 @@ class BatchCheckpointStore:
     def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
         """Return saved row positions for one incomplete chunk."""
         directory = self._partial_dir(job_id, chunk_index)
+        self._hydrate_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
         if not directory.exists():
             return []
         positions: List[int] = []
@@ -392,9 +466,8 @@ class BatchCheckpointStore:
         frames: List[pd.DataFrame] = []
         for position in self.partial_positions(job_id, chunk_index):
             path = self._partial_row_path(job_id, chunk_index, position)
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            payload = self._read_json(path)
+            if payload is None:
                 continue
             frame = dataframe_from_payload(payload)
             if len(frame) == 1:
@@ -413,6 +486,7 @@ class BatchCheckpointStore:
         directory = self._partial_dir(job_id, chunk_index)
         if directory.exists():
             shutil.rmtree(directory)
+        self._delete_remote_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
 
     def save_completed_chunk(
         self,
@@ -482,9 +556,8 @@ class BatchCheckpointStore:
         job_id = manifest["job_id"]
         for index in sorted(int(item) for item in manifest.get("completed_chunks", [])):
             path = self._chunk_path(job_id, index)
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            payload = self._read_json(path)
+            if payload is None:
                 continue
             frame = dataframe_from_payload(payload)
             if not frame.empty:
@@ -515,3 +588,4 @@ class BatchCheckpointStore:
         directory = self._job_dir(job_id)
         if directory.exists():
             shutil.rmtree(directory)
+        self._delete_remote_prefix(f"{self._validated_job_id(job_id)}/")

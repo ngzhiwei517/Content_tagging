@@ -21,7 +21,7 @@ import requests
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +30,11 @@ import ugc_tagger.final_update2_adapter as _final_update2_adapter
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
+)
+from ugc_tagger.persistent_checkpoint import (
+    PersistentCheckpointConfig,
+    RecoveryCheckpointObjects,
+    create_persistent_checkpoint_backend,
 )
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.model_comparison import (
@@ -983,6 +988,12 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_elapsed_v68_41_4",
 )
 RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
+RUNTIME_BLOCKED_COLUMN_V68_44 = re.compile(
+    r"api[ _-]*key|token|secret|password|authorization|database[ _-]*url|connection[ _-]*string|"
+    r"download(?:ed)?[ _-]*media|(?:media|video|image|audio)[ _-]*(?:bytes|blob)|"
+    r"local[ _-]*(?:media|video|image|audio)[ _-]*path",
+    re.IGNORECASE,
+)
 
 
 # Runtime checkpoint persistence
@@ -998,6 +1009,19 @@ def _checkpoint_dataframe_to_payload_v68_15(df: pd.DataFrame) -> Dict:
     """Convert a DataFrame to a JSON-safe payload without using pickle."""
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame()
+    regex_module = __import__("re")
+    blocked = globals().get(
+        "RUNTIME_BLOCKED_COLUMN_V68_44",
+        regex_module.compile(
+            r"api[ _-]*key|token|secret|password|authorization|database[ _-]*url|connection[ _-]*string|"
+            r"download(?:ed)?[ _-]*media|(?:media|video|image|audio)[ _-]*(?:bytes|blob)|"
+            r"local[ _-]*(?:media|video|image|audio)[ _-]*path",
+            regex_module.IGNORECASE,
+        ),
+    )
+    safe_columns = [column for column in df.columns if not blocked.search(str(column).strip())]
+    df = df.loc[:, safe_columns].copy()
+    df = df.map(lambda item: None if isinstance(item, (bytes, bytearray, memoryview)) else item)
     return json.loads(
         df.to_json(
             orient="split",
@@ -1021,6 +1045,21 @@ def _checkpoint_dataframe_from_payload_v68_15(payload) -> pd.DataFrame:
     if isinstance(index, list) and len(index) == len(restored):
         restored.index = index
     return restored
+
+
+def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
+    """Return whether workflow state contains at least one meaningful post."""
+    if not hasattr(state, "get"):
+        return False
+    for key in RUNTIME_DATAFRAME_KEYS_V68_15:
+        value = state.get(key)
+        if isinstance(value, pd.DataFrame) and not value.empty:
+            return True
+        if isinstance(value, dict):
+            rows = value.get("data")
+            if isinstance(rows, list) and bool(rows):
+                return True
+    return False
 
 
 def _runtime_checkpoint_path_v68_15(run_id: str) -> Path:
@@ -1047,6 +1086,147 @@ def _sync_runtime_query_v68_15() -> None:
         st.query_params["step"] = str(max(1, min(6, int(st.session_state.get("step", 1)))))
     except Exception:
         pass
+
+
+def _checkpoint_setting_v68_44(secret_name: str, environment_name: str) -> str:
+    """Read optional server-only checkpoint settings without session persistence."""
+    try:
+        checkpoint_secrets = st.secrets.get("checkpoint", {})
+        value = checkpoint_secrets.get(secret_name, "") if checkpoint_secrets else ""
+    except Exception:
+        value = ""
+    return safe_str(value or os.getenv(environment_name, ""))
+
+
+@st.cache_resource(show_spinner=False)
+def _persistent_checkpoint_backend_v68_44(
+    database_url: str,
+    supabase_url: str,
+    supabase_key: str,
+    table: str,
+):
+    return create_persistent_checkpoint_backend(
+        PersistentCheckpointConfig(
+            database_url=database_url,
+            supabase_url=supabase_url,
+            supabase_key=supabase_key,
+            table=table or "batch_checkpoint_objects",
+        )
+    )
+
+
+def _configured_checkpoint_backend_v68_44():
+    try:
+        return _persistent_checkpoint_backend_v68_44(
+            _checkpoint_setting_v68_44("database_url", "CHECKPOINT_DATABASE_URL"),
+            _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL"),
+            _checkpoint_setting_v68_44("supabase_key", "CHECKPOINT_SUPABASE_KEY"),
+            _checkpoint_setting_v68_44("table", "CHECKPOINT_TABLE") or "batch_checkpoint_objects",
+        )
+    except Exception:
+        return None
+
+
+def _checkpoint_objects_v68_44(run_id: str, *, prefix: str = ""):
+    run_id = _valid_runtime_id_v68_15(run_id)
+    backend = _configured_checkpoint_backend_v68_44()
+    if not run_id or backend is None:
+        return None
+    try:
+        return RecoveryCheckpointObjects(backend, run_id, prefix=prefix)
+    except Exception:
+        return None
+
+
+def _checkpoint_saved_at_v68_44(payload) -> datetime:
+    if not isinstance(payload, dict):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(safe_str(payload.get("saved_at")).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _load_local_runtime_checkpoint_v68_44(run_id: str):
+    path = _runtime_checkpoint_path_v68_15(run_id)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _load_remote_runtime_checkpoint_v68_44(run_id: str):
+    store = _checkpoint_objects_v68_44(run_id)
+    if store is None:
+        return None
+    try:
+        payload = store.load("runtime.json")
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _runtime_checkpoint_candidates_v68_44(run_id: str) -> List[Dict]:
+    return [
+        payload
+        for payload in (
+            _load_local_runtime_checkpoint_v68_44(run_id),
+            _load_remote_runtime_checkpoint_v68_44(run_id),
+        )
+        if isinstance(payload, dict)
+    ]
+
+
+def _new_runtime_recovery_id_v68_44() -> str:
+    run_id = uuid.uuid4().hex
+    st.session_state.runtime_run_id_v68_15 = run_id
+    st.session_state.runtime_restore_checked_v68_15 = True
+    _sync_runtime_query_v68_15()
+    return run_id
+
+
+def _request_runtime_recovery_v68_44(recovery_id: str) -> bool:
+    requested_id = _valid_runtime_id_v68_15(recovery_id)
+    if not requested_id or not _runtime_checkpoint_candidates_v68_44(requested_id):
+        return False
+    st.session_state.runtime_run_id_v68_15 = requested_id
+    st.session_state.runtime_restore_checked_v68_15 = False
+    try:
+        st.query_params["run"] = requested_id
+        st.query_params["step"] = "2"
+    except Exception:
+        pass
+    return True
+
+
+def _runtime_recovery_url_v68_44() -> str:
+    """Return a private link for the active batch without exposing credentials."""
+    run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
+    if not run_id:
+        return ""
+    step = str(max(1, min(6, int(st.session_state.get("step", 2)))))
+    try:
+        app_url = safe_str(st.context.url).rstrip("?")
+    except Exception:
+        app_url = ""
+    query = urlencode({"run": run_id, "step": step})
+    return f"{app_url}?{query}" if app_url else f"?{query}"
+
+
+@st.dialog("Save this batch")
+def _show_runtime_save_dialog_v68_44() -> None:
+    recovery_url = _runtime_recovery_url_v68_44()
+    st.markdown("**Your progress is already saved automatically.**")
+    st.caption("Bookmark this page, or copy the private link below to continue later.")
+    if recovery_url:
+        st.code(recovery_url, language=None)
+        st.caption("Use the copy button on the link. Keep it private because it can reopen this batch.")
+    else:
+        st.warning("The save link is not ready yet. Close this window and try again.")
 
 
 def _persist_runtime_checkpoint_v68_15() -> None:
@@ -1078,6 +1258,16 @@ def _persist_runtime_checkpoint_v68_15() -> None:
     except Exception:
         # A checkpoint must never block the tagging workflow.
         pass
+    # Do not create remote rows for anonymous visits or empty test sessions.
+    # Local checkpointing remains available from the first render.
+    if not _runtime_checkpoint_has_posts_v68_44(state_payload):
+        return
+    remote_store = _checkpoint_objects_v68_44(run_id)
+    if remote_store is not None:
+        try:
+            remote_store.save("runtime.json", payload)
+        except Exception:
+            pass
 
 
 def _restore_runtime_checkpoint_v68_15() -> None:
@@ -1090,10 +1280,10 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     run_id = requested_id or uuid.uuid4().hex
     st.session_state.runtime_run_id_v68_15 = run_id
     restored = False
-    path = _runtime_checkpoint_path_v68_15(run_id)
-    if requested_id and path.exists():
+    if requested_id:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            candidates = _runtime_checkpoint_candidates_v68_44(run_id)
+            payload = max(candidates, key=_checkpoint_saved_at_v68_44) if candidates else {}
             saved_state = payload.get("state", {}) if isinstance(payload, dict) else {}
             if isinstance(saved_state, dict):
                 for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
@@ -1560,6 +1750,13 @@ def normalize_market(v: str) -> str:
     return mapping.get(s, "")
 
 
+def infer_market_from_filename(source_name: str) -> str:
+    """Return a campaign market from a leading filename tag such as ``[TH]``."""
+    basename = re.split(r"[\\/]", safe_str(source_name))[-1]
+    match = re.match(r"^\s*[\[(]\s*([^\])]+?)\s*[\])]", basename)
+    return normalize_market(match.group(1)) if match else ""
+
+
 def unique_columns(cols: List[str]) -> List[str]:
     seen: Dict[str, int] = {}
     out: List[str] = []
@@ -1712,6 +1909,7 @@ def standardize_file_rows(
     df: pd.DataFrame,
     source_name: str,
     platform: str = "",
+    fallback_market: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
@@ -1731,6 +1929,7 @@ def standardize_file_rows(
                 track = filename_track
             if not artist:
                 artist = filename_artist
+        row_market = normalize_market(r.get(cols["market"])) if cols.get("market") else ""
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
         shares = clean_num(r.get(cols["shares"])) if cols.get("shares") else 0
@@ -1747,7 +1946,9 @@ def standardize_file_rows(
             "Source": source_name,
             "Input Type": "CSV/XLSX",
             "Link": link,
-            "Market": normalize_market(r.get(cols["market"])) if cols.get("market") else "",
+            # Explicit row data remains authoritative. The per-file selector is
+            # only a fallback for exports that keep market context in filenames.
+            "Market": row_market or normalize_market(fallback_market),
             "Track": track,
             "Campaign Artist": artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
@@ -2269,9 +2470,13 @@ def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str
 
 def _large_batch_store_v68_43() -> BatchCheckpointStore:
     """Return the durable store used only for large Tag every link runs."""
+    runtime_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
     return BatchCheckpointStore(
         TAGGING_CHECKPOINT_DIR_V68_43,
         chunk_size=DEFAULT_CHUNK_SIZE,
+        persistent_store=_checkpoint_objects_v68_44(runtime_id, prefix="tagging"),
     )
 
 
@@ -3363,6 +3568,27 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         unsafe_allow_html=True,
     )
 
+if _runtime_checkpoint_has_posts_v68_44(st.session_state):
+    if st.button(
+        "Save this batch",
+        icon=":material/bookmark:",
+        key="runtime_save_batch_button_v68_44",
+    ):
+        _show_runtime_save_dialog_v68_44()
+
+with st.expander("Open a saved batch", expanded=False):
+    st.caption("Normally, just open your saved link. If you only have a recovery ID, paste it here.")
+    recovery_id_input = st.text_input(
+        "Recovery ID",
+        placeholder="Paste a 32-character recovery ID",
+        key="runtime_recovery_input_v68_44",
+    )
+    if st.button("Open saved batch", key="runtime_recovery_button_v68_44"):
+        if _request_runtime_recovery_v68_44(recovery_id_input):
+            st.rerun()
+        else:
+            st.error("No saved batch was found for that recovery ID.")
+
 # STEP 2: Add posts
 if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
@@ -3392,26 +3618,66 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
-            for f in files:
-                try:
-                    df = read_any_table(f)
-                    std, cols = standardize_file_rows(df, f.name)
-                    parsed_frames.append(std)
-                    platforms = sorted([
-                        p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
-                        if safe_str(p)
-                    ])
-                    markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
-                    tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
-                    summary_rows.append({
-                        "File": f.name,
-                        "Posts": len(std),
-                        "Platforms": ", ".join(platforms) if platforms else "Not detected",
-                        "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
-                        "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
-                    })
-                except Exception as e:
-                    errors.append(f"{f.name}: {e}")
+            with st.expander("Confirm markets for uploaded files", expanded=True):
+                st.caption("Markets in the file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
+                for f in files:
+                    try:
+                        df = read_any_table(f)
+                        detected_cols = detect_columns(df)
+                        explicit_markets = []
+                        if detected_cols.get("market"):
+                            explicit_markets = sorted({
+                                normalize_market(value)
+                                for value in df[detected_cols["market"]].tolist()
+                                if normalize_market(value)
+                            })
+
+                        fallback_market = ""
+                        market_source = "From file"
+                        if explicit_markets:
+                            st.caption(f"{f.name} — Market in file: {', '.join(explicit_markets)}")
+                        else:
+                            filename_market = infer_market_from_filename(f.name)
+                            default_choice = filename_market or "Other / no market"
+                            file_key = hashlib.sha1(
+                                f"{f.name}:{len(f.getvalue())}".encode("utf-8")
+                            ).hexdigest()[:12]
+                            market_choice = st.selectbox(
+                                f.name,
+                                MARKET_OPTIONS,
+                                index=MARKET_OPTIONS.index(default_choice),
+                                key=f"uploaded_file_market_v68_45_{file_key}",
+                                help=(
+                                    "Detected from the filename. Change it if needed."
+                                    if filename_market
+                                    else "No market was found in the file or filename. Select one if applicable."
+                                ),
+                            )
+                            fallback_market = "" if market_choice == "Other / no market" else market_choice
+                            market_source = "Filename / selection" if fallback_market else "Not specified"
+
+                        std, cols = standardize_file_rows(
+                            df,
+                            f.name,
+                            fallback_market=fallback_market,
+                        )
+                        parsed_frames.append(std)
+                        platforms = sorted([
+                            p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
+                            if safe_str(p)
+                        ])
+                        markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
+                        tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        summary_rows.append({
+                            "File": f.name,
+                            "Posts": len(std),
+                            "Platforms": ", ".join(platforms) if platforms else "Not detected",
+                            "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
+                            "Market source": market_source,
+                            "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                        })
+                    except Exception as e:
+                        errors.append(f"{f.name}: {e}")
             if summary_rows:
                 st.markdown(render_table(pd.DataFrame(summary_rows), max_rows=10), unsafe_allow_html=True)
             if errors:
@@ -4682,6 +4948,7 @@ elif st.session_state.step == 6:
             st.session_state.tagged_df = pd.DataFrame()
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
+            _new_runtime_recovery_id_v68_44()
             go(2)
 
 _persist_runtime_checkpoint_v68_15()
