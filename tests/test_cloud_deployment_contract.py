@@ -1,3 +1,6 @@
+import ast
+import inspect
+import logging
 import unittest
 from pathlib import Path
 
@@ -14,9 +17,59 @@ REQUIREMENT_NAMES = {
     line.split("==", 1)[0].split(">=", 1)[0].split("<=", 1)[0].split("<", 1)[0].strip().lower()
     for line in REQUIREMENTS
 }
+APP_TREE = ast.parse(APP_SOURCE)
+
+
+def load_function(name, namespace):
+    node = next(
+        item for item in APP_TREE.body
+        if isinstance(item, ast.FunctionDef) and item.name == name
+    )
+    module = ast.Module(body=[node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(ROOT / "app.py"), "exec"), namespace)
+    return namespace[name]
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
+    def test_checkpoint_store_falls_back_when_hot_reload_keeps_legacy_class(self):
+        class LegacyCheckpointStore:
+            def __init__(self, root, *, chunk_size):
+                self.root = root
+                self.chunk_size = chunk_size
+
+        namespace = {
+            "Path": Path,
+            "BatchCheckpointStore": LegacyCheckpointStore,
+            "DEFAULT_CHUNK_SIZE": 50,
+            "inspect": inspect,
+            "LOGGER": logging.getLogger(__name__),
+        }
+        create_store = load_function("_create_batch_checkpoint_store_v68_48", namespace)
+        remote = object()
+        store = create_store(Path("checkpoint"), persistent_store=remote)
+        self.assertIsInstance(store, LegacyCheckpointStore)
+        self.assertEqual(store.chunk_size, 50)
+
+    def test_checkpoint_store_uses_persistence_after_cold_start(self):
+        class CurrentCheckpointStore:
+            def __init__(self, root, *, chunk_size, persistent_store=None):
+                self.root = root
+                self.chunk_size = chunk_size
+                self.persistent_store = persistent_store
+
+        namespace = {
+            "Path": Path,
+            "BatchCheckpointStore": CurrentCheckpointStore,
+            "DEFAULT_CHUNK_SIZE": 50,
+            "inspect": inspect,
+            "LOGGER": logging.getLogger(__name__),
+        }
+        create_store = load_function("_create_batch_checkpoint_store_v68_48", namespace)
+        remote = object()
+        store = create_store(Path("checkpoint"), persistent_store=remote)
+        self.assertIs(store.persistent_store, remote)
+
     def test_streamlit_cloud_uses_a_fixed_light_theme(self):
         for setting in [
             'base = "light"',
