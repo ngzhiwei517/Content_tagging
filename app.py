@@ -3839,14 +3839,13 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
 def creator_kol_size_summary_v68_50(creator_table: pd.DataFrame) -> pd.DataFrame:
     """Summarize three-month creator performance by KOL size for charts."""
     columns = [
-        "KOL Size", "Creator Groups", "Average Creator Views",
-        "Average Creator Engagement Rate",
+        "KOL Size", "Creator Groups", "Average Creator Engagement Rate",
     ]
     if creator_table is None or creator_table.empty:
         return pd.DataFrame(columns=columns)
 
     working = creator_table.copy()
-    for column in ["Total Views", "Average Engagement Rate"]:
+    for column in ["Average Engagement Rate"]:
         if column not in working.columns:
             working[column] = 0
         working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0)
@@ -3858,11 +3857,9 @@ def creator_kol_size_summary_v68_50(creator_table: pd.DataFrame) -> pd.DataFrame
 
     summary = working.groupby("KOL Size", dropna=False).agg(
         Creator_Groups=("KOL Size", "size"),
-        Average_Creator_Views=("Total Views", "mean"),
         Average_Creator_Engagement_Rate=("Average Engagement Rate", "mean"),
     ).reset_index().rename(columns={
         "Creator_Groups": "Creator Groups",
-        "Average_Creator_Views": "Average Creator Views",
         "Average_Creator_Engagement_Rate": "Average Creator Engagement Rate",
     })
     return summary[columns]
@@ -3908,28 +3905,17 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         kol_summary = creator_kol_size_summary_v68_50(creator_table)
         if not kol_summary.empty:
             st.markdown("**KOL Size Performance**")
-            views_col, rate_col = st.columns(2)
-            with views_col:
-                chart_bar(
-                    kol_summary.sort_values("Average Creator Views", ascending=False),
-                    "KOL Size",
-                    "Average Creator Views",
-                    "Average Creator Views by KOL Size",
-                    orientation="h",
-                    value_format="integer",
-                )
-            with rate_col:
-                chart_bar(
-                    kol_summary.sort_values(
-                        "Average Creator Engagement Rate",
-                        ascending=False,
-                    ),
-                    "KOL Size",
+            chart_bar(
+                kol_summary.sort_values(
                     "Average Creator Engagement Rate",
-                    "Average Creator Engagement Rate by KOL Size",
-                    orientation="h",
-                    value_format="percent",
-                )
+                    ascending=False,
+                ),
+                "KOL Size",
+                "Average Creator Engagement Rate",
+                "Creator Engagement Rate by KOL Size",
+                orientation="h",
+                value_format="percent",
+            )
 
         render_sortable_summary_table_v68_46(
             creator_table,
