@@ -2598,14 +2598,42 @@ def _route_sensitive_for_selection_v56(tagged: pd.DataFrame, selection_mode: str
 # Production tagging orchestration
 
 
+def _create_batch_checkpoint_store_v68_48(
+    root: Path,
+    *,
+    persistent_store=None,
+) -> BatchCheckpointStore:
+    """Create a checkpoint store across Streamlit Cloud hot reloads.
+
+    During a deployment, Streamlit can briefly execute the new ``app.py``
+    while retaining the previous in-memory ``batch_checkpoint`` module.  The
+    older constructor has no ``persistent_store`` parameter, so use its local
+    checkpoint behavior until the next cold process start instead of crashing
+    an active tagging run.
+    """
+    options = {"chunk_size": DEFAULT_CHUNK_SIZE}
+    try:
+        supports_persistence = (
+            "persistent_store" in inspect.signature(BatchCheckpointStore).parameters
+        )
+    except (TypeError, ValueError):
+        supports_persistence = False
+    if supports_persistence:
+        options["persistent_store"] = persistent_store
+    elif persistent_store is not None:
+        LOGGER.warning(
+            "Using the local batch checkpoint fallback during a Streamlit hot reload."
+        )
+    return BatchCheckpointStore(root, **options)
+
+
 def _large_batch_store_v68_43() -> BatchCheckpointStore:
     """Return the durable store used only for large Tag every link runs."""
     runtime_id = _valid_runtime_id_v68_15(
         st.session_state.get("runtime_run_id_v68_15")
     )
-    return BatchCheckpointStore(
+    return _create_batch_checkpoint_store_v68_48(
         TAGGING_CHECKPOINT_DIR_V68_43,
-        chunk_size=DEFAULT_CHUNK_SIZE,
         persistent_store=_checkpoint_objects_v68_44(runtime_id, prefix="tagging"),
     )
 
