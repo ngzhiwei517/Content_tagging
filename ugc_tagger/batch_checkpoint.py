@@ -191,13 +191,22 @@ class BatchCheckpointStore:
     def _object_key(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
 
-    def _atomic_write_json(self, path: Path, payload) -> None:
+    def _atomic_write_json(self, path: Path, payload) -> bool:
+        """Write locally and report whether the optional remote copy succeeded.
+
+        Local checkpoints remain the fallback when persistent storage is not
+        configured or temporarily unavailable.  Callers that compact several
+        remote objects into one larger object use the return value to avoid
+        deleting the smaller recovery copies before the larger copy is durable.
+        """
         self._write_local_json(path, payload)
         if self.persistent_store is not None:
             try:
                 self.persistent_store.save(self._object_key(path), payload)
+                return True
             except Exception:
                 pass
+        return False
 
     def _read_json(self, path: Path):
         try:
@@ -407,13 +416,20 @@ class BatchCheckpointStore:
         payload = self._read_json(path)
         return payload if isinstance(payload, list) else None
 
-    def discard_scraped_records(self, job_id: str, chunk_index: int) -> None:
+    def discard_scraped_records(
+        self,
+        job_id: str,
+        chunk_index: int,
+        *,
+        delete_remote: bool = True,
+    ) -> None:
         path = self._records_path(job_id, chunk_index)
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
-        self._delete_remote(self._object_key(path))
+        if delete_remote:
+            self._delete_remote(self._object_key(path))
 
     def save_partial_row(
         self,
@@ -482,11 +498,18 @@ class BatchCheckpointStore:
             kind="stable",
         ).reset_index(drop=True)
 
-    def discard_partial_results(self, job_id: str, chunk_index: int) -> None:
+    def discard_partial_results(
+        self,
+        job_id: str,
+        chunk_index: int,
+        *,
+        delete_remote: bool = True,
+    ) -> None:
         directory = self._partial_dir(job_id, chunk_index)
         if directory.exists():
             shutil.rmtree(directory)
-        self._delete_remote_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
+        if delete_remote:
+            self._delete_remote_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
 
     def save_completed_chunk(
         self,
@@ -498,7 +521,7 @@ class BatchCheckpointStore:
     ) -> Dict:
         """Save output before advancing the manifest, making resume idempotent."""
         job_id = manifest["job_id"]
-        self._atomic_write_json(
+        remote_chunk_saved = self._atomic_write_json(
             self._chunk_path(job_id, chunk_index),
             _json_safe(dataframe_to_payload(tagged.reset_index(drop=True))),
         )
@@ -530,8 +553,22 @@ class BatchCheckpointStore:
             else "running"
         )
         updated = self.save_manifest(updated)
-        self.discard_partial_results(job_id, chunk_index)
-        self.discard_scraped_records(job_id, chunk_index)
+        # The row-level objects are the last durable recovery point when a
+        # transient Supabase/Postgres failure prevents the compact chunk from
+        # being uploaded.  Always clear local temporary objects after the local
+        # chunk is written, but only remove their remote copies after the remote
+        # chunk save is confirmed.  A replacement Streamlit process can then
+        # rebuild the chunk without repeating completed Gemini work.
+        self.discard_partial_results(
+            job_id,
+            chunk_index,
+            delete_remote=remote_chunk_saved,
+        )
+        self.discard_scraped_records(
+            job_id,
+            chunk_index,
+            delete_remote=remote_chunk_saved,
+        )
         return updated
 
     def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
