@@ -2765,6 +2765,7 @@ def _large_batch_must_pause_v68_43(error) -> bool:
             "SERVICE UNAVAILABLE",
             "SSL",
             "503",
+            "REMOTE_CHECKPOINT_WRITE_FAILED",
         )
     )
 
@@ -2800,6 +2801,8 @@ def _large_batch_error_code_v68_43(error) -> str:
     ):
         return "PROVIDER_SERVICE"
     if isinstance(error, (OSError, PermissionError)):
+        return "CHECKPOINT_STORAGE"
+    if "REMOTE_CHECKPOINT_WRITE_FAILED" in text:
         return "CHECKPOINT_STORAGE"
     if "SYSTEMIC_TAGGING_FAILURE" in text:
         return "SYSTEMIC_TAGGING"
@@ -3064,13 +3067,21 @@ def _run_checkpointed_tag_every_link_v68_43(
                 pd.DataFrame([tagged_row]),
                 "Tag every link",
             )
-            store.save_partial_row(
+            remote_row_saved = store.save_partial_row(
                 manifest["job_id"],
                 next_chunk_index,
                 chunk_position,
                 routed_row.iloc[0],
-                persist_remote=False,
             )
+            # The immediately previous checkpoint class returned ``None`` even
+            # after a successful remote write. Only an explicit ``False`` from
+            # the current class proves that configured persistence failed. This
+            # keeps Streamlit's brief mixed-module hot-reload window compatible.
+            if (
+                getattr(store, "persistent_store", None) is not None
+                and remote_row_saved is False
+            ):
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
             saved_positions.add(chunk_position)
             if sensitive_count:
                 logs.append("Routed 1 sensitive post to human review.")
@@ -3097,9 +3108,8 @@ def _run_checkpointed_tag_every_link_v68_43(
                 on_result,
                 on_progress,
             )
-            # Supabase/Postgres is recovery storage, not part of every Gemini
-            # callback. Persist the five-row micro-batch before yielding so a
-            # Streamlit/container restart cannot send those posts to Gemini again.
+            # Also compact the individual remote rows into a periodic snapshot.
+            # Completed chunks replace these temporary recovery objects.
             if (
                 len(saved_positions) % REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52
                 == 0
@@ -5114,7 +5124,7 @@ elif st.session_state.step == 4:
         )
         st.info(
             "Large-batch protection is on. Apify runs are limited to 25 posts, "
-            "and every 5 completed tags are saved"
+            "and each completed tag is saved"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count

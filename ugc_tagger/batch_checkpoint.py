@@ -500,7 +500,7 @@ class BatchCheckpointStore:
         tagged_row,
         *,
         persist_remote: bool = True,
-    ) -> None:
+    ) -> bool:
         """Atomically save one completed row from the current chunk."""
         if int(row_position) < 0:
             raise ValueError("Partial row position must be non-negative.")
@@ -517,9 +517,9 @@ class BatchCheckpointStore:
         path = self._partial_row_path(job_id, chunk_index, row_position)
         payload = _json_safe(dataframe_to_payload(frame.reset_index(drop=True)))
         if persist_remote:
-            self._atomic_write_json(path, payload)
-        else:
-            self._write_local_json(path, payload)
+            return self._atomic_write_json(path, payload)
+        self._write_local_json(path, payload)
+        return False
 
     def save_partial_snapshot(self, job_id: str, chunk_index: int) -> bool:
         """Persist one compact snapshot for the current unfinished chunk."""

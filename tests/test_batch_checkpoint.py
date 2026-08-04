@@ -40,6 +40,29 @@ class BatchCheckpointStoreTests(unittest.TestCase):
             self.assertEqual(json.loads(destination.read_text()), {"saved_rows": 5})
             self.assertEqual(sleep.call_count, 2)
 
+    def test_partial_row_reports_remote_save_result(self):
+        class Remote:
+            def __init__(self, fail=False):
+                self.fail = fail
+
+            def save(self, _key, _payload):
+                if self.fail:
+                    raise RuntimeError("synthetic remote failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            row = {"Link": "https://www.tiktok.com/@creator/video/123"}
+            working = BatchCheckpointStore(
+                Path(directory) / "working",
+                persistent_store=Remote(),
+            )
+            failing = BatchCheckpointStore(
+                Path(directory) / "failing",
+                persistent_store=Remote(fail=True),
+            )
+            self.assertTrue(working.save_partial_row("a" * 32, 0, 0, row))
+            self.assertFalse(failing.save_partial_row("b" * 32, 0, 0, row))
+            self.assertEqual(failing.partial_positions("b" * 32, 0), [0])
+
     def sample_rows(self, count: int) -> pd.DataFrame:
         return pd.DataFrame(
             [
@@ -319,7 +342,9 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         )
         self.assertIn("store.save_completed_chunk(", self.source)
         self.assertIn("store.save_partial_row(", self.source)
-        self.assertIn("persist_remote=False", self.source)
+        self.assertIn("remote_row_saved is False", self.source)
+        self.assertIn('getattr(store, "persistent_store", None)', self.source)
+        self.assertIn("REMOTE_CHECKPOINT_WRITE_FAILED", self.source)
         self.assertIn("store.save_partial_snapshot(", self.source)
         self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
