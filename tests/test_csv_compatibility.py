@@ -246,6 +246,11 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertIn("fallback_market=fallback_market", APP_SOURCE)
         self.assertIn('st.expander("Confirm details for uploaded files"', APP_SOURCE)
         self.assertIn("Apply the same track and artist to all uploaded files", APP_SOURCE)
+        shared_toggle_block = APP_SOURCE.split(
+            '"Apply the same track and artist to all uploaded files"', 1
+        )[1].split(")", 1)[0]
+        self.assertIn("value=False", shared_toggle_block)
+        self.assertIn('key="apply_shared_uploaded_campaign_v68_52"', shared_toggle_block)
         self.assertIn("fallback_track=fallback_track", APP_SOURCE)
         self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)

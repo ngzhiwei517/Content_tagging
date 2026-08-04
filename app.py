@@ -4321,8 +4321,8 @@ if st.session_state.step == 2:
                 if len(files) > 1:
                     apply_shared_campaign = st.toggle(
                         "Apply the same track and artist to all uploaded files",
-                        value=True,
-                        key="apply_shared_uploaded_campaign_v68_51",
+                        value=False,
+                        key="apply_shared_uploaded_campaign_v68_52",
                     )
                 shared_track = ""
                 shared_artist = ""
