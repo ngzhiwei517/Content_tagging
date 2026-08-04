@@ -784,9 +784,11 @@ ENABLE_TIER2C_FULL_VIDEO_FALLBACK = True
 ENABLE_LEGACY_TIER0_VAGUE_SHORTCUT = False
 ENABLE_TARGETED_EVIDENCE_VERIFIER = True
 
-# Avoid silent multi-minute sleep loops on transient Gemini quota/server errors.
-# Rows that still fail after short retry are flagged for review instead of blocking the batch.
-GEMINI_BACKOFF_SECONDS = 20
+# Avoid silent multi-minute waits inside one Streamlit execution. Quota errors
+# pause immediately so the saved batch can resume with a replacement key;
+# transient provider errors receive only one short retry when one remains.
+GEMINI_BACKOFF_SECONDS = 5
+GEMINI_REQUEST_TIMEOUT_MS = 60_000
 
 
 class GeminiQuotaExhaustedError(RuntimeError):
@@ -805,6 +807,34 @@ def _is_gemini_quota_error(error) -> bool:
             "USAGE LIMIT",
         )
     )
+
+
+def _gemini_client(genai_module, types_module, gemini_key):
+    """Create a Gemini client with a bounded request timeout when supported."""
+    http_options_factory = getattr(types_module, 'HttpOptions', None)
+    if callable(http_options_factory):
+        try:
+            return genai_module.Client(
+                api_key=gemini_key,
+                http_options=http_options_factory(timeout=GEMINI_REQUEST_TIMEOUT_MS),
+            )
+        except TypeError:
+            # Keep compatibility with older SDK/test doubles that accept only
+            # the API key. Deployed google-genai versions use HttpOptions.
+            pass
+    return genai_module.Client(api_key=gemini_key)
+
+
+def _wait_for_transient_gemini_retry(error, attempt, max_retries):
+    """Pause quota immediately; briefly wait only when a retry remains."""
+    if _is_gemini_quota_error(error):
+        raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED") from None
+    text = str(error or '').upper()
+    has_retry = int(attempt) + 1 < int(max_retries)
+    if has_retry and ('503' in text or 'UNAVAILABLE' in text):
+        time.sleep(GEMINI_BACKOFF_SECONDS + random.randint(0, 2))
+        return True
+    return False
 
 NARRATIVE_OPTIONS = [
     'NA', 'Relationship', 'Friendship', 'Family', 'Lifestyle',
@@ -4466,7 +4496,7 @@ def _decode_gemini_json(text):
 def call_gemini(contents, gemini_key, max_retries=2):
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=gemini_key)
+    client = _gemini_client(genai, types, gemini_key)
     last_error = ''
     for attempt in range(max_retries):
         try:
@@ -4491,14 +4521,9 @@ def call_gemini(contents, gemini_key, max_retries=2):
         except Exception as e:
             err = str(e)
             last_error = err
-            if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-                wait = GEMINI_BACKOFF_SECONDS*(attempt+1) + random.randint(0,5)
-                time.sleep(wait)
-            elif '503' in err or 'UNAVAILABLE' in err:
-                wait = max(10, GEMINI_BACKOFF_SECONDS//2)*(attempt+1) + random.randint(0,5)
-                time.sleep(wait)
-            else:
-                return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
+            if _wait_for_transient_gemini_retry(err, attempt, max_retries):
+                continue
+            return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
     if _is_gemini_quota_error(last_error):
         raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
     return {
@@ -4513,7 +4538,7 @@ def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=gemini_key)
+    client = _gemini_client(genai, types, gemini_key)
     last_error = ''
     for attempt in range(max_retries):
         try:
@@ -4532,12 +4557,9 @@ def call_targeted_evidence_verifier(prompt, gemini_key, max_retries=2):
         except Exception as e:
             err = str(e)
             last_error = err
-            if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-                time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
-            elif '503' in err or 'UNAVAILABLE' in err:
-                time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
-            else:
-                return {'parse_error': True, 'reason': err}
+            if _wait_for_transient_gemini_retry(err, attempt, max_retries):
+                continue
+            return {'parse_error': True, 'reason': err}
     if _is_gemini_quota_error(last_error):
         raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
     return {'parse_error': True, 'reason': last_error or 'Targeted verifier retries exhausted'}
@@ -4548,7 +4570,7 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=gemini_key)
+    client = _gemini_client(genai, types, gemini_key)
     last_error = ''
     for attempt in range(max_retries):
         try:
@@ -4562,12 +4584,9 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
         except Exception as e:
             err = str(e)
             last_error = err
-            if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-                time.sleep(GEMINI_BACKOFF_SECONDS * (attempt + 1) + random.randint(0, 5))
-            elif '503' in err or 'UNAVAILABLE' in err:
-                time.sleep(max(10, GEMINI_BACKOFF_SECONDS // 2) * (attempt + 1) + random.randint(0, 5))
-            else:
-                return {'parse_error': True, 'review_reason': err}
+            if _wait_for_transient_gemini_retry(err, attempt, max_retries):
+                continue
+            return {'parse_error': True, 'review_reason': err}
     if _is_gemini_quota_error(last_error):
         raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
     return {
@@ -4763,7 +4782,7 @@ def call_gemini_video_file(video_path, prompt, gemini_key, max_retries=3):
     """
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=gemini_key)
+    client = _gemini_client(genai, types, gemini_key)
     uploaded = None
     try:
         uploaded = client.files.upload(file=video_path)
@@ -4816,12 +4835,9 @@ Return the same JSON schema only.
             except Exception as e:
                 err = str(e)
                 last_error = err
-                if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-                    time.sleep(GEMINI_BACKOFF_SECONDS*(attempt+1) + random.randint(0,5))
-                elif '503' in err or 'UNAVAILABLE' in err:
-                    time.sleep(max(10, GEMINI_BACKOFF_SECONDS//2)*(attempt+1) + random.randint(0,5))
-                else:
-                    return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
+                if _wait_for_transient_gemini_retry(err, attempt, max_retries):
+                    continue
+                return {'parse_error': True, 'raw_response': err, 'needs_human_review': True}
         if _is_gemini_quota_error(last_error):
             raise GeminiQuotaExhaustedError("GEMINI_QUOTA_EXHAUSTED")
         return {
