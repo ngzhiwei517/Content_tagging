@@ -4319,10 +4319,30 @@ if st.session_state.step == 2:
                 )
                 apply_shared_campaign = True
                 if len(files) > 1:
+                    shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"
+                    uploaded_files_signature = tuple(
+                        (
+                            safe_str(getattr(uploaded_file, "file_id", "")),
+                            safe_str(uploaded_file.name),
+                            int(getattr(uploaded_file, "size", 0) or 0),
+                        )
+                        for uploaded_file in files
+                    )
+                    signature_state_key = "uploaded_campaign_files_signature_v68_52"
+                    if (
+                        st.session_state.get(signature_state_key)
+                        != uploaded_files_signature
+                    ):
+                        # Every newly selected file set starts in per-file mode.
+                        # Users can still opt into shared campaign details after
+                        # the upload has settled without the next rerun undoing it.
+                        st.session_state[signature_state_key] = uploaded_files_signature
+                        st.session_state[shared_campaign_toggle_key] = False
+                    elif shared_campaign_toggle_key not in st.session_state:
+                        st.session_state[shared_campaign_toggle_key] = False
                     apply_shared_campaign = st.toggle(
                         "Apply the same track and artist to all uploaded files",
-                        value=False,
-                        key="apply_shared_uploaded_campaign_v68_52",
+                        key=shared_campaign_toggle_key,
                     )
                 shared_track = ""
                 shared_artist = ""

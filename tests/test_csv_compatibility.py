@@ -249,8 +249,19 @@ class CsvCompatibilityTests(unittest.TestCase):
         shared_toggle_block = APP_SOURCE.split(
             '"Apply the same track and artist to all uploaded files"', 1
         )[1].split(")", 1)[0]
-        self.assertIn("value=False", shared_toggle_block)
-        self.assertIn('key="apply_shared_uploaded_campaign_v68_52"', shared_toggle_block)
+        self.assertIn("key=shared_campaign_toggle_key", shared_toggle_block)
+        self.assertIn(
+            'shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"',
+            APP_SOURCE,
+        )
+        self.assertIn(
+            'signature_state_key = "uploaded_campaign_files_signature_v68_52"',
+            APP_SOURCE,
+        )
+        self.assertIn(
+            "st.session_state[shared_campaign_toggle_key] = False",
+            APP_SOURCE,
+        )
         self.assertIn("fallback_track=fallback_track", APP_SOURCE)
         self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)
