@@ -978,6 +978,11 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
 
 RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
 TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
+# Keep each live Streamlit execution deliberately short. The durable manifest
+# still uses 50-row chunks for backward-compatible recovery, while only this
+# many unfinished rows are analysed before yielding to a fresh script run.
+MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5
+REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 25
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
     "mode",
@@ -2997,10 +3002,13 @@ def _run_checkpointed_tag_every_link_v68_43(
         existing_positions = set(
             store.partial_positions(manifest["job_id"], next_chunk_index)
         )
-        remaining_positions = [
+        all_remaining_positions = [
             position
             for position in range(len(chunk))
             if position not in existing_positions
+        ]
+        remaining_positions = all_remaining_positions[
+            :MAX_LIVE_POSTS_PER_EXECUTION_V68_52
         ]
         remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
         saved_positions = set(existing_positions)
@@ -3016,6 +3024,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 next_chunk_index,
                 chunk_position,
                 routed_row.iloc[0],
+                persist_remote=False,
             )
             saved_positions.add(chunk_position)
             if sensitive_count:
@@ -3043,6 +3052,19 @@ def _run_checkpointed_tag_every_link_v68_43(
                 on_result,
                 on_progress,
             )
+            # Supabase/Postgres is recovery storage, not part of every Gemini
+            # callback. Local rows are durable on normal reruns; one compact
+            # remote snapshot per 25 saved rows avoids database overhead while
+            # keeping bounded cold-restart recovery.
+            if (
+                len(saved_positions) % REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52
+                == 0
+                and len(saved_positions) < len(chunk)
+            ):
+                store.save_partial_snapshot(
+                    manifest["job_id"],
+                    next_chunk_index,
+                )
 
         partial_chunk = store.load_partial_chunk_results(
             manifest["job_id"],
@@ -3057,7 +3079,29 @@ def _run_checkpointed_tag_every_link_v68_43(
             ).tolist()
         )
         if actual_positions != expected_positions:
-            raise RuntimeError("PARTIAL_CHECKPOINT_INCOMPLETE")
+            # This is an intentional yield, not a failure. Row checkpoints are
+            # already durable, so a fresh Streamlit execution can continue the
+            # same 50-row manifest without repeating completed Gemini calls.
+            partial = _attach_comparison_metadata_v68_43(
+                store.load_saved_results(manifest),
+                manifest,
+            )
+            if not partial.empty:
+                st.session_state.tagged_df = partial
+            saved_count = min(
+                total_rows,
+                completed_rows + len(actual_positions),
+            )
+            progress.progress(min(saved_count / total_rows, 1.0))
+            status.update(
+                label=(
+                    f"Saved {saved_count:,} of {total_rows:,} posts; "
+                    "continuing safely"
+                ),
+                state="complete",
+                expanded=False,
+            )
+            return None
         tagged_chunk = partial_chunk.drop(
             columns=["_checkpoint_row_position"],
             errors="ignore",

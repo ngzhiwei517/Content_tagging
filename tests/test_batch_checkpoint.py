@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -13,6 +14,32 @@ from ugc_tagger.batch_checkpoint import (
 
 
 class BatchCheckpointStoreTests(unittest.TestCase):
+    def test_atomic_local_write_retries_a_transient_permission_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "checkpoint.json"
+            real_replace = __import__("os").replace
+            attempts = 0
+
+            def transient_replace(source, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("temporarily locked")
+                return real_replace(source, target)
+
+            with patch(
+                "ugc_tagger.batch_checkpoint.os.replace",
+                side_effect=transient_replace,
+            ), patch("ugc_tagger.batch_checkpoint.time.sleep") as sleep:
+                BatchCheckpointStore._write_local_json(
+                    destination,
+                    {"saved_rows": 5},
+                )
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(json.loads(destination.read_text()), {"saved_rows": 5})
+            self.assertEqual(sleep.call_count, 2)
+
     def sample_rows(self, count: int) -> pd.DataFrame:
         return pd.DataFrame(
             [
@@ -280,10 +307,23 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
     def test_large_batch_uses_fifty_row_checkpoints_and_fresh_reruns(self):
         self.assertIn("DEFAULT_CHUNK_SIZE", self.source)
         self.assertIn("len(selected) > DEFAULT_CHUNK_SIZE", self.source)
+        self.assertIn("MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5", self.source)
+        self.assertIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 25", self.source)
+        self.assertIn(
+            ":MAX_LIVE_POSTS_PER_EXECUTION_V68_52",
+            self.source.replace(" ", "").replace("\n", ""),
+        )
         self.assertIn("store.save_completed_chunk(", self.source)
         self.assertIn("store.save_partial_row(", self.source)
+        self.assertIn("persist_remote=False", self.source)
+        self.assertIn("store.save_partial_snapshot(", self.source)
         self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
+
+    def test_incomplete_micro_batch_yields_without_marking_an_error(self):
+        self.assertIn("completed_rows + len(actual_positions)", self.source)
+        self.assertIn('"continuing safely"', self.source)
+        self.assertNotIn('raise RuntimeError("PARTIAL_CHECKPOINT_INCOMPLETE")', self.source)
 
     def test_resume_is_explicit_after_an_interrupted_session(self):
         self.assertIn('start_label = "Resume tagging"', self.source)
