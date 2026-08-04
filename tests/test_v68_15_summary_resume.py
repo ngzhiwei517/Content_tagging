@@ -100,6 +100,9 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.creative_type_chart_data = staticmethod(
             load_function("prepare_creative_type_chart_data_v68_49", namespace)
         )
+        cls.filter_summary = staticmethod(
+            load_function("filter_summary_by_selected_values_v68_50", namespace)
+        )
         cls.rendered_chart_figures = []
         chart_namespace = {
             "pd": pd,
@@ -172,6 +175,39 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
         self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
         self.assertNotIn("metric_for_chart = focus_metric", step_six)
+
+    def test_summary_filters_allow_multiple_values_and_empty_means_all(self):
+        rows = pd.DataFrame({
+            "Market Display": ["SG", "MY", "TH"],
+            "Primary Creative Type": ["Dance", "Lip Sync", "Dance"],
+        })
+        all_rows = self.filter_summary(rows, "Market Display", [])
+        selected_markets = self.filter_summary(rows, "Market Display", ["SG", "TH"])
+        combined = self.filter_summary(
+            selected_markets,
+            "Primary Creative Type",
+            ["Dance"],
+        )
+        self.assertEqual(len(all_rows), 3)
+        self.assertEqual(selected_markets["Market Display"].tolist(), ["SG", "TH"])
+        self.assertEqual(combined["Market Display"].tolist(), ["SG", "TH"])
+
+    def test_summary_ui_uses_five_multiselect_filters_with_fresh_keys(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        filter_block = step_six.split("# Combined filters", 1)[1].split(
+            "# Summary sections retain", 1
+        )[0]
+        self.assertEqual(filter_block.count("st.multiselect("), 5)
+        self.assertNotIn("st.selectbox(", filter_block)
+        self.assertEqual(filter_block.count('placeholder="All"'), 5)
+        for key in [
+            "summary_platform_multi_v68_50",
+            "summary_source_multi_v68_50",
+            "summary_market_multi_v68_50",
+            "summary_track_multi_v68_50",
+            "summary_type_multi_v68_50",
+        ]:
+            self.assertIn(key, filter_block)
 
     def test_creative_type_bar_hover_shows_post_number_and_percentage(self):
         self.rendered_chart_figures.clear()

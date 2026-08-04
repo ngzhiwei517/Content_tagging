@@ -162,12 +162,13 @@ class SummaryCopyContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertNotIn(phrase, APP_SOURCE)
 
-    def test_summary_filters_remain_available(self):
+    def test_summary_multiselect_filters_remain_available(self):
         for widget_key in [
-            "summary_source_v28",
-            "summary_market_v28",
-            "summary_track_v28",
-            "summary_type_v55",
+            "summary_platform_multi_v68_50",
+            "summary_source_multi_v68_50",
+            "summary_market_multi_v68_50",
+            "summary_track_multi_v68_50",
+            "summary_type_multi_v68_50",
         ]:
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)

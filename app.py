@@ -3639,6 +3639,17 @@ def render_creative_type_views_doughnut_v68_49(views_mix: pd.DataFrame) -> None:
     render_plotly_chart(fig)
 
 
+def filter_summary_by_selected_values_v68_50(
+    df: pd.DataFrame,
+    column: str,
+    selected_values: List[str],
+) -> pd.DataFrame:
+    """Apply OR within one Summary filter; an empty selection means All."""
+    if df is None or df.empty or column not in df.columns or not selected_values:
+        return df
+    return df[df[column].isin(selected_values)]
+
+
 def summary_kpi_row(items: List[Tuple[str, str, str, str]]) -> str:
     """Colored KPI cards for marketing Summary page."""
     cards = []
@@ -5343,37 +5354,64 @@ elif st.session_state.step == 6:
     # Combined filters: users can focus by platform + source + market + track + creative type.
     f0, f1, f2, f3, f4 = st.columns(5)
     with f0:
-        platform_opts = ["All"] + sorted(work["Platform Display"].dropna().unique().tolist())
-        platform_filter = st.selectbox("Platform", platform_opts, key="summary_platform_v68_42")
+        platform_opts = sorted(work["Platform Display"].dropna().unique().tolist())
+        platform_filters = st.multiselect(
+            "Platform",
+            platform_opts,
+            key="summary_platform_multi_v68_50",
+            placeholder="All",
+        )
     with f1:
-        source_opts = ["All"] + sorted(work["Source Display"].dropna().unique().tolist())
-        source_filter = st.selectbox("Source", source_opts, key="summary_source_v28")
+        source_opts = sorted(work["Source Display"].dropna().unique().tolist())
+        source_filters = st.multiselect(
+            "Source",
+            source_opts,
+            key="summary_source_multi_v68_50",
+            placeholder="All",
+        )
     with f2:
-        market_opts = ["All"] + sorted(work["Market Display"].dropna().unique().tolist())
-        market_filter = st.selectbox("Market", market_opts, key="summary_market_v28")
+        market_opts = sorted(work["Market Display"].dropna().unique().tolist())
+        market_filters = st.multiselect(
+            "Market",
+            market_opts,
+            key="summary_market_multi_v68_50",
+            placeholder="All",
+        )
     with f3:
-        track_opts = ["All"] + sorted(work["Track Display"].dropna().unique().tolist())
-        track_filter = st.selectbox("Track", track_opts, key="summary_track_v28")
+        track_opts = sorted(work["Track Display"].dropna().unique().tolist())
+        track_filters = st.multiselect(
+            "Track",
+            track_opts,
+            key="summary_track_multi_v68_50",
+            placeholder="All",
+        )
     with f4:
-        type_opts = ["All"] + sorted(work["Primary Creative Type"].dropna().unique().tolist())
-        type_filter = st.selectbox("Creative Type", type_opts, key="summary_type_v55")
+        type_opts = sorted(work["Primary Creative Type"].dropna().unique().tolist())
+        type_filters = st.multiselect(
+            "Creative Type",
+            type_opts,
+            key="summary_type_multi_v68_50",
+            placeholder="All",
+        )
     # Summary sections retain the former default order. Every Summary table
     # can then be sorted directly from its column headings.
     focus_metric = "Views"
     sort_order = "Highest first"
-    st.caption("Click any table column heading to sort ascending or descending.")
+    st.caption("Choose one or more values in any filter. Empty means All. Click any table column heading to sort ascending or descending.")
 
     filtered = work.copy()
-    if platform_filter != "All":
-        filtered = filtered[filtered["Platform Display"] == platform_filter]
-    if source_filter != "All":
-        filtered = filtered[filtered["Source Display"] == source_filter]
-    if market_filter != "All":
-        filtered = filtered[filtered["Market Display"] == market_filter]
-    if track_filter != "All":
-        filtered = filtered[filtered["Track Display"] == track_filter]
-    if type_filter != "All":
-        filtered = filtered[filtered["Primary Creative Type"] == type_filter]
+    for filter_column, selected_values in [
+        ("Platform Display", platform_filters),
+        ("Source Display", source_filters),
+        ("Market Display", market_filters),
+        ("Track Display", track_filters),
+        ("Primary Creative Type", type_filters),
+    ]:
+        filtered = filter_summary_by_selected_values_v68_50(
+            filtered,
+            filter_column,
+            selected_values,
+        )
 
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
