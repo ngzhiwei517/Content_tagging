@@ -3,9 +3,11 @@ import json
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
 import pandas as pd
+import plotly.express as px
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -95,6 +97,24 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
         namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
+        cls.creative_type_chart_data = staticmethod(
+            load_function("prepare_creative_type_chart_data_v68_49", namespace)
+        )
+        cls.rendered_chart_figures = []
+        chart_namespace = {
+            "pd": pd,
+            "px": px,
+            "st": SimpleNamespace(markdown=lambda *args, **kwargs: None),
+            "bar_list": lambda *args, **kwargs: "",
+            "render_plotly_chart": lambda fig: cls.rendered_chart_figures.append(fig),
+            "CREATIVE_TYPE_CHART_COLORS_V68_49": ["#6254e8", "#0ea5e9", "#10b981"],
+        }
+        cls.render_creative_type_bar = staticmethod(
+            load_function("render_creative_type_bar_chart_v68_49", chart_namespace)
+        )
+        cls.render_creative_type_views = staticmethod(
+            load_function("render_creative_type_views_doughnut_v68_49", chart_namespace)
+        )
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -117,6 +137,66 @@ class SummaryV6815Tests(unittest.TestCase):
             '"Saves Rate"',
         ]:
             self.assertIn(column, APP_SOURCE)
+
+    def test_creative_type_post_chart_counts_rows_and_calculates_share(self):
+        rows = pd.DataFrame([
+            {"Primary Creative Type": "Dance"},
+            {"Primary Creative Type": "Dance"},
+            {"Primary Creative Type": "Lip Sync"},
+            {"Primary Creative Type": None},
+        ])
+        chart = self.creative_type_chart_data(rows, "Posts")
+        self.assertEqual(chart["Creative Type"].tolist(), ["Dance", "Lip Sync", "Others"])
+        self.assertEqual(chart["Posts"].tolist(), [2, 1, 1])
+        self.assertAlmostEqual(float(chart["Share"].sum()), 100.0)
+        self.assertAlmostEqual(float(chart.loc[0, "Share"]), 50.0)
+
+    def test_creative_type_views_chart_keeps_full_total_when_categories_collapse(self):
+        rows = pd.DataFrame([
+            {"Primary Creative Type": "Dance", "Views": "1,000"},
+            {"Primary Creative Type": "Lip Sync", "Views": 500},
+            {"Primary Creative Type": "Comedy", "Views": 250},
+            {"Primary Creative Type": "POV", "Views": 100},
+        ])
+        chart = self.creative_type_chart_data(rows, "Views", max_categories=3)
+        self.assertEqual(
+            chart["Creative Type"].tolist(),
+            ["Dance", "Lip Sync", "Remaining creative types"],
+        )
+        self.assertEqual(float(chart["Views"].sum()), 1850.0)
+        self.assertAlmostEqual(float(chart["Share"].sum()), 100.0)
+
+    def test_visual_summary_uses_interactive_post_bar_and_views_doughnut(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        self.assertIn("render_creative_type_bar_chart_v68_49(mix)", step_six)
+        self.assertIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
+        self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
+        self.assertNotIn("metric_for_chart = focus_metric", step_six)
+
+    def test_creative_type_bar_hover_shows_post_number_and_percentage(self):
+        self.rendered_chart_figures.clear()
+        mix = pd.DataFrame({
+            "Creative Type": ["Dance", "Lip Sync"],
+            "Posts": [8, 2],
+            "Share": [80.0, 20.0],
+        })
+        self.render_creative_type_bar(mix)
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertIn("Posts: %{x:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of posts: %{customdata[0]:.1f}%", trace.hovertemplate)
+
+    def test_views_doughnut_hover_shows_view_number_and_percentage(self):
+        self.rendered_chart_figures.clear()
+        mix = pd.DataFrame({
+            "Creative Type": ["Dance", "Lip Sync"],
+            "Views": [8000, 2000],
+            "Share": [80.0, 20.0],
+        })
+        self.render_creative_type_views(mix)
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertEqual(float(trace.hole), 0.58)
+        self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
 
     def test_summary_has_requested_order_and_no_median_metric(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]

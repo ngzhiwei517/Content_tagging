@@ -3462,6 +3462,183 @@ def chart_bar(df: pd.DataFrame, x: str, y: str, title: str = "", orientation: st
         st.bar_chart(df.set_index(x)[y])
 
 
+CREATIVE_TYPE_CHART_COLORS_V68_49 = [
+    "#6254e8", "#0ea5e9", "#10b981", "#f97316", "#ec4899", "#8b5cf6",
+    "#14b8a6", "#f59e0b", "#ef4444", "#64748b", "#38bdf8", "#a78bfa",
+]
+
+
+def prepare_creative_type_chart_data_v68_49(
+    df: pd.DataFrame,
+    metric: str,
+    *,
+    max_categories: int = 12,
+) -> pd.DataFrame:
+    """Aggregate creative types for complete, readable dashboard charts.
+
+    ``Posts`` counts rows; other metrics are summed after safe numeric coercion.
+    When more categories exist than the chart can show clearly, the remainder
+    is combined so shares still add up to 100%.
+    """
+    columns = ["Creative Type", metric, "Share"]
+    if df is None or df.empty or "Primary Creative Type" not in df.columns:
+        return pd.DataFrame(columns=columns)
+    if metric != "Posts" and metric not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    working = df[["Primary Creative Type"]].copy()
+    labels = working["Primary Creative Type"].fillna("").astype(str).str.strip()
+    working["Creative Type"] = labels.mask(
+        labels.str.casefold().isin({"", "nan", "none", "null"}),
+        "Others",
+    )
+
+    if metric == "Posts":
+        summary = working.groupby("Creative Type", dropna=False).size().rename(metric).reset_index()
+    else:
+        working[metric] = df[metric].map(clean_num).clip(lower=0)
+        summary = working.groupby("Creative Type", dropna=False)[metric].sum().reset_index()
+
+    summary = summary.sort_values([metric, "Creative Type"], ascending=[False, True]).reset_index(drop=True)
+    max_categories = max(2, int(max_categories))
+    if len(summary) > max_categories:
+        visible = summary.head(max_categories - 1).copy()
+        remaining_value = float(summary.iloc[max_categories - 1 :][metric].sum())
+        remaining = pd.DataFrame([{"Creative Type": "Remaining creative types", metric: remaining_value}])
+        summary = pd.concat([visible, remaining], ignore_index=True)
+
+    total = float(summary[metric].sum())
+    summary["Share"] = (summary[metric] / total * 100.0) if total > 0 else 0.0
+    if metric == "Posts":
+        summary[metric] = summary[metric].round().astype(int)
+    return summary[columns]
+
+
+def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
+    """Show post mix as an interactive horizontal bar chart."""
+    if mix is None or mix.empty or float(mix["Posts"].sum()) <= 0:
+        st.markdown("<div class='empty-panel'>Creative type mix will appear after posts are tagged.</div>", unsafe_allow_html=True)
+        return
+    if px is None:
+        st.markdown(
+            bar_list(mix, "Creative Type", "Posts", max_rows=12, value_suffix="posts", show_share=True),
+            unsafe_allow_html=True,
+        )
+        return
+
+    chart_data = mix.copy()
+    chart_data["Label"] = chart_data.apply(
+        lambda row: f"{int(row['Posts']):,} ({float(row['Share']):.1f}%)",
+        axis=1,
+    )
+    fig = px.bar(
+        chart_data,
+        x="Posts",
+        y="Creative Type",
+        orientation="h",
+        text="Label",
+        color_discrete_sequence=["#6254e8"],
+        template="plotly_white",
+    )
+    fig.update_traces(
+        customdata=chart_data[["Share"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>Posts: %{x:,.0f}"
+            "<br>Share of posts: %{customdata[0]:.1f}%<extra></extra>"
+        ),
+        textposition="outside",
+        cliponaxis=False,
+        marker=dict(line=dict(color="rgba(255,255,255,0.75)", width=1)),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        showlegend=False,
+        height=520,
+        margin=dict(l=8, r=72, t=18, b=48),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        xaxis=dict(
+            title="Number of posts",
+            rangemode="tozero",
+            gridcolor="#e2e8f0",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title="",
+            categoryorder="total ascending",
+            automargin=True,
+        ),
+    )
+    render_plotly_chart(fig)
+
+
+def render_creative_type_views_doughnut_v68_49(views_mix: pd.DataFrame) -> None:
+    """Show view contribution as an interactive doughnut chart."""
+    if views_mix is None or views_mix.empty or float(views_mix["Views"].sum()) <= 0:
+        st.markdown("<div class='empty-panel'>Views chart will appear after view metrics are available.</div>", unsafe_allow_html=True)
+        return
+    if px is None:
+        st.markdown(
+            bar_list(views_mix, "Creative Type", "Views", max_rows=12),
+            unsafe_allow_html=True,
+        )
+        return
+
+    total_views = float(views_mix["Views"].sum())
+    if total_views >= 1_000_000_000:
+        total_label = f"{total_views / 1_000_000_000:.1f}B"
+    elif total_views >= 1_000_000:
+        total_label = f"{total_views / 1_000_000:.1f}M"
+    elif total_views >= 1_000:
+        total_label = f"{total_views / 1_000:.1f}K"
+    else:
+        total_label = f"{total_views:,.0f}"
+
+    fig = px.pie(
+        views_mix,
+        values="Views",
+        names="Creative Type",
+        hole=0.58,
+        color_discrete_sequence=CREATIVE_TYPE_CHART_COLORS_V68_49,
+        template="plotly_white",
+    )
+    fig.update_traces(
+        sort=False,
+        textinfo="none",
+        hovertemplate=(
+            "<b>%{label}</b><br>Views: %{value:,.0f}"
+            "<br>Share of views: %{percent:.1%}<extra></extra>"
+        ),
+        marker=dict(line=dict(color="#ffffff", width=2)),
+    )
+    fig.add_annotation(
+        text=f"<b>{total_label}</b><br><span style='font-size:12px'>Total views</span>",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(color="#111827", size=20),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=520,
+        margin=dict(l=12, r=12, t=18, b=92),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.06,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+    )
+    render_plotly_chart(fig)
+
+
 def summary_kpi_row(items: List[Tuple[str, str, str, str]]) -> str:
     """Colored KPI cards for marketing Summary page."""
     cards = []
@@ -5306,24 +5483,18 @@ elif st.session_state.step == 6:
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
+    # Interactive creative-type summary. Hover/tap exposes both values and shares.
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("<div class='card'>" + section_title("Creative Type Mix", "#6254e8"), unsafe_allow_html=True)
-        mix = filtered["Primary Creative Type"].value_counts().reset_index()
-        mix.columns = ["Creative Type", "Posts"]
-        st.markdown(bar_list(mix, "Creative Type", "Posts", max_rows=12, value_suffix="posts", show_share=True), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Creative Type Mix", "#6254e8"), unsafe_allow_html=True)
+            mix = prepare_creative_type_chart_data_v68_49(filtered, "Posts", max_categories=12)
+            render_creative_type_bar_chart_v68_49(mix)
     with c2:
-        metric_for_chart = focus_metric if focus_metric != "Engagement Rate" else "Views"
-        metric_title = f"{metric_for_chart} by Creative Type"
-        st.markdown("<div class='card'>" + section_title(metric_title, "#0ea5e9"), unsafe_allow_html=True)
-        if has_metrics and metric_for_chart in filtered.columns and filtered[metric_for_chart].notna().any():
-            metric_mix = filtered.groupby("Primary Creative Type", dropna=False)[metric_for_chart].sum().reset_index().rename(columns={"Primary Creative Type": "Creative Type"}).sort_values(metric_for_chart, ascending=False)
-            st.markdown(bar_list(metric_mix.head(12), "Creative Type", metric_for_chart, max_rows=12), unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='empty-panel'>Performance chart will appear after metrics are available.</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
+            views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
+            render_creative_type_views_doughnut_v68_49(views_mix)
 
     # Source summary is useful when users mix uploaded files and pasted links.
     if filtered["Source Display"].nunique() > 1:
