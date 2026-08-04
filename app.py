@@ -37,6 +37,14 @@ from ugc_tagger.persistent_checkpoint import (
     create_persistent_checkpoint_backend,
 )
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
+from ugc_tagger.creator_profile_enrichment import (
+    DEFAULT_PROFILE_POST_LIMIT,
+    PROFILE_SCOPE_OPTIONS,
+    creator_key,
+    creator_profile_url,
+    profile_scope_count,
+    scrape_creator_profile_metrics,
+)
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_MODEL_OPTIONS,
@@ -929,6 +937,10 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
+    # Public profile metrics are session-only metadata. They are intentionally
+    # excluded from restart checkpoints and never contain API tokens or media.
+    "creator_profile_metrics_v68_51": pd.DataFrame(),
+    "creator_profile_updated_at_v68_51": "",
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
@@ -2033,6 +2045,8 @@ def standardize_file_rows(
     source_name: str,
     platform: str = "",
     fallback_market: str = "",
+    fallback_track: str = "",
+    fallback_artist: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
@@ -2045,13 +2059,18 @@ def standardize_file_rows(
         detected_platform = post_platform(link)
         if not detected_platform or (platform and detected_platform != platform):
             continue
-        track = safe_str(r.get(cols["track"])) if cols.get("track") else ""
-        artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
+        original_sound = safe_str(r.get(cols["track"])) if cols.get("track") else ""
+        detected_track = original_sound
+        detected_artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
         if detected_platform == INSTAGRAM_REELS:
-            if is_opaque_instagram_sound_id(track):
-                track = filename_track
-            if not artist:
-                artist = filename_artist
+            if is_opaque_instagram_sound_id(detected_track):
+                detected_track = filename_track
+            if not detected_artist:
+                detected_artist = filename_artist
+        # A user-confirmed campaign track groups the whole file without
+        # destroying the post-level sound supplied by the source export.
+        campaign_track = safe_str(fallback_track) or detected_track
+        campaign_artist = safe_str(fallback_artist) or detected_artist
         row_market = normalize_market(r.get(cols["market"])) if cols.get("market") else ""
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
@@ -2072,8 +2091,9 @@ def standardize_file_rows(
             # Explicit row data remains authoritative. The per-file selector is
             # only a fallback for exports that keep market context in filenames.
             "Market": row_market or normalize_market(fallback_market),
-            "Track": track,
-            "Campaign Artist": artist,
+            "Track": campaign_track,
+            "Original Sound": original_sound or detected_track,
+            "Campaign Artist": campaign_artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),
@@ -2104,7 +2124,7 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty or "_link_key" not in frame.columns:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
     backfill_columns = [
-        "Platform", "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
+        "Platform", "Market", "Track", "Original Sound", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
         "Caption", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
         "Metrics Unavailable",
         "Total Engagement",
@@ -3680,7 +3700,8 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Source Summary": "S",
         "Market Summary": "M",
         "Top Creator Performance": "C",
-        "Track Summary": "T",
+        "Campaign Summary": "T",
+        "Sound Breakdown": "S",
         "Top Posts": "",
         "Post Summary": "P",
         "Downloads": "↓",
@@ -3773,6 +3794,14 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Average Engagement",
     "Average Views",
     "Average Engagements",
+    "Campaign Posts",
+    "Campaign Views",
+    "Campaign Engagement",
+    "Campaign Average Engagement",
+    "Profile Posts",
+    "Current Followers",
+    "Profile Average Views",
+    "Profile Average Engagement",
 }
 SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Engagement Rate",
@@ -3781,6 +3810,8 @@ SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Comments Rate",
     "Shares Rate",
     "Saves Rate",
+    "Campaign Average Engagement Rate",
+    "Profile Average Engagement Rate",
 }
 TOP_POST_TABLE_COLUMNS_V68_46 = [
     "Platform",
@@ -3838,6 +3869,12 @@ def render_sortable_summary_table_v68_46(
             column_config[column] = st.column_config.NumberColumn(column, format="%.2f%%")
     if "Link" in table.columns:
         column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open post")
+    if "Creator Profile" in table.columns:
+        column_config["Creator Profile"] = st.column_config.LinkColumn(
+            "Creator",
+            display_text=r"https://(?:www\.)?(?:tiktok\.com/@|instagram\.com/)([^/?#]+)",
+            pinned=True,
+        )
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
     st.dataframe(
@@ -3890,14 +3927,14 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
-    """Aggregate the latest three months available per creator.
+    """Aggregate campaign contribution from the current filtered batch.
 
     Creators stay separate by platform and market. Total engagement prefers the
     available Likes + Comments + Shares + Saves components so an inconsistent
     uploaded total cannot inflate the leaderboard; an existing Total Engagement
-    value remains the fallback when no component engagement is available. The
-    three-month window ends on the newest dated post in the current filtered
-    data, allowing historical campaign batches to retain a meaningful window.
+    value remains the fallback when no component engagement is available. Public
+    three-month profile performance is retrieved separately and never inferred
+    from the campaign CSV.
     """
     columns = [
         "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
@@ -3912,22 +3949,6 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         if column not in working.columns:
             working[column] = 0
         working[column] = pd.to_numeric(working[column], errors="coerce")
-
-    parsed_dates = pd.to_datetime(
-        working.apply(canonical_post_date, axis=1),
-        errors="coerce",
-        utc=True,
-    ).dt.tz_convert(None).dt.normalize()
-    valid_dates = parsed_dates.dropna()
-    window_start = None
-    window_end = None
-    undated_posts = 0
-    if not valid_dates.empty:
-        window_end = valid_dates.max()
-        window_start = window_end - pd.DateOffset(months=3)
-        in_window = parsed_dates.between(window_start, window_end, inclusive="both")
-        undated_posts = int(parsed_dates.isna().sum())
-        working = working[in_window].copy()
 
     working["Creator Display"] = working.get(
         "Creator",
@@ -4014,18 +4035,11 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         ascending=[False, False, False, True],
         kind="stable",
     ).reset_index(drop=True)
-    summary.attrs["date_window_start"] = (
-        window_start.date().isoformat() if window_start is not None else ""
-    )
-    summary.attrs["date_window_end"] = (
-        window_end.date().isoformat() if window_end is not None else ""
-    )
-    summary.attrs["undated_posts_excluded"] = undated_posts
     return summary, missing_creator_posts
 
 
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
-    """Render the creator-level campaign contribution leaderboard."""
+    """Render campaign contribution plus optional public-profile metrics."""
     with st.container(border=True):
         st.markdown(section_title("Top Creator Performance", "#14b8a6"), unsafe_allow_html=True)
         creator_table, missing_creator_posts = creator_performance_summary_v68_47(filtered)
@@ -4035,38 +4049,137 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 unsafe_allow_html=True,
             )
             return
-        window_start = creator_table.attrs.get("date_window_start")
-        window_end = creator_table.attrs.get("date_window_end")
-        undated_posts = int(creator_table.attrs.get("undated_posts_excluded", 0) or 0)
-        if window_start and window_end:
-            st.caption(
-                "Creator metrics use the latest three months available in this data "
-                f"({pd.Timestamp(window_start).strftime('%d %b %Y')} to "
-                f"{pd.Timestamp(window_end).strftime('%d %b %Y')}) "
-                "and are ranked by total engagement."
-            )
-        else:
-            st.caption(
-                "Post dates are unavailable, so creator metrics use all posts in the current view. "
-                "Rows are ranked by total engagement."
-            )
-        if undated_posts:
-            st.caption(
-                f"{undated_posts:,} post{'s' if undated_posts != 1 else ''} without a date "
-                "are excluded from the three-month creator metrics."
-            )
+        st.caption(
+            "Campaign columns use posts in the current batch. Profile columns are fetched separately "
+            "from each creator's public platform activity."
+        )
         if missing_creator_posts:
             st.caption(
                 f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
                 "are excluded from this ranking."
             )
 
+        control_col, action_col = st.columns([2, 1])
+        with control_col:
+            profile_scope = st.selectbox(
+                "Profiles to enrich",
+                PROFILE_SCOPE_OPTIONS,
+                index=0,
+                key="creator_profile_scope_v68_51",
+                help="Top creators are selected by campaign engagement. All may take longer and use more Apify results.",
+            )
+        with action_col:
+            enrich_clicked = st.button(
+                "Fetch / refresh profile metrics",
+                type="secondary",
+                width="stretch",
+                key="creator_profile_fetch_v68_51",
+            )
+
+        if enrich_clicked:
+            apify_token = safe_str(
+                st.session_state.get("apify_token", "")
+                or st.session_state.get("apify_token_input_v52", "")
+                or st.session_state.get("apify_token_input", "")
+            )
+            if not apify_token:
+                st.warning("Add the Apify token on the API Keys page before enriching creator profiles.")
+            else:
+                target_count = profile_scope_count(profile_scope, len(creator_table))
+                targets = creator_table.head(target_count)[["Platform", "Creator"]].copy()
+                try:
+                    with st.spinner(
+                        f"Fetching public profile posts for {len(targets):,} creator"
+                        f"{'s' if len(targets) != 1 else ''}..."
+                    ):
+                        profile_metrics, profile_errors = scrape_creator_profile_metrics(
+                            targets,
+                            apify_token,
+                            months=3,
+                            post_limit=DEFAULT_PROFILE_POST_LIMIT,
+                        )
+                    existing_metrics = st.session_state.get(
+                        "creator_profile_metrics_v68_51", pd.DataFrame()
+                    )
+                    combined_metrics = pd.concat(
+                        [existing_metrics, profile_metrics], ignore_index=True
+                    ) if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty else profile_metrics.copy()
+                    if not combined_metrics.empty:
+                        combined_metrics = combined_metrics.drop_duplicates(
+                            ["Platform", "Creator Key"], keep="last"
+                        ).reset_index(drop=True)
+                    st.session_state.creator_profile_metrics_v68_51 = combined_metrics
+                    st.session_state.creator_profile_updated_at_v68_51 = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    available_count = int(
+                        profile_metrics.get("Profile Posts", pd.Series(dtype=float)).fillna(0).gt(0).sum()
+                    )
+                    st.success(
+                        f"Profile metrics updated for {available_count:,} of {len(targets):,} selected creators."
+                    )
+                    for profile_error in profile_errors:
+                        st.warning(profile_error)
+                except Exception:
+                    LOGGER.exception("Creator profile enrichment failed")
+                    st.error("Creator profile enrichment could not be completed. Campaign metrics are still available.")
+
+        display_table = creator_table.rename(columns={
+            "Posts": "Campaign Posts",
+            "Total Views": "Campaign Views",
+            "Total Engagement": "Campaign Engagement",
+            "Average Engagement": "Campaign Average Engagement",
+            "Average Engagement Rate": "Campaign Average Engagement Rate",
+        }).copy()
+        display_table["Creator Key"] = display_table["Creator"].map(creator_key)
+        display_table["Creator Profile"] = display_table.apply(
+            lambda row: creator_profile_url(row.get("Platform"), row.get("Creator")),
+            axis=1,
+        )
+
+        profile_metrics = st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame())
+        profile_columns = []
+        if isinstance(profile_metrics, pd.DataFrame) and not profile_metrics.empty:
+            merge_columns = [
+                "Platform", "Creator Key", "Profile Posts", "Current Followers",
+                "Profile Average Views", "Profile Average Engagement",
+                "Profile Average Engagement Rate", "Profile Data Status",
+            ]
+            available_merge_columns = [
+                column for column in merge_columns if column in profile_metrics.columns
+            ]
+            display_table = display_table.merge(
+                profile_metrics[available_merge_columns],
+                on=["Platform", "Creator Key"],
+                how="left",
+            )
+            profile_columns = [
+                "Current Followers", "Profile Posts", "Profile Average Views",
+                "Profile Average Engagement", "Profile Average Engagement Rate",
+                "Profile Data Status",
+            ]
+            updated_at = safe_str(st.session_state.get("creator_profile_updated_at_v68_51"))
+            if updated_at:
+                try:
+                    updated_label = pd.Timestamp(updated_at).strftime("%d %b %Y %H:%M UTC")
+                except Exception:
+                    updated_label = updated_at
+                st.caption(
+                    f"Public profile metadata updated {updated_label}. Latest three months, "
+                    f"up to {DEFAULT_PROFILE_POST_LIMIT} public posts per creator; no media is downloaded."
+                )
+        else:
+            st.caption(
+                f"Optional enrichment checks the latest three months, up to {DEFAULT_PROFILE_POST_LIMIT} "
+                "public posts per creator. It runs only when you click the button."
+            )
+
         render_sortable_summary_table_v68_46(
-            creator_table,
+            display_table,
             columns=[
-                "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
-                "Total Views", "Total Engagement", "Average Engagement",
-                "Average Engagement Rate",
+                "Creator Profile", "Market", "Platform", "Campaign Posts",
+                "Campaign Views", "Campaign Engagement", "Campaign Average Engagement",
+                "Campaign Average Engagement Rate", *profile_columns,
             ],
             max_visible_rows=15,
         )
@@ -4199,9 +4312,58 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
-            with st.expander("Confirm markets for uploaded files", expanded=True):
-                st.caption("Markets in the file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
+            with st.expander("Confirm details for uploaded files", expanded=True):
+                st.caption(
+                    "Add the campaign track to group all sounds from a file into one campaign summary. "
+                    "Original sound names remain available in Sound Breakdown."
+                )
+                apply_shared_campaign = True
+                if len(files) > 1:
+                    apply_shared_campaign = st.toggle(
+                        "Apply the same track and artist to all uploaded files",
+                        value=True,
+                        key="apply_shared_uploaded_campaign_v68_51",
+                    )
+                shared_track = ""
+                shared_artist = ""
+                if apply_shared_campaign:
+                    shared_track_col, shared_artist_col = st.columns(2)
+                    with shared_track_col:
+                        shared_track = st.text_input(
+                            "Campaign track / sound name (recommended)",
+                            placeholder="e.g. Hate That I Made You Love Me",
+                            key="shared_uploaded_campaign_track_v68_51",
+                            help="Groups every original sound in the selected file or files into one campaign.",
+                        )
+                    with shared_artist_col:
+                        shared_artist = st.text_input(
+                            "Artist name (optional)",
+                            placeholder="e.g. Ariana Grande",
+                            key="shared_uploaded_campaign_artist_v68_51",
+                            help="Useful when different artists have tracks with the same title.",
+                        )
+                st.caption("Markets in each file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
                 for f in files:
+                    file_key = hashlib.sha1(
+                        f"{f.name}:{len(f.getvalue())}".encode("utf-8")
+                    ).hexdigest()[:12]
+                    fallback_track = safe_str(shared_track)
+                    fallback_artist = safe_str(shared_artist)
+                    if not apply_shared_campaign:
+                        st.markdown(f"**{esc(f.name)}**")
+                        file_track_col, file_artist_col = st.columns(2)
+                        with file_track_col:
+                            fallback_track = st.text_input(
+                                f"Campaign track - {f.name}",
+                                placeholder="Track name",
+                                key=f"uploaded_file_track_v68_51_{file_key}",
+                            )
+                        with file_artist_col:
+                            fallback_artist = st.text_input(
+                                f"Artist - {f.name} (optional)",
+                                placeholder="Artist name",
+                                key=f"uploaded_file_artist_v68_51_{file_key}",
+                            )
                     try:
                         df = read_any_table(f)
                         detected_cols = detect_columns(df)
@@ -4220,9 +4382,6 @@ if st.session_state.step == 2:
                         else:
                             filename_market = infer_market_from_filename(f.name)
                             default_choice = filename_market or "Other / no market"
-                            file_key = hashlib.sha1(
-                                f"{f.name}:{len(f.getvalue())}".encode("utf-8")
-                            ).hexdigest()[:12]
                             market_choice = st.selectbox(
                                 f.name,
                                 MARKET_OPTIONS,
@@ -4241,6 +4400,8 @@ if st.session_state.step == 2:
                             df,
                             f.name,
                             fallback_market=fallback_market,
+                            fallback_track=fallback_track,
+                            fallback_artist=fallback_artist,
                         )
                         parsed_frames.append(std)
                         platforms = sorted([
@@ -4249,13 +4410,17 @@ if st.session_state.step == 2:
                         ])
                         markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
                         tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        artists = sorted([t for t in std.get("Campaign Artist", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        original_sounds = sorted([t for t in std.get("Original Sound", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
                         summary_rows.append({
                             "File": f.name,
                             "Posts": len(std),
                             "Platforms": ", ".join(platforms) if platforms else "Not detected",
                             "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
                             "Market source": market_source,
-                            "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                            "Campaign track": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                            "Artist": ", ".join(artists[:2]) + ("..." if len(artists) > 2 else "") if artists else "Not specified",
+                            "Original sounds": len(original_sounds),
                         })
                     except Exception as e:
                         errors.append(f"{f.name}: {e}")
@@ -4377,13 +4542,15 @@ if st.session_state.step == 2:
             ("Platforms", str(batch.get("Platform", pd.Series([TIKTOK] * len(batch))).nunique()), "TikTok + Instagram"),
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
-        st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
+        st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
                 st.session_state.batch_df = pd.DataFrame()
                 st.session_state.selected_df = pd.DataFrame()
                 st.session_state.tagged_df = pd.DataFrame()
+                st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
+                st.session_state.creator_profile_updated_at_v68_51 = ""
                 st.session_state.last_message = ""
                 reset_date_filter_state_v68()
                 st.rerun()
@@ -5335,7 +5502,7 @@ elif st.session_state.step == 6:
     # internal QA workbook still receives every attempted row below.
     qa_all_rows = tagged.copy()
     work = tagged[~_removed_mask_v56(tagged)].copy()
-    for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
+    for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
         if col not in work.columns:
             work[col] = ""
     for col in ["Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Followers"]:
@@ -5346,13 +5513,16 @@ elif st.session_state.step == 6:
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)
     work["Track Display"] = work["Track"].map(lambda x: display_empty(x, "Not specified"))
+    work["Original Sound Display"] = work["Original Sound"].map(lambda x: display_empty(x, "Not specified"))
+    work["Campaign Artist Display"] = work["Campaign Artist"].map(lambda x: display_empty(x, "Not specified"))
     work["Source Display"] = work["Source"].map(lambda x: display_empty(x, "Manual / pasted links"))
     work["Creative Type"] = work["Creative Type"].map(lambda x: display_empty(x, "Others"))
     work["Primary Creative Type"] = work["Creative Type"].map(primary_creative_type)
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Combined filters: users can focus by platform + source + market + track + creative type.
-    f0, f1, f2, f3, f4 = st.columns(5)
+    # Combined filters: users can focus by platform + source + market + track +
+    # creative type + creator size. Empty selections continue to mean All.
+    f0, f1, f2, f3, f4, f5 = st.columns(6)
     with f0:
         platform_opts = sorted(work["Platform Display"].dropna().unique().tolist())
         platform_filters = st.multiselect(
@@ -5393,6 +5563,14 @@ elif st.session_state.step == 6:
             key="summary_type_multi_v68_50",
             placeholder="All",
         )
+    with f5:
+        kol_size_opts = sorted(work["KOL Size Display"].dropna().unique().tolist())
+        kol_size_filters = st.multiselect(
+            "KOL Size",
+            kol_size_opts,
+            key="summary_kol_size_multi_v68_51",
+            placeholder="All",
+        )
     # Summary sections retain the former default order. Every Summary table
     # can then be sorted directly from its column headings.
     focus_metric = "Views"
@@ -5406,6 +5584,7 @@ elif st.session_state.step == 6:
         ("Market Display", market_filters),
         ("Track Display", track_filters),
         ("Primary Creative Type", type_filters),
+        ("KOL Size Display", kol_size_filters),
     ]:
         filtered = filter_summary_by_selected_values_v68_50(
             filtered,
@@ -5501,25 +5680,61 @@ elif st.session_state.step == 6:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='card'>" + section_title("Track Summary", "#f97316"), unsafe_allow_html=True)
-    track_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display", "Track Display"]).rename(columns={
-        "Market Display": "Market",
+    st.markdown("<div class='card'>" + section_title("Campaign Summary", "#f97316"), unsafe_allow_html=True)
+    campaign_summary = aggregate_summary_performance_v68_15(filtered, ["Track Display", "Campaign Artist Display"]).rename(columns={
         "Track Display": "Track",
+        "Campaign Artist Display": "Artist",
         "Average_Views": "Average Views",
         "Average_Engagements": "Average Engagements",
         "Average_Engagement_Rate": "Average Engagement Rate",
         "Average_Shares_Rate": "Shares Rate",
         "Average_Saves_Rate": "Saves Rate",
     })
-    track_summary = sort_summary_performance_v68_18(
-        track_summary, focus_metric, sort_order
+    campaign_summary = sort_summary_performance_v68_18(
+        campaign_summary, focus_metric, sort_order
     )
     render_sortable_summary_table_v68_46(
-        track_summary,
-        columns=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        campaign_summary,
+        columns=["Track", "Artist", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
         max_visible_rows=12,
     )
     st.markdown("</div>", unsafe_allow_html=True)
+
+    original_sound_values = filtered["Original Sound"].map(safe_str)
+    campaign_track_values = filtered["Track"].map(safe_str)
+    has_sound_breakdown = bool(
+        original_sound_values.ne("").any()
+        and original_sound_values.ne(campaign_track_values).any()
+    )
+    if has_sound_breakdown:
+        st.markdown("<div class='card'>" + section_title("Sound Breakdown", "#0ea5e9"), unsafe_allow_html=True)
+        st.caption("Original platform sounds are shown separately and are not added to the campaign totals above.")
+        sound_summary = aggregate_summary_performance_v68_15(
+            filtered,
+            ["Market Display", "Track Display", "Original Sound Display"],
+        ).rename(columns={
+            "Market Display": "Market",
+            "Track Display": "Campaign Track",
+            "Original Sound Display": "Original Sound",
+            "Average_Views": "Average Views",
+            "Average_Engagements": "Average Engagements",
+            "Average_Engagement_Rate": "Average Engagement Rate",
+            "Average_Shares_Rate": "Shares Rate",
+            "Average_Saves_Rate": "Saves Rate",
+        })
+        sound_summary = sort_summary_performance_v68_18(
+            sound_summary, focus_metric, sort_order
+        )
+        render_sortable_summary_table_v68_46(
+            sound_summary,
+            columns=[
+                "Market", "Campaign Track", "Original Sound", "Posts",
+                "Average Views", "Average Engagements", "Average Engagement Rate",
+                "Shares Rate", "Saves Rate",
+            ],
+            max_visible_rows=12,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Interactive creative-type summary. Hover/tap exposes both values and shares.
     c1, c2 = st.columns(2)
@@ -5595,7 +5810,7 @@ elif st.session_state.step == 6:
     qa_df = qa_all_rows.copy()
     qa_front = [
         "App Version", "Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds",
-        "Platform", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
+        "Platform", "Source", "Input Type", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
         *MANUAL_METRIC_AUDIT_COLUMNS,
         "Needs Review", "Review Action", "Review Note", "Review Risk",
@@ -5656,6 +5871,8 @@ elif st.session_state.step == 6:
             st.session_state.batch_df = pd.DataFrame()
             st.session_state.selected_df = pd.DataFrame()
             st.session_state.tagged_df = pd.DataFrame()
+            st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
+            st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()

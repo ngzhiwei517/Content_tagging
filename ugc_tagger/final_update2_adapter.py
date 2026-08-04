@@ -68,7 +68,7 @@ TIKTOK_SHORT_LINK_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
 
 
 MARKETING_EXPORT_COLUMNS = [
-    "Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Creator", "Followers", "KOL Size",
+    "Platform", "Source", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator", "Followers", "KOL Size",
     "Views", "Likes", "Comments", "Shares", "Saves", "Metrics Unavailable", "Total Engagement",
     "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate",
     # Detailed drama fields are deliberately consolidated into Content Details
@@ -613,6 +613,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
             or _text(tagged_dict.get("track"))
             or music_name
         ),
+        "Original Sound": _text(original_dict.get("Original Sound")) or music_name,
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
         "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
         "Creator Display": _text(tagged_dict.get("creator_display")),
