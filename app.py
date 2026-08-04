@@ -2653,7 +2653,7 @@ def _create_batch_checkpoint_store_v68_48(
 
 
 def _large_batch_store_v68_43() -> BatchCheckpointStore:
-    """Return the durable store used only for large Tag every link runs."""
+    """Return the durable store used for every large tagging selection."""
     runtime_id = _valid_runtime_id_v68_15(
         st.session_state.get("runtime_run_id_v68_15")
     )
@@ -2664,11 +2664,10 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 
 
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
-    """Keep established small/Top-N runs unchanged."""
+    """Protect every selection above one checkpoint chunk, including Top posts."""
     return (
         isinstance(selected, pd.DataFrame)
         and len(selected) > DEFAULT_CHUNK_SIZE
-        and st.session_state.get("selection_mode", "Top posts") == "Tag every link"
     )
 
 

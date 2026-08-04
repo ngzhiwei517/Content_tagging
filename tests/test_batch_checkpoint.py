@@ -320,6 +320,15 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
 
+    def test_large_batch_protection_also_applies_to_top_posts(self):
+        helper = self.source.split(
+            "def _uses_large_batch_checkpoints_v68_43",
+            1,
+        )[1].split("def _large_batch_manifest_v68_43", 1)[0]
+        self.assertIn("len(selected) > DEFAULT_CHUNK_SIZE", helper)
+        self.assertNotIn("selection_mode", helper)
+        self.assertIn("including Top posts", helper)
+
     def test_incomplete_micro_batch_yields_without_marking_an_error(self):
         self.assertIn("completed_rows + len(actual_positions)", self.source)
         self.assertIn('"continuing safely"', self.source)
