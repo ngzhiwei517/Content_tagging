@@ -982,7 +982,11 @@ TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
 # still uses 50-row chunks for backward-compatible recovery, while only this
 # many unfinished rows are analysed before yielding to a fresh script run.
 MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5
-REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 25
+# Apify media collection can exceed Streamlit Cloud's execution window when a
+# whole campaign is submitted at once. Save each smaller scrape window before
+# yielding, then save every five completed Gemini rows to persistent storage.
+MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
+REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
     "mode",
@@ -2664,10 +2668,10 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 
 
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
-    """Protect every selection above one checkpoint chunk, including Top posts."""
+    """Protect any selection too large for one bounded Apify request."""
     return (
         isinstance(selected, pd.DataFrame)
-        and len(selected) > DEFAULT_CHUNK_SIZE
+        and len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54
     )
 
 
@@ -2981,23 +2985,6 @@ def _run_checkpointed_tag_every_link_v68_43(
     chunk_timer = time.perf_counter()
 
     try:
-        records = store.load_scraped_records(manifest["job_id"], next_chunk_index)
-        if records is None:
-            status.write("Collecting public post data from Apify...")
-            links = [
-                safe_str(link)
-                for link in chunk["Link"].tolist()
-                if is_supported_link(link)
-            ]
-            records = final_update2_scrape_links(links, apify_token)
-            store.save_scraped_records(
-                manifest["job_id"],
-                next_chunk_index,
-                records,
-            )
-        else:
-            status.write("Reusing the saved Apify result for this chunk.")
-
         existing_positions = set(
             store.partial_positions(manifest["job_id"], next_chunk_index)
         )
@@ -3011,6 +2998,65 @@ def _run_checkpointed_tag_every_link_v68_43(
         ]
         remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
         saved_positions = set(existing_positions)
+
+        records = store.load_scraped_records(manifest["job_id"], next_chunk_index)
+        records = list(records or [])
+        by_id, by_url = _final_update2_adapter.index_records(records)
+        rows_missing_records = [
+            row
+            for position, row in chunk.iterrows()
+            if position in all_remaining_positions
+            and _final_update2_adapter.match_record(row, by_id, by_url) is None
+        ]
+        if rows_missing_records:
+            scrape_rows = rows_missing_records[
+                :MAX_APIFY_POSTS_PER_EXECUTION_V68_54
+            ]
+            links = [
+                safe_str(row.get("Link"))
+                for row in scrape_rows
+                if is_supported_link(row.get("Link"))
+            ]
+            status.write(
+                f"Collecting public post data for {len(links):,} post(s) from "
+                "Apify, then saving it before continuing..."
+            )
+            new_records = final_update2_scrape_links(links, apify_token)
+            new_records = list(new_records or [])
+            new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
+            for row in scrape_rows:
+                if _final_update2_adapter.match_record(row, new_by_id, new_by_url) is None:
+                    link = safe_str(row.get("Link"))
+                    platform = safe_str(row.get("Platform")) or platform_for_url(link)
+                    new_records.append(
+                        {
+                            "url": link,
+                            "submittedVideoUrl": link,
+                            "_platform": platform,
+                            "platform": platform,
+                            "error": "POST_NOT_FOUND",
+                            "errorCode": "POST_NOT_FOUND",
+                        }
+                    )
+            records.extend(new_records)
+            store.save_scraped_records(
+                manifest["job_id"],
+                next_chunk_index,
+                records,
+            )
+            remaining_scrape_count = len(rows_missing_records) - len(scrape_rows)
+            if remaining_scrape_count > 0:
+                status.update(
+                    label=(
+                        f"Saved public data for {len(records):,} post(s); "
+                        "continuing safely"
+                    ),
+                    state="complete",
+                    expanded=False,
+                )
+                return None
+        else:
+            status.write("Reusing the saved Apify result for this chunk.")
 
         def on_result(input_position: int, tagged_row: Dict, tier: str):
             chunk_position = remaining_positions[int(input_position)]
@@ -3052,9 +3098,8 @@ def _run_checkpointed_tag_every_link_v68_43(
                 on_progress,
             )
             # Supabase/Postgres is recovery storage, not part of every Gemini
-            # callback. Local rows are durable on normal reruns; one compact
-            # remote snapshot per 25 saved rows avoids database overhead while
-            # keeping bounded cold-restart recovery.
+            # callback. Persist the five-row micro-batch before yielding so a
+            # Streamlit/container restart cannot send those posts to Gemini again.
             if (
                 len(saved_positions) % REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52
                 == 0
@@ -5068,7 +5113,8 @@ elif st.session_state.step == 4:
             )
         )
         st.info(
-            "Large-batch protection is on. Each completed post is saved"
+            "Large-batch protection is on. Apify runs are limited to 25 posts, "
+            "and every 5 completed tags are saved"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count
@@ -5106,12 +5152,7 @@ elif st.session_state.step == 4:
         if saved_large_batch:
             if saved_large_batch.get("status") == "completed":
                 start_label = "Use saved results"
-            elif int(
-                saved_large_batch.get(
-                    "saved_rows",
-                    saved_large_batch.get("completed_rows", 0),
-                )
-            ) > 0:
+            else:
                 start_label = "Resume tagging"
         c1, c2 = st.columns(2)
         with c1:

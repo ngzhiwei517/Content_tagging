@@ -304,11 +304,15 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "app.py"
         ).read_text(encoding="utf-8")
 
-    def test_large_batch_uses_fifty_row_checkpoints_and_fresh_reruns(self):
+    def test_large_batch_uses_bounded_scrapes_and_fresh_reruns(self):
         self.assertIn("DEFAULT_CHUNK_SIZE", self.source)
-        self.assertIn("len(selected) > DEFAULT_CHUNK_SIZE", self.source)
+        self.assertIn("MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25", self.source)
+        self.assertIn(
+            "len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54",
+            self.source,
+        )
         self.assertIn("MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5", self.source)
-        self.assertIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 25", self.source)
+        self.assertIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5", self.source)
         self.assertIn(
             ":MAX_LIVE_POSTS_PER_EXECUTION_V68_52",
             self.source.replace(" ", "").replace("\n", ""),
@@ -325,9 +329,24 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
             "def _uses_large_batch_checkpoints_v68_43",
             1,
         )[1].split("def _large_batch_manifest_v68_43", 1)[0]
-        self.assertIn("len(selected) > DEFAULT_CHUNK_SIZE", helper)
+        self.assertIn(
+            "len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54",
+            helper,
+        )
         self.assertNotIn("selection_mode", helper)
-        self.assertIn("including Top posts", helper)
+
+    def test_scraped_records_are_saved_before_the_next_window(self):
+        runner = self.source.split(
+            "def _run_checkpointed_tag_every_link_v68_43",
+            1,
+        )[1].split("def run_real_tagging_backend", 1)[0]
+        self.assertIn("rows_missing_records", runner)
+        self.assertIn("store.save_scraped_records(", runner)
+        self.assertIn("remaining_scrape_count", runner)
+        self.assertIn("return None", runner)
+
+    def test_existing_manifest_is_always_presented_as_resume(self):
+        self.assertIn('else:\n                start_label = "Resume tagging"', self.source)
 
     def test_incomplete_micro_batch_yields_without_marking_an_error(self):
         self.assertIn("completed_rows + len(actual_positions)", self.source)

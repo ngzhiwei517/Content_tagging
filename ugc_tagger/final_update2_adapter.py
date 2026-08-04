@@ -746,11 +746,24 @@ def enrich_review_drama(
 # -----------------------------------------------------------------------------
 
 
+MAX_APIFY_POSTS_PER_REQUEST = 25
+
+
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
     """Route each supported post URL to its platform-specific Apify adapter."""
-    backend = load_backend()
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
+    if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
+        raise ValueError(
+            "APIFY_BATCH_LIMIT_EXCEEDED: TikTok requests must contain at most "
+            f"{MAX_APIFY_POSTS_PER_REQUEST} posts."
+        )
+    if len(instagram_links) > MAX_APIFY_POSTS_PER_REQUEST:
+        raise ValueError(
+            "APIFY_BATCH_LIMIT_EXCEEDED: Instagram requests must contain at most "
+            f"{MAX_APIFY_POSTS_PER_REQUEST} posts."
+        )
+    backend = load_backend()
     records: List[Dict] = []
     if tiktok_links:
         short_link_count = sum(is_tiktok_short_url(link) for link in tiktok_links)
