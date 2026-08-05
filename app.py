@@ -30,6 +30,7 @@ import ugc_tagger.final_update2_adapter as _final_update2_adapter
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
+    input_fingerprint,
 )
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
@@ -956,6 +957,8 @@ def reset_review_state_for_new_tagging_run() -> None:
 
 # Navigation helpers
 def go(step: int):
+    if int(step) != 4:
+        _clear_tagging_continue_query_v68_55()
     st.session_state.step = step
     _persist_runtime_checkpoint_v68_15()
     st.rerun()
@@ -987,6 +990,9 @@ MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5
 # yielding, then save every five completed Gemini rows to persistent storage.
 MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
 REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
+TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
+TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
+TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
     "mode",
@@ -1105,6 +1111,49 @@ def _runtime_query_value_v68_15(name: str) -> str:
     return safe_str(value)
 
 
+def _clear_tagging_continue_query_v68_55() -> None:
+    """Remove the temporary active-run marker without touching the recovery id."""
+    try:
+        st.query_params.pop(TAGGING_CONTINUE_JOB_QUERY_V68_55, None)
+        st.query_params.pop(TAGGING_CONTINUE_UNTIL_QUERY_V68_55, None)
+    except Exception:
+        pass
+
+
+def _set_tagging_continue_query_v68_55(job_id: str) -> bool:
+    """Mark one exact large job as user-authorised to continue after refresh."""
+    job_id = _valid_runtime_id_v68_15(job_id)
+    if not job_id:
+        _clear_tagging_continue_query_v68_55()
+        return False
+    try:
+        st.query_params[TAGGING_CONTINUE_JOB_QUERY_V68_55] = job_id
+        st.query_params[TAGGING_CONTINUE_UNTIL_QUERY_V68_55] = str(
+            int(time.time()) + TAGGING_CONTINUE_TTL_SECONDS_V68_55
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _tagging_continue_job_v68_55() -> str:
+    """Return a fresh job-specific continuation marker, or clear stale input."""
+    raw_job_id = _runtime_query_value_v68_15(TAGGING_CONTINUE_JOB_QUERY_V68_55)
+    raw_continue_until = _runtime_query_value_v68_15(
+        TAGGING_CONTINUE_UNTIL_QUERY_V68_55
+    )
+    job_id = _valid_runtime_id_v68_15(raw_job_id)
+    try:
+        continue_until = int(raw_continue_until)
+    except (TypeError, ValueError):
+        continue_until = 0
+    if not job_id or continue_until <= int(time.time()):
+        if raw_job_id or raw_continue_until:
+            _clear_tagging_continue_query_v68_55()
+        return ""
+    return job_id
+
+
 def _sync_runtime_query_v68_15() -> None:
     """Keep the active batch id and workflow step in the browser URL."""
     run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
@@ -1211,6 +1260,7 @@ def _runtime_checkpoint_candidates_v68_44(run_id: str) -> List[Dict]:
 
 
 def _new_runtime_recovery_id_v68_44() -> str:
+    _clear_tagging_continue_query_v68_55()
     run_id = uuid.uuid4().hex
     st.session_state.runtime_run_id_v68_15 = run_id
     st.session_state.runtime_restore_checked_v68_15 = True
@@ -1219,6 +1269,7 @@ def _new_runtime_recovery_id_v68_44() -> str:
 
 
 def _request_runtime_recovery_v68_44(recovery_id: str) -> bool:
+    _clear_tagging_continue_query_v68_55()
     requested_id = _valid_runtime_id_v68_15(recovery_id)
     if not requested_id or not _runtime_checkpoint_candidates_v68_44(requested_id):
         return False
@@ -1250,7 +1301,7 @@ def _runtime_recovery_url_v68_44() -> str:
 def _show_runtime_save_dialog_v68_44() -> None:
     recovery_url = _runtime_recovery_url_v68_44()
     st.markdown("**Your progress is already saved automatically.**")
-    st.caption("Bookmark this page, or copy the private link below to continue later.")
+    st.caption("Copy the private link below to continue later.")
     if recovery_url:
         st.code(recovery_url, language=None)
         st.caption("Use the copy button on the link. Keep it private because it can reopen this batch.")
@@ -2697,6 +2748,122 @@ def _large_batch_manifest_v68_43(selected: pd.DataFrame) -> Optional[Dict]:
         return None
 
 
+def _large_batch_job_id_v68_55(selected: pd.DataFrame) -> str:
+    """Return the exact durable job id that belongs to the current selection."""
+    if not _uses_large_batch_checkpoints_v68_43(selected):
+        return ""
+    runtime_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
+    if not runtime_id:
+        return ""
+    model = normalize_gemini_model(
+        st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
+    )
+    try:
+        fingerprint = input_fingerprint(selected.reset_index(drop=True), model)
+        return _large_batch_store_v68_43()._job_id(runtime_id, fingerprint)
+    except Exception:
+        return ""
+
+
+def _tagging_execution_owner_v68_55() -> str:
+    """Return a session-only owner id; it is never written to recovery storage."""
+    owner_id = _valid_runtime_id_v68_15(
+        st.session_state.get("tagging_execution_owner_v68_55")
+    )
+    if not owner_id:
+        owner_id = uuid.uuid4().hex
+        st.session_state.tagging_execution_owner_v68_55 = owner_id
+    return owner_id
+
+
+def _tagging_auto_resume_action_v68_55(
+    marker_job_id: str,
+    expected_job_id: str,
+    manifest: Optional[Dict],
+    *,
+    now_epoch: Optional[int] = None,
+) -> str:
+    """Choose a free UI action without starting or repeating provider work."""
+    if (
+        not marker_job_id
+        or marker_job_id != expected_job_id
+        or not _valid_runtime_id_v68_15(expected_job_id)
+    ):
+        return "manual"
+    if manifest is None:
+        # The user may refresh immediately after selecting Start, before the
+        # first manifest write. The exact job marker still proves intent.
+        return "resume"
+    if _valid_runtime_id_v68_15(manifest.get("job_id")) != expected_job_id:
+        return "manual"
+    status = safe_str(manifest.get("status")).lower()
+    if status in {"paused_error", "paused_quota", "completed"}:
+        return "manual"
+    if bool(manifest.get("continuation_ready", False)):
+        return "resume"
+    try:
+        lease_until = int(manifest.get("execution_lease_until", 0) or 0)
+    except (TypeError, ValueError):
+        lease_until = 0
+    current_epoch = int(time.time()) if now_epoch is None else int(now_epoch)
+    if status == "running" and lease_until > current_epoch:
+        return "wait"
+    if status == "running" and lease_until <= 0:
+        # The explicit Start may have created the manifest just before a
+        # refresh, but no provider execution fence was acquired yet.
+        return "resume"
+    return "manual"
+
+
+def _tagging_active_job_matches_v68_55(
+    tagging_job_active: bool,
+    marker_job_id: str,
+    expected_job_id: str,
+) -> bool:
+    """Prevent an active rerun from switching to another checkpoint job."""
+    if not tagging_job_active or not expected_job_id:
+        return True
+    return bool(
+        _valid_runtime_id_v68_15(expected_job_id)
+        and marker_job_id == expected_job_id
+    )
+
+
+@st.fragment(run_every="3s")
+def _render_tagging_auto_wait_v68_55(job_id: str) -> None:
+    """Poll a still-active unit after refresh without launching a duplicate call."""
+    st.info(
+        "Tagging is still finishing the current saved step. "
+        "This page will continue automatically."
+    )
+    try:
+        store = _large_batch_store_v68_43()
+        manifest = store.load_manifest(job_id)
+        manifest = store.reconcile(manifest) if manifest else None
+    except Exception:
+        store = None
+        manifest = None
+    marker_job_id = _tagging_continue_job_v68_55()
+    action = _tagging_auto_resume_action_v68_55(
+        marker_job_id,
+        job_id,
+        manifest,
+    )
+    if action == "resume":
+        try:
+            if store is not None and store.execution_is_active(job_id):
+                return
+        except Exception:
+            _clear_tagging_continue_query_v68_55()
+            st.rerun(scope="app")
+        st.rerun(scope="app")
+    if action == "manual":
+        _clear_tagging_continue_query_v68_55()
+        st.rerun(scope="app")
+
+
 def _attach_comparison_metadata_v68_43(
     tagged: pd.DataFrame,
     manifest: Dict,
@@ -2988,6 +3155,7 @@ def _run_checkpointed_tag_every_link_v68_43(
     chunk_timer = time.perf_counter()
 
     try:
+        manifest = store.mark_executing(manifest)
         existing_positions = set(
             store.partial_positions(manifest["job_id"], next_chunk_index)
         )
@@ -3042,11 +3210,16 @@ def _run_checkpointed_tag_every_link_v68_43(
                         }
                     )
             records.extend(new_records)
-            store.save_scraped_records(
+            remote_records_saved = store.save_scraped_records(
                 manifest["job_id"],
                 next_chunk_index,
                 records,
             )
+            if (
+                getattr(store, "persistent_store", None) is not None
+                and remote_records_saved is False
+            ):
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
             remaining_scrape_count = len(rows_missing_records) - len(scrape_rows)
             if remaining_scrape_count > 0:
                 status.update(
@@ -3057,6 +3230,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                     state="complete",
                     expanded=False,
                 )
+                store.mark_continuation_ready(manifest)
                 return None
         else:
             status.write("Reusing the saved Apify result for this chunk.")
@@ -3155,6 +3329,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 state="complete",
                 expanded=False,
             )
+            store.mark_continuation_ready(manifest)
             return None
         tagged_chunk = partial_chunk.drop(
             columns=["_checkpoint_row_position"],
@@ -3188,6 +3363,8 @@ def _run_checkpointed_tag_every_link_v68_43(
             state="complete",
             expanded=False,
         )
+        if manifest.get("status") != "completed":
+            store.mark_continuation_ready(manifest)
     except Exception as exc:
         error_code = _large_batch_error_code_v68_43(exc)
         LOGGER.exception(
@@ -3220,6 +3397,20 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"diagnostic code {error_code} before resuming."
             )
         return pd.DataFrame()
+    except BaseException as control:
+        control_type = type(control)
+        if (
+            control_type.__module__.startswith("streamlit.")
+            and control_type.__name__ in {"StopException", "RerunException"}
+        ):
+            # Streamlit only raises its control exceptions at UI yield points.
+            # Provider results reached before those points have already been
+            # checkpointed, so a replacement browser session can continue.
+            try:
+                store.mark_continuation_ready(manifest)
+            except Exception:
+                pass
+        raise
 
     if manifest.get("status") == "completed":
         completed = store.load_completed_results(manifest)
@@ -4157,6 +4348,17 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 "are excluded from this ranking."
             )
 
+        target_candidates = creator_table[["Platform", "Creator"]].copy()
+        target_candidates["Creator Key"] = target_candidates["Creator"].map(creator_key)
+        target_candidates = target_candidates[
+            target_candidates["Creator Key"].ne("")
+        ].drop_duplicates(["Platform", "Creator Key"], keep="first")
+
+        if st.session_state.get("creator_profile_scope_v68_51") not in PROFILE_SCOPE_OPTIONS:
+            # Migrate older sessions that may still contain the retired "All"
+            # option to the new cost-safe default.
+            st.session_state.creator_profile_scope_v68_51 = PROFILE_SCOPE_OPTIONS[0]
+
         control_col, action_col = st.columns([2, 1])
         with control_col:
             profile_scope = st.selectbox(
@@ -4164,15 +4366,23 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 PROFILE_SCOPE_OPTIONS,
                 index=0,
                 key="creator_profile_scope_v68_51",
-                help="Top creators are selected by batch engagement. All may take longer and use more Apify results.",
+                help="Top creators are selected by batch engagement.",
             )
         with action_col:
             enrich_clicked = st.button(
-                "Fetch / refresh profile metrics",
+                "Fetch profile metrics (uses Apify credits)",
                 type="secondary",
                 width="stretch",
                 key="creator_profile_fetch_v68_51",
             )
+        target_count_preview = profile_scope_count(profile_scope, len(target_candidates))
+        max_post_results = target_count_preview * DEFAULT_PROFILE_POST_LIMIT
+        st.caption(
+            f"Checks up to {target_count_preview:,} creator"
+            f"{'s' if target_count_preview != 1 else ''} × the latest "
+            f"{DEFAULT_PROFILE_POST_LIMIT} public posts within three months "
+            f"(maximum {max_post_results:,} post results)."
+        )
 
         if enrich_clicked:
             apify_token = safe_str(
@@ -4183,8 +4393,8 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             if not apify_token:
                 st.warning("Add the Apify token on the API Keys page before enriching creator profiles.")
             else:
-                target_count = profile_scope_count(profile_scope, len(creator_table))
-                targets = creator_table.head(target_count)[["Platform", "Creator"]].copy()
+                target_count = target_count_preview
+                targets = target_candidates.head(target_count)[["Platform", "Creator"]].copy()
                 try:
                     with st.spinner(
                         f"Fetching public profile posts for {len(targets):,} creator"
@@ -4263,13 +4473,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 except Exception:
                     updated_label = updated_at
                 st.caption(
-                    f"Public profile metadata updated {updated_label}. Latest three months, "
-                    f"up to {DEFAULT_PROFILE_POST_LIMIT} public posts per creator; no media is downloaded."
+                    f"Public profile metadata updated {updated_label}. Latest "
+                    f"{DEFAULT_PROFILE_POST_LIMIT} public posts per creator dated within "
+                    "the past three months; no media is downloaded."
                 )
         else:
             st.caption(
-                f"Optional enrichment checks the latest three months, up to {DEFAULT_PROFILE_POST_LIMIT} "
-                "public posts per creator. It runs only when you click the button."
+                f"Optional enrichment checks each creator's latest {DEFAULT_PROFILE_POST_LIMIT} "
+                "public posts dated within the past three months. It runs only when you click the button."
             )
 
         render_sortable_summary_table_v68_46(
@@ -5105,6 +5316,9 @@ elif st.session_state.step == 4:
             options=list(GEMINI_MODEL_OPTIONS.keys()),
             format_func=gemini_model_label,
             key="qa_gemini_model_v68_41_4",
+            disabled=bool(
+                st.session_state.get("tagging_job_active_v68_43", False)
+            ),
             help="3.1 Flash-Lite is recommended for routine batches. 3.5 Flash is slower and is available for smaller ambiguous batches.",
         )
         st.caption(
@@ -5115,6 +5329,7 @@ elif st.session_state.step == 4:
     # evidence remain unresolved.
     st.session_state.enable_full_video_fallback_v46 = True
     saved_large_batch = _large_batch_manifest_v68_43(selected)
+    expected_large_job_id = _large_batch_job_id_v68_55(selected)
     if _uses_large_batch_checkpoints_v68_43(selected):
         completed_count = int(
             (saved_large_batch or {}).get(
@@ -5131,13 +5346,88 @@ elif st.session_state.step == 4:
             )
         )
 
-    if st.session_state.get("tagging_job_active_v68_43", False):
-        tagged_result = run_real_tagging_backend(selected)
+    tagging_job_active = bool(
+        st.session_state.get("tagging_job_active_v68_43", False)
+    )
+    auto_resume_action = "manual"
+    marker_job_id = (
+        _tagging_continue_job_v68_55() if expected_large_job_id else ""
+    )
+    if not _tagging_active_job_matches_v68_55(
+        tagging_job_active,
+        marker_job_id,
+        expected_large_job_id,
+    ):
+        # The selected rows or model changed during a Streamlit rerun. Never
+        # let an active flag launch paid work for a different checkpoint job.
+        st.session_state.tagging_job_active_v68_43 = False
+        tagging_job_active = False
+        _clear_tagging_continue_query_v68_55()
+        st.warning(
+            "Tagging paused because the run settings changed. Select Resume "
+            "tagging to continue with the current settings."
+        )
+    elif not tagging_job_active and expected_large_job_id:
+        auto_resume_action = _tagging_auto_resume_action_v68_55(
+            marker_job_id,
+            expected_large_job_id,
+            saved_large_batch,
+        )
+        if auto_resume_action == "resume":
+            _set_tagging_continue_query_v68_55(expected_large_job_id)
+            st.session_state.tagging_job_active_v68_43 = True
+            tagging_job_active = True
+        elif auto_resume_action == "manual" and marker_job_id:
+            _clear_tagging_continue_query_v68_55()
+
+    execution_store = None
+    execution_owner = ""
+    execution_lock_acquired = False
+    execution_lock_error = False
+    if tagging_job_active and expected_large_job_id:
+        execution_store = _large_batch_store_v68_43()
+        execution_owner = _tagging_execution_owner_v68_55()
+        try:
+            execution_lock_acquired = execution_store.try_acquire_execution(
+                expected_large_job_id,
+                execution_owner,
+            )
+        except Exception:
+            execution_lock_error = True
+        if not execution_lock_acquired:
+            st.session_state.tagging_job_active_v68_43 = False
+            tagging_job_active = False
+            if execution_lock_error:
+                auto_resume_action = "manual"
+                _clear_tagging_continue_query_v68_55()
+            else:
+                auto_resume_action = "wait"
+
+    if execution_lock_error:
+        st.warning(
+            "Automatic continuation paused because the execution safeguard "
+            "could not be created. Select Resume tagging to try again."
+        )
+
+    if auto_resume_action == "wait" and not tagging_job_active:
+        _render_tagging_auto_wait_v68_55(expected_large_job_id)
+    elif tagging_job_active:
+        try:
+            tagged_result = run_real_tagging_backend(selected)
+        finally:
+            if execution_lock_acquired and execution_store is not None:
+                execution_store.release_execution(
+                    expected_large_job_id,
+                    execution_owner,
+                )
         if tagged_result is None:
             # Each large-batch chunk runs in a fresh Streamlit execution. This
             # avoids one 800-row request monopolising a single script run.
+            if expected_large_job_id:
+                _set_tagging_continue_query_v68_55(expected_large_job_id)
             st.rerun()
         st.session_state.tagging_job_active_v68_43 = False
+        _clear_tagging_continue_query_v68_55()
         if tagged_result is not None and not tagged_result.empty:
             reset_review_state_for_new_tagging_run()
             st.session_state.tagged_df = tagged_result
@@ -5154,6 +5444,8 @@ elif st.session_state.step == 4:
                 go(3)
         with retry_run:
             if st.button(retry_label, type="primary", width="stretch"):
+                if expected_large_job_id:
+                    _set_tagging_continue_query_v68_55(expected_large_job_id)
                 st.session_state.tagging_job_active_v68_43 = True
                 st.rerun()
     else:
@@ -5169,6 +5461,8 @@ elif st.session_state.step == 4:
                 go(3)
         with c2:
             if st.button(start_label, type="primary", width="stretch"):
+                if expected_large_job_id:
+                    _set_tagging_continue_query_v68_55(expected_large_job_id)
                 st.session_state.tagging_job_active_v68_43 = True
                 st.rerun()
 

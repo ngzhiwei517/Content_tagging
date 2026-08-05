@@ -17,8 +17,8 @@ from ugc_tagger.instagram_reels_adapter import INSTAGRAM_REELS, TIKTOK
 
 TIKTOK_PROFILE_ACTOR_ID = "clockworks/tiktok-scraper"
 INSTAGRAM_PROFILE_ACTOR_ID = "apify/instagram-scraper"
-DEFAULT_PROFILE_POST_LIMIT = 200
-PROFILE_SCOPE_OPTIONS = ("Top 10", "Top 20", "All")
+DEFAULT_PROFILE_POST_LIMIT = 20
+PROFILE_SCOPE_OPTIONS = ("Top 5", "Top 10", "Top 20")
 
 PROFILE_METRIC_COLUMNS = [
     "Platform",
@@ -102,11 +102,15 @@ def creator_profile_url(platform: str, creator) -> str:
 
 
 def profile_scope_count(scope: str, total: int) -> int:
+    if _text(scope) == "Top 5":
+        return min(5, max(int(total), 0))
     if _text(scope) == "Top 10":
         return min(10, max(int(total), 0))
     if _text(scope) == "Top 20":
         return min(20, max(int(total), 0))
-    return max(int(total), 0)
+    # Unknown or retired values such as "All" must fail to the least costly
+    # option instead of unexpectedly requesting every creator profile.
+    return min(5, max(int(total), 0))
 
 
 def _dataset_id(run) -> str:

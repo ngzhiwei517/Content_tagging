@@ -3,7 +3,9 @@ import unittest
 import pandas as pd
 
 from ugc_tagger.creator_profile_enrichment import (
+    DEFAULT_PROFILE_POST_LIMIT,
     INSTAGRAM_PROFILE_ACTOR_ID,
+    PROFILE_SCOPE_OPTIONS,
     TIKTOK_PROFILE_ACTOR_ID,
     creator_profile_url,
     normalize_creator_handle,
@@ -60,9 +62,12 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             creator_profile_url(INSTAGRAM_REELS, "alice"),
             "https://www.instagram.com/alice/",
         )
+        self.assertEqual(PROFILE_SCOPE_OPTIONS, ("Top 5", "Top 10", "Top 20"))
+        self.assertEqual(DEFAULT_PROFILE_POST_LIMIT, 20)
+        self.assertEqual(profile_scope_count("Top 5", 25), 5)
         self.assertEqual(profile_scope_count("Top 10", 25), 10)
         self.assertEqual(profile_scope_count("Top 20", 12), 12)
-        self.assertEqual(profile_scope_count("All", 25), 25)
+        self.assertEqual(profile_scope_count("All", 25), 5)
 
     def test_scrape_uses_metadata_only_and_aggregates_both_platforms(self):
         client = _FakeClient({
@@ -106,7 +111,7 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             "test-token",
             client=client,
             months=3,
-            post_limit=200,
+            post_limit=DEFAULT_PROFILE_POST_LIMIT,
             as_of="2026-08-04T00:00:00Z",
         )
 
@@ -129,6 +134,8 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             if actor_id == TIKTOK_PROFILE_ACTOR_ID
         )
         self.assertEqual(tiktok_input["profiles"], ["alice"])
+        self.assertEqual(tiktok_input["profileSorting"], "latest")
+        self.assertEqual(tiktok_input["resultsPerPage"], 20)
         self.assertEqual(tiktok_input["oldestPostDateUnified"], "3 months")
         self.assertFalse(tiktok_input["shouldDownloadVideos"])
         self.assertFalse(tiktok_input["shouldDownloadCovers"])
@@ -137,7 +144,7 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             if actor_id == INSTAGRAM_PROFILE_ACTOR_ID and run_input.get("resultsType") == "posts"
         )
         self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
-        self.assertEqual(instagram_posts_input["resultsLimit"], 200)
+        self.assertEqual(instagram_posts_input["resultsLimit"], 20)
 
     def test_missing_token_is_rejected_without_a_client(self):
         with self.assertRaisesRegex(RuntimeError, "Missing Apify token"):

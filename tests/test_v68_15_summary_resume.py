@@ -371,7 +371,9 @@ class SummaryV6815Tests(unittest.TestCase):
         creator_section = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
             "def bar_list", 1
         )[0]
-        self.assertIn("Fetch / refresh profile metrics", creator_section)
+        self.assertIn("Fetch profile metrics (uses Apify credits)", creator_section)
+        self.assertIn("maximum {max_post_results:,} post results", creator_section)
+        self.assertIn('drop_duplicates(["Platform", "Creator Key"]', creator_section)
         self.assertIn("creator_profile_url", creator_section)
         self.assertIn('"Creator Profile"', creator_section)
         self.assertIn("DEFAULT_PROFILE_POST_LIMIT", creator_section)

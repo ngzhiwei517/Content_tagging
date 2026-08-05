@@ -411,7 +411,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
         self.assertIn('"Save this batch"', APP_SOURCE)
-        self.assertIn("Bookmark this page, or copy the private link below", APP_SOURCE)
+        self.assertIn("Copy the private link below to continue later", APP_SOURCE)
         self.assertIn('with st.expander("Open a saved batch"', APP_SOURCE)
         self.assertIn("If you only have a recovery ID", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)

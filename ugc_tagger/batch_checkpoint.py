@@ -181,6 +181,9 @@ class BatchCheckpointStore:
     def _partial_snapshot_path(self, job_id: str, chunk_index: int) -> Path:
         return self._partial_dir(job_id, chunk_index) / "snapshot.json"
 
+    def _execution_lock_path(self, job_id: str) -> Path:
+        return self._job_dir(job_id) / ".execution_lock.json"
+
     @staticmethod
     def _write_local_json(path: Path, payload) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +358,8 @@ class BatchCheckpointStore:
             "elapsed_seconds": 0.0,
             "last_error": "",
             "pause_reason": "",
+            "continuation_ready": False,
+            "execution_lease_until": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -384,12 +389,15 @@ class BatchCheckpointStore:
         manifest: Dict,
         *,
         persist_remote: bool = True,
+        require_remote: bool = False,
     ) -> Dict:
         updated = dict(manifest)
         updated["updated_at"] = _utc_now()
         path = self._manifest_path(updated["job_id"])
         if persist_remote:
-            self._atomic_write_json(path, updated)
+            remote_saved = self._atomic_write_json(path, updated)
+            if require_remote and self.persistent_store is not None and not remote_saved:
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
         else:
             self._write_local_json(path, updated)
         return updated
@@ -467,10 +475,13 @@ class BatchCheckpointStore:
         job_id: str,
         chunk_index: int,
         records: Iterable[Dict],
-    ) -> None:
+    ) -> bool:
         """Temporarily save public scraper output, explicitly removing secret fields."""
         payload = [_json_safe(record) for record in records if isinstance(record, dict)]
-        self._atomic_write_json(self._records_path(job_id, chunk_index), payload)
+        return self._atomic_write_json(
+            self._records_path(job_id, chunk_index),
+            payload,
+        )
 
     def load_scraped_records(self, job_id: str, chunk_index: int) -> Optional[List[Dict]]:
         path = self._records_path(job_id, chunk_index)
@@ -651,6 +662,8 @@ class BatchCheckpointStore:
         )
         updated["last_error"] = ""
         updated["pause_reason"] = ""
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = 0
         updated["status"] = (
             "completed"
             if len(completed) >= int(updated["total_chunks"])
@@ -675,12 +688,124 @@ class BatchCheckpointStore:
         )
         return updated
 
+    def mark_executing(self, manifest: Dict, *, lease_seconds: int = 7200) -> Dict:
+        """Record one active provider unit so a replacement UI does not duplicate it."""
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        updated["status"] = "running"
+        updated["pause_reason"] = ""
+        updated["last_error"] = ""
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = int(time.time()) + max(
+            60,
+            int(lease_seconds),
+        )
+        return self.save_manifest(updated, require_remote=True)
+
+    def mark_continuation_ready(self, manifest: Dict) -> Dict:
+        """Mark a durable, intentional yield that is safe to continue automatically."""
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        if updated.get("status") != "completed":
+            updated["status"] = "running"
+        updated["continuation_ready"] = updated.get("status") != "completed"
+        updated["execution_lease_until"] = 0
+        return self.save_manifest(updated)
+
+    def _read_execution_lock(self, job_id: str) -> Dict:
+        path = self._execution_lock_path(job_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def execution_is_active(self, job_id: str) -> bool:
+        """Return whether another local Streamlit session holds a fresh lease."""
+        path = self._execution_lock_path(job_id)
+        payload = self._read_execution_lock(job_id)
+        try:
+            lease_until = int(payload.get("lease_until", 0) or 0)
+        except (TypeError, ValueError):
+            lease_until = 0
+        if lease_until > int(time.time()):
+            return True
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    def try_acquire_execution(
+        self,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+    ) -> bool:
+        """Atomically allow only one local session to launch the next paid unit."""
+        job_id = self._validated_job_id(job_id)
+        owner_id = str(owner_id or "").strip().lower()
+        if not _SAFE_ID.fullmatch(owner_id):
+            raise ValueError("Invalid tagging execution owner id.")
+        path = self._execution_lock_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lease_until = int(time.time()) + max(60, int(lease_seconds))
+
+        for _attempt in range(3):
+            existing = self._read_execution_lock(job_id)
+            if existing:
+                try:
+                    existing_until = int(existing.get("lease_until", 0) or 0)
+                except (TypeError, ValueError):
+                    existing_until = 0
+                if existing_until > int(time.time()):
+                    return False
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
+            try:
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                )
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {"owner_id": owner_id, "lease_until": lease_until},
+                        handle,
+                    )
+                return True
+            except Exception:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        return False
+
+    def release_execution(self, job_id: str, owner_id: str) -> None:
+        """Release a local execution lease only when it belongs to this session."""
+        path = self._execution_lock_path(job_id)
+        existing = self._read_execution_lock(job_id)
+        if existing.get("owner_id") != str(owner_id or "").strip().lower():
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
         """Pause without persisting raw provider errors or credentials."""
         reconciled = self.reconcile(manifest)
         updated = dict(reconciled)
         updated["status"] = "paused_quota" if quota else "paused_error"
         updated["pause_reason"] = "quota" if quota else "interrupted"
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = 0
         updated["last_error"] = (
             "API quota is unavailable. Resume after the app owner restores access."
             if quota
