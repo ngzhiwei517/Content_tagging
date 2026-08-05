@@ -248,7 +248,7 @@ class SummaryV6815Tests(unittest.TestCase):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         positions = [
             step_six.index('section_title("Market Summary"'),
-            step_six.index('section_title("Campaign Summary"'),
+            step_six.index('section_title("Track Summary"'),
             step_six.index('section_title("Sound Breakdown"'),
             step_six.index('section_title("Creative Type Mix"'),
             step_six.index('section_title("Top Posts"'),
@@ -313,7 +313,7 @@ class SummaryV6815Tests(unittest.TestCase):
 
     def test_every_summary_table_uses_clickable_header_sorting(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
-        for title in ["Platform Summary", "Market Summary", "Campaign Summary", "Sound Breakdown", "Source Summary"]:
+        for title in ["Platform Summary", "Market Summary", "Track Summary", "Sound Breakdown", "Source Summary"]:
             with self.subTest(title=title):
                 section = step_six.split(f'section_title("{title}"', 1)[1]
                 self.assertIn("render_sortable_summary_table_v68_46(", section)

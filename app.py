@@ -3798,7 +3798,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Source Summary": "S",
         "Market Summary": "M",
         "Top Creator Performance": "C",
-        "Campaign Summary": "T",
+        "Track Summary": "T",
         "Sound Breakdown": "S",
         "Top Posts": "",
         "Post Summary": "P",
@@ -3892,10 +3892,10 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Average Engagement",
     "Average Views",
     "Average Engagements",
-    "Campaign Posts",
-    "Campaign Views",
-    "Campaign Engagement",
-    "Campaign Average Engagement",
+    "Batch Posts",
+    "Batch Views",
+    "Batch Engagement",
+    "Batch Average Engagement",
     "Profile Posts",
     "Current Followers",
     "Profile Average Views",
@@ -3908,7 +3908,7 @@ SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Comments Rate",
     "Shares Rate",
     "Saves Rate",
-    "Campaign Average Engagement Rate",
+    "Batch Average Engagement Rate",
     "Profile Average Engagement Rate",
 }
 TOP_POST_TABLE_COLUMNS_V68_46 = [
@@ -4148,7 +4148,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             )
             return
         st.caption(
-            "Campaign columns use posts in the current batch. Profile columns are fetched separately "
+            "Batch columns use posts in the current batch. Profile columns are fetched separately "
             "from each creator's public platform activity."
         )
         if missing_creator_posts:
@@ -4164,7 +4164,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 PROFILE_SCOPE_OPTIONS,
                 index=0,
                 key="creator_profile_scope_v68_51",
-                help="Top creators are selected by campaign engagement. All may take longer and use more Apify results.",
+                help="Top creators are selected by batch engagement. All may take longer and use more Apify results.",
             )
         with action_col:
             enrich_clicked = st.button(
@@ -4220,14 +4220,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                         st.warning(profile_error)
                 except Exception:
                     LOGGER.exception("Creator profile enrichment failed")
-                    st.error("Creator profile enrichment could not be completed. Campaign metrics are still available.")
+                    st.error("Creator profile enrichment could not be completed. Batch metrics are still available.")
 
         display_table = creator_table.rename(columns={
-            "Posts": "Campaign Posts",
-            "Total Views": "Campaign Views",
-            "Total Engagement": "Campaign Engagement",
-            "Average Engagement": "Campaign Average Engagement",
-            "Average Engagement Rate": "Campaign Average Engagement Rate",
+            "Posts": "Batch Posts",
+            "Total Views": "Batch Views",
+            "Total Engagement": "Batch Engagement",
+            "Average Engagement": "Batch Average Engagement",
+            "Average Engagement Rate": "Batch Average Engagement Rate",
         }).copy()
         display_table["Creator Key"] = display_table["Creator"].map(creator_key)
         display_table["Creator Profile"] = display_table.apply(
@@ -4275,9 +4275,9 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         render_sortable_summary_table_v68_46(
             display_table,
             columns=[
-                "Creator Profile", "Market", "Platform", "Campaign Posts",
-                "Campaign Views", "Campaign Engagement", "Campaign Average Engagement",
-                "Campaign Average Engagement Rate", *profile_columns,
+                "Creator Profile", "Market", "Platform", "Batch Posts",
+                "Batch Views", "Batch Engagement", "Batch Average Engagement",
+                "Batch Average Engagement Rate", *profile_columns,
             ],
             max_visible_rows=15,
         )
@@ -5123,8 +5123,7 @@ elif st.session_state.step == 4:
             )
         )
         st.info(
-            "Large-batch protection is on. Apify runs are limited to 25 posts, "
-            "and each completed tag is saved"
+            "Large-batch protection is on. Progress is saved automatically"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count
@@ -5794,7 +5793,7 @@ elif st.session_state.step == 6:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='card'>" + section_title("Campaign Summary", "#f97316"), unsafe_allow_html=True)
+    st.markdown("<div class='card'>" + section_title("Track Summary", "#f97316"), unsafe_allow_html=True)
     campaign_summary = aggregate_summary_performance_v68_15(filtered, ["Track Display", "Campaign Artist Display"]).rename(columns={
         "Track Display": "Track",
         "Campaign Artist Display": "Artist",
