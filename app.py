@@ -926,6 +926,7 @@ DEFAULT_STATE = {
     "tagged_df": pd.DataFrame(),
     "last_message": "",
     "review_pointer": 0,
+    "review_queue_indices_v68_57": [],
     "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
@@ -954,6 +955,7 @@ def reset_review_state_for_new_tagging_run() -> None:
         if str(key).startswith("review_"):
             st.session_state.pop(key, None)
     st.session_state.review_pointer = 0
+    st.session_state.review_queue_indices_v68_57 = []
 
 # Navigation helpers
 def go(step: int):
@@ -971,6 +973,46 @@ def safe_str(v) -> str:
     except Exception:
         pass
     return str(v).strip()
+
+
+def review_queue_indices_v68_57(
+    tagged: pd.DataFrame,
+    saved_queue=None,
+) -> List:
+    """Keep reviewed rows navigable while retaining the original review order."""
+    if not isinstance(tagged, pd.DataFrame) or tagged.empty:
+        return []
+
+    index_by_key = {safe_str(index): index for index in tagged.index}
+    queue = []
+    if isinstance(saved_queue, (list, tuple)):
+        for saved_index in saved_queue:
+            actual_index = index_by_key.get(safe_str(saved_index))
+            if actual_index is not None and actual_index not in queue:
+                queue.append(actual_index)
+
+    needs_review = tagged.get(
+        "Needs Review",
+        pd.Series([False] * len(tagged), index=tagged.index),
+    ).fillna(False).eq(True)
+    tier_used = tagged.get(
+        "Tier Used",
+        pd.Series([""] * len(tagged), index=tagged.index),
+    ).fillna("").astype(str).str.strip().str.lower()
+    candidate_indices = tagged.index[
+        needs_review | tier_used.eq("tier3_human")
+    ].tolist()
+    for candidate_index in candidate_indices:
+        if candidate_index not in queue:
+            queue.append(candidate_index)
+    return queue
+
+
+def next_review_pointer_v68_57(pointer: int, queue_size: int) -> int:
+    """Advance through a stable review queue without dropping review history."""
+    if queue_size <= 0:
+        return 0
+    return min(max(0, int(pointer)) + 1, queue_size - 1)
 
 
 @st.cache_data(ttl=900, max_entries=128, show_spinner=False)
@@ -1001,6 +1043,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "tagged_df",
     "last_message",
     "review_pointer",
+    "review_queue_indices_v68_57",
     "enable_full_video_fallback_v46",
     "date_filter_scope_v68",
     "track_date_settings_v68",
@@ -5482,8 +5525,14 @@ elif st.session_state.step == 5:
             go(4)
         st.stop()
 
-    review_action_series = tagged.get("Review Action", pd.Series([""] * len(tagged), index=tagged.index)).fillna("").astype(str).str.upper()
-    review_df = tagged[(tagged.get("Needs Review", False) == True) & (review_action_series != "REMOVE")].copy()
+    review_queue_indices = review_queue_indices_v68_57(
+        tagged,
+        st.session_state.get("review_queue_indices_v68_57"),
+    )
+    st.session_state.review_queue_indices_v68_57 = [
+        safe_str(index) for index in review_queue_indices
+    ]
+    review_df = tagged.loc[review_queue_indices].copy() if review_queue_indices else tagged.iloc[0:0].copy()
 
     if review_df.empty:
         st.markdown("<div class='good-note'>All flagged posts have been reviewed.</div>", unsafe_allow_html=True)
@@ -5495,6 +5544,19 @@ elif st.session_state.step == 5:
             if st.button("Continue to Summary", type="primary", width="stretch"):
                 go(6)
         st.stop()
+
+    pending_review_count = int(
+        review_df.get(
+            "Needs Review",
+            pd.Series([False] * len(review_df), index=review_df.index),
+        ).fillna(False).eq(True).sum()
+    )
+    if pending_review_count == 0:
+        st.markdown(
+            "<div class='good-note'>All flagged posts have been reviewed. "
+            "You can revisit them below or continue to Summary.</div>",
+            unsafe_allow_html=True,
+        )
 
     # Original-app style: one review item at a time, with Previous / Skip navigation.
     pointer = int(st.session_state.get("review_pointer", 0) or 0)
@@ -5511,7 +5573,7 @@ elif st.session_state.step == 5:
             st.rerun()
     with nav2:
         st.markdown(
-            f"<div style='text-align:center;color:#64748b;font-size:13px;font-weight:800;padding:10px 0'>Post {pointer + 1} of {len(review_df)}</div>",
+            f"<div style='text-align:center;color:#64748b;font-size:13px;font-weight:800;padding:10px 0'>Post {pointer + 1} of {len(review_df)} &middot; {pending_review_count} remaining</div>",
             unsafe_allow_html=True,
         )
     with nav3:
@@ -5591,7 +5653,11 @@ elif st.session_state.step == 5:
     with right:
         action_key = f"review_action_v55_{original_idx}"
         if action_key not in st.session_state:
-            st.session_state[action_key] = "Keep & Tag"
+            st.session_state[action_key] = (
+                "Remove"
+                if safe_str(row.get("Review Action")).upper() == "REMOVE"
+                else "Keep & Tag"
+            )
 
         st.markdown("<div class='review-panel-card'><h3>Review Action</h3><div class='review-action-title'>What should happen to this post?</div>", unsafe_allow_html=True)
         keep_col, remove_col = st.columns(2)
@@ -5638,7 +5704,10 @@ elif st.session_state.step == 5:
                 st.session_state.tagged_df.at[original_idx, "QA Priority"] = "Removed"
                 st.session_state.tagged_df.at[original_idx, "Tier Used"] = "tier3_human"
                 st.session_state.tagged_df.at[original_idx, "Validation Status"] = "removed"
-                st.session_state.review_pointer = 0
+                st.session_state.review_pointer = next_review_pointer_v68_57(
+                    pointer,
+                    len(review_df),
+                )
                 st.session_state.pop(action_key, None)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
@@ -5878,7 +5947,10 @@ elif st.session_state.step == 5:
                     st.session_state.tagged_df.at[original_idx, "Tier Used"] = "tier3_human"
                     st.session_state.tagged_df.at[original_idx, "Validation Status"] = "reviewed"
                     st.session_state.tagged_df = add_performance_fields(st.session_state.tagged_df)
-                    st.session_state.review_pointer = 0
+                    st.session_state.review_pointer = next_review_pointer_v68_57(
+                        pointer,
+                        len(review_df),
+                    )
                     for key in [
                         ai_result_key, narrative_key, type_key, details_key, action_key,
                         *metric_keys.values(), *drama_keys.values(),
