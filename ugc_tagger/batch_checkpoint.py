@@ -178,6 +178,12 @@ class BatchCheckpointStore:
     ) -> Path:
         return self._partial_dir(job_id, chunk_index) / f"row_{int(row_position):05d}.json"
 
+    def _partial_snapshot_path(self, job_id: str, chunk_index: int) -> Path:
+        return self._partial_dir(job_id, chunk_index) / "snapshot.json"
+
+    def _execution_lock_path(self, job_id: str) -> Path:
+        return self._job_dir(job_id) / ".execution_lock.json"
+
     @staticmethod
     def _write_local_json(path: Path, payload) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,18 +192,45 @@ class BatchCheckpointStore:
             json.dumps(payload, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
-        os.replace(temporary, path)
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt >= 3:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
+                # Windows file indexing/antivirus can hold the destination for
+                # a few milliseconds during rapid checkpoint updates.
+                time.sleep(0.02 * (attempt + 1))
 
     def _object_key(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
 
-    def _atomic_write_json(self, path: Path, payload) -> None:
+    def _hydration_marker_path(self, prefix: str) -> Path:
+        """Return a local marker for one completed remote-prefix hydration."""
+        digest = hashlib.sha256(str(prefix).encode("utf-8")).hexdigest()[:24]
+        return self.root / ".hydrated" / f"{digest}.done"
+
+    def _atomic_write_json(self, path: Path, payload) -> bool:
+        """Write locally and report whether the optional remote copy succeeded.
+
+        Local checkpoints remain the fallback when persistent storage is not
+        configured or temporarily unavailable.  Callers that compact several
+        remote objects into one larger object use the return value to avoid
+        deleting the smaller recovery copies before the larger copy is durable.
+        """
         self._write_local_json(path, payload)
         if self.persistent_store is not None:
             try:
                 self.persistent_store.save(self._object_key(path), payload)
+                return True
             except Exception:
                 pass
+        return False
 
     def _read_json(self, path: Path):
         try:
@@ -218,17 +251,37 @@ class BatchCheckpointStore:
     def _hydrate_prefix(self, prefix: str) -> None:
         if self.persistent_store is None:
             return
+        marker = self._hydration_marker_path(prefix)
+        prefix_text = str(prefix).strip("/")
+        job_prefix = f"{prefix_text.split('/', 1)[0]}/" if prefix_text else ""
+        job_marker = self._hydration_marker_path(job_prefix) if job_prefix else marker
+        if marker.exists() or job_marker.exists():
+            # Remote writes are local-first. Once this process has hydrated a
+            # prefix, the local files are at least as current as their remote
+            # copies. Avoid downloading an ever-growing Supabase payload on
+            # every Streamlit rerun.
+            return
         try:
             objects = self.persistent_store.list_prefix(prefix)
         except Exception:
             return
+        hydration_complete = True
         for key, payload in objects.items():
             try:
                 destination = self.root / Path(key)
                 destination.relative_to(self.root)
                 self._write_local_json(destination, payload)
-            except (OSError, ValueError, TypeError):
+            except OSError:
+                hydration_complete = False
                 continue
+            except (ValueError, TypeError):
+                continue
+        if hydration_complete:
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("complete", encoding="utf-8")
+            except OSError:
+                pass
 
     def _delete_remote(self, key: str) -> None:
         if self.persistent_store is not None:
@@ -238,6 +291,10 @@ class BatchCheckpointStore:
                 pass
 
     def _delete_remote_prefix(self, prefix: str) -> None:
+        try:
+            self._hydration_marker_path(prefix).unlink(missing_ok=True)
+        except OSError:
+            pass
         if self.persistent_store is not None:
             try:
                 self.persistent_store.delete_prefix(prefix)
@@ -301,6 +358,8 @@ class BatchCheckpointStore:
             "elapsed_seconds": 0.0,
             "last_error": "",
             "pause_reason": "",
+            "continuation_ready": False,
+            "execution_lease_until": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -325,10 +384,22 @@ class BatchCheckpointStore:
         payload = self._read_json(path)
         return payload if isinstance(payload, dict) else None
 
-    def save_manifest(self, manifest: Dict) -> Dict:
+    def save_manifest(
+        self,
+        manifest: Dict,
+        *,
+        persist_remote: bool = True,
+        require_remote: bool = False,
+    ) -> Dict:
         updated = dict(manifest)
         updated["updated_at"] = _utc_now()
-        self._atomic_write_json(self._manifest_path(updated["job_id"]), updated)
+        path = self._manifest_path(updated["job_id"])
+        if persist_remote:
+            remote_saved = self._atomic_write_json(path, updated)
+            if require_remote and self.persistent_store is not None and not remote_saved:
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
+        else:
+            self._write_local_json(path, updated)
         return updated
 
     def reconcile(self, manifest: Dict) -> Dict:
@@ -373,7 +444,14 @@ class BatchCheckpointStore:
             reconciled["pause_reason"] = ""
         elif reconciled.get("status") == "completed":
             reconciled["status"] = "running"
-        return self.save_manifest(reconciled) if changed else reconciled
+        # Partial snapshots already carry their row positions. Keep frequent
+        # reconciliation local; completed chunks and explicit pause states
+        # still update the remote manifest.
+        return (
+            self.save_manifest(reconciled, persist_remote=False)
+            if changed
+            else reconciled
+        )
 
     def next_chunk_index(self, manifest: Dict) -> Optional[int]:
         completed = set(int(index) for index in manifest.get("completed_chunks", []))
@@ -397,23 +475,33 @@ class BatchCheckpointStore:
         job_id: str,
         chunk_index: int,
         records: Iterable[Dict],
-    ) -> None:
+    ) -> bool:
         """Temporarily save public scraper output, explicitly removing secret fields."""
         payload = [_json_safe(record) for record in records if isinstance(record, dict)]
-        self._atomic_write_json(self._records_path(job_id, chunk_index), payload)
+        return self._atomic_write_json(
+            self._records_path(job_id, chunk_index),
+            payload,
+        )
 
     def load_scraped_records(self, job_id: str, chunk_index: int) -> Optional[List[Dict]]:
         path = self._records_path(job_id, chunk_index)
         payload = self._read_json(path)
         return payload if isinstance(payload, list) else None
 
-    def discard_scraped_records(self, job_id: str, chunk_index: int) -> None:
+    def discard_scraped_records(
+        self,
+        job_id: str,
+        chunk_index: int,
+        *,
+        delete_remote: bool = True,
+    ) -> None:
         path = self._records_path(job_id, chunk_index)
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
-        self._delete_remote(self._object_key(path))
+        if delete_remote:
+            self._delete_remote(self._object_key(path))
 
     def save_partial_row(
         self,
@@ -421,7 +509,9 @@ class BatchCheckpointStore:
         chunk_index: int,
         row_position: int,
         tagged_row,
-    ) -> None:
+        *,
+        persist_remote: bool = True,
+    ) -> bool:
         """Atomically save one completed row from the current chunk."""
         if int(row_position) < 0:
             raise ValueError("Partial row position must be non-negative.")
@@ -435,13 +525,22 @@ class BatchCheckpointStore:
             raise TypeError("Partial tagged output must be a row or DataFrame.")
         if len(frame) != 1:
             raise ValueError("A partial checkpoint must contain exactly one row.")
-        self._atomic_write_json(
-            self._partial_row_path(
-                job_id,
-                chunk_index,
-                row_position,
-            ),
-            _json_safe(dataframe_to_payload(frame.reset_index(drop=True))),
+        path = self._partial_row_path(job_id, chunk_index, row_position)
+        payload = _json_safe(dataframe_to_payload(frame.reset_index(drop=True)))
+        if persist_remote:
+            return self._atomic_write_json(path, payload)
+        self._write_local_json(path, payload)
+        return False
+
+    def save_partial_snapshot(self, job_id: str, chunk_index: int) -> bool:
+        """Persist one compact snapshot for the current unfinished chunk."""
+        partial = self.load_partial_chunk_results(job_id, chunk_index)
+        if partial.empty:
+            return False
+        payload = _json_safe(dataframe_to_payload(partial.reset_index(drop=True)))
+        return self._atomic_write_json(
+            self._partial_snapshot_path(job_id, chunk_index),
+            payload,
         )
 
     def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
@@ -451,6 +550,19 @@ class BatchCheckpointStore:
         if not directory.exists():
             return []
         positions: List[int] = []
+        snapshot_payload = self._read_json(
+            self._partial_snapshot_path(job_id, chunk_index)
+        )
+        if snapshot_payload is not None:
+            snapshot = dataframe_from_payload(snapshot_payload)
+            for value in snapshot.get(
+                "_checkpoint_row_position",
+                pd.Series(dtype=int),
+            ).tolist():
+                try:
+                    positions.append(int(value))
+                except (TypeError, ValueError):
+                    continue
         for path in directory.glob("row_*.json"):
             match = re.fullmatch(r"row_(\d{5})\.json", path.name)
             if match:
@@ -464,8 +576,23 @@ class BatchCheckpointStore:
     ) -> pd.DataFrame:
         """Restore saved rows for one incomplete chunk in input order."""
         frames: List[pd.DataFrame] = []
-        for position in self.partial_positions(job_id, chunk_index):
-            path = self._partial_row_path(job_id, chunk_index, position)
+        snapshot_payload = self._read_json(
+            self._partial_snapshot_path(job_id, chunk_index)
+        )
+        if snapshot_payload is not None:
+            snapshot = dataframe_from_payload(snapshot_payload)
+            if (
+                not snapshot.empty
+                and "_checkpoint_row_position" in snapshot.columns
+            ):
+                frames.append(snapshot)
+        directory = self._partial_dir(job_id, chunk_index)
+        self._hydrate_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
+        for path in directory.glob("row_*.json"):
+            match = re.fullmatch(r"row_(\d{5})\.json", path.name)
+            if not match:
+                continue
+            position = int(match.group(1))
             payload = self._read_json(path)
             if payload is None:
                 continue
@@ -477,16 +604,27 @@ class BatchCheckpointStore:
         if not frames:
             return pd.DataFrame()
         output = pd.concat(frames, ignore_index=True)
+        output = output.drop_duplicates(
+            subset=["_checkpoint_row_position"],
+            keep="last",
+        )
         return output.sort_values(
             "_checkpoint_row_position",
             kind="stable",
         ).reset_index(drop=True)
 
-    def discard_partial_results(self, job_id: str, chunk_index: int) -> None:
+    def discard_partial_results(
+        self,
+        job_id: str,
+        chunk_index: int,
+        *,
+        delete_remote: bool = True,
+    ) -> None:
         directory = self._partial_dir(job_id, chunk_index)
         if directory.exists():
             shutil.rmtree(directory)
-        self._delete_remote_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
+        if delete_remote:
+            self._delete_remote_prefix(f"{job_id}/partial_{int(chunk_index):05d}/")
 
     def save_completed_chunk(
         self,
@@ -498,7 +636,7 @@ class BatchCheckpointStore:
     ) -> Dict:
         """Save output before advancing the manifest, making resume idempotent."""
         job_id = manifest["job_id"]
-        self._atomic_write_json(
+        remote_chunk_saved = self._atomic_write_json(
             self._chunk_path(job_id, chunk_index),
             _json_safe(dataframe_to_payload(tagged.reset_index(drop=True))),
         )
@@ -524,15 +662,141 @@ class BatchCheckpointStore:
         )
         updated["last_error"] = ""
         updated["pause_reason"] = ""
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = 0
         updated["status"] = (
             "completed"
             if len(completed) >= int(updated["total_chunks"])
             else "running"
         )
         updated = self.save_manifest(updated)
-        self.discard_partial_results(job_id, chunk_index)
-        self.discard_scraped_records(job_id, chunk_index)
+        # The row-level objects are the last durable recovery point when a
+        # transient Supabase/Postgres failure prevents the compact chunk from
+        # being uploaded.  Always clear local temporary objects after the local
+        # chunk is written, but only remove their remote copies after the remote
+        # chunk save is confirmed.  A replacement Streamlit process can then
+        # rebuild the chunk without repeating completed Gemini work.
+        self.discard_partial_results(
+            job_id,
+            chunk_index,
+            delete_remote=remote_chunk_saved,
+        )
+        self.discard_scraped_records(
+            job_id,
+            chunk_index,
+            delete_remote=remote_chunk_saved,
+        )
         return updated
+
+    def mark_executing(self, manifest: Dict, *, lease_seconds: int = 7200) -> Dict:
+        """Record one active provider unit so a replacement UI does not duplicate it."""
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        updated["status"] = "running"
+        updated["pause_reason"] = ""
+        updated["last_error"] = ""
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = int(time.time()) + max(
+            60,
+            int(lease_seconds),
+        )
+        return self.save_manifest(updated, require_remote=True)
+
+    def mark_continuation_ready(self, manifest: Dict) -> Dict:
+        """Mark a durable, intentional yield that is safe to continue automatically."""
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        if updated.get("status") != "completed":
+            updated["status"] = "running"
+        updated["continuation_ready"] = updated.get("status") != "completed"
+        updated["execution_lease_until"] = 0
+        return self.save_manifest(updated)
+
+    def _read_execution_lock(self, job_id: str) -> Dict:
+        path = self._execution_lock_path(job_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def execution_is_active(self, job_id: str) -> bool:
+        """Return whether another local Streamlit session holds a fresh lease."""
+        path = self._execution_lock_path(job_id)
+        payload = self._read_execution_lock(job_id)
+        try:
+            lease_until = int(payload.get("lease_until", 0) or 0)
+        except (TypeError, ValueError):
+            lease_until = 0
+        if lease_until > int(time.time()):
+            return True
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    def try_acquire_execution(
+        self,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+    ) -> bool:
+        """Atomically allow only one local session to launch the next paid unit."""
+        job_id = self._validated_job_id(job_id)
+        owner_id = str(owner_id or "").strip().lower()
+        if not _SAFE_ID.fullmatch(owner_id):
+            raise ValueError("Invalid tagging execution owner id.")
+        path = self._execution_lock_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lease_until = int(time.time()) + max(60, int(lease_seconds))
+
+        for _attempt in range(3):
+            existing = self._read_execution_lock(job_id)
+            if existing:
+                try:
+                    existing_until = int(existing.get("lease_until", 0) or 0)
+                except (TypeError, ValueError):
+                    existing_until = 0
+                if existing_until > int(time.time()):
+                    return False
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
+            try:
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                )
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {"owner_id": owner_id, "lease_until": lease_until},
+                        handle,
+                    )
+                return True
+            except Exception:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        return False
+
+    def release_execution(self, job_id: str, owner_id: str) -> None:
+        """Release a local execution lease only when it belongs to this session."""
+        path = self._execution_lock_path(job_id)
+        existing = self._read_execution_lock(job_id)
+        if existing.get("owner_id") != str(owner_id or "").strip().lower():
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
         """Pause without persisting raw provider errors or credentials."""
@@ -540,6 +804,8 @@ class BatchCheckpointStore:
         updated = dict(reconciled)
         updated["status"] = "paused_quota" if quota else "paused_error"
         updated["pause_reason"] = "quota" if quota else "interrupted"
+        updated["continuation_ready"] = False
+        updated["execution_lease_until"] = 0
         updated["last_error"] = (
             "API quota is unavailable. Resume after the app owner restores access."
             if quota

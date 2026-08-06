@@ -65,10 +65,11 @@ CAMPAIGN_MARKET_MISSING = {
     "UNKNOWN", "NOT SPECIFIED", "N/A", "NA", "NONE", "NULL", "NAN",
 }
 TIKTOK_SHORT_LINK_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
+RETIRED_CREATIVE_TYPES = {"Carousel"}
 
 
 MARKETING_EXPORT_COLUMNS = [
-    "Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Creator", "Followers", "KOL Size",
+    "Platform", "Source", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator", "Followers", "KOL Size",
     "Views", "Likes", "Comments", "Shares", "Saves", "Metrics Unavailable", "Total Engagement",
     "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate",
     # Detailed drama fields are deliberately consolidated into Content Details
@@ -154,6 +155,16 @@ def normalize_label_list(value) -> List[str]:
         if label and label not in labels:
             labels.append(label)
     return labels[:2]
+
+
+def operational_creative_type(value, fallback: str = "Others") -> str:
+    """Remove format-only labels from the user-facing Creative Type value."""
+    labels = [
+        label
+        for label in normalize_label_list(value)
+        if label not in RETIRED_CREATIVE_TYPES
+    ]
+    return ", ".join(labels[:2]) if labels else fallback
 
 
 def _history_entries(value) -> List[Dict]:
@@ -551,7 +562,6 @@ def _resolved_narrative_suggestion(tagged: Dict, creative_type: str) -> str:
         "Relationship": "Relationship moment",
         "Reflection": "Personal reflection",
         "Quotes": "Text-led message",
-        "Carousel": "Photo carousel",
         "Gaming": "Gaming content",
         "Movie/Tv/Drama Edits": "Drama or entertainment edit",
         "Celebrity Edits": "Celebrity edit",
@@ -578,7 +588,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     if removed:
         validation_status = "removed"
     needs_review = False if removed else _truthy(tagged_dict.get("needs_human_review"))
-    creative_type = _text(tagged_dict.get("Creative Type")) or "Others"
+    creative_type = operational_creative_type(tagged_dict.get("Creative Type"))
     narrative = _resolved_narrative_suggestion(tagged_dict, creative_type)
     qa_reason = " | ".join(
         value for value in [
@@ -613,6 +623,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
             or _text(tagged_dict.get("track"))
             or music_name
         ),
+        "Original Sound": _text(original_dict.get("Original Sound")) or music_name,
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
         "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
         "Creator Display": _text(tagged_dict.get("creator_display")),
@@ -745,11 +756,24 @@ def enrich_review_drama(
 # -----------------------------------------------------------------------------
 
 
+MAX_APIFY_POSTS_PER_REQUEST = 25
+
+
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
     """Route each supported post URL to its platform-specific Apify adapter."""
-    backend = load_backend()
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
+    if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
+        raise ValueError(
+            "APIFY_BATCH_LIMIT_EXCEEDED: TikTok requests must contain at most "
+            f"{MAX_APIFY_POSTS_PER_REQUEST} posts."
+        )
+    if len(instagram_links) > MAX_APIFY_POSTS_PER_REQUEST:
+        raise ValueError(
+            "APIFY_BATCH_LIMIT_EXCEEDED: Instagram requests must contain at most "
+            f"{MAX_APIFY_POSTS_PER_REQUEST} posts."
+        )
+    backend = load_backend()
     records: List[Dict] = []
     if tiktok_links:
         short_link_count = sum(is_tiktok_short_url(link) for link in tiktok_links)

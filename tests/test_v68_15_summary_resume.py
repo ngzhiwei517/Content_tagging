@@ -3,9 +3,11 @@ import json
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
 import pandas as pd
+import plotly.express as px
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -95,6 +97,27 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
         namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
+        cls.creative_type_chart_data = staticmethod(
+            load_function("prepare_creative_type_chart_data_v68_49", namespace)
+        )
+        cls.filter_summary = staticmethod(
+            load_function("filter_summary_by_selected_values_v68_50", namespace)
+        )
+        cls.rendered_chart_figures = []
+        chart_namespace = {
+            "pd": pd,
+            "px": px,
+            "st": SimpleNamespace(markdown=lambda *args, **kwargs: None),
+            "bar_list": lambda *args, **kwargs: "",
+            "render_plotly_chart": lambda fig: cls.rendered_chart_figures.append(fig),
+            "CREATIVE_TYPE_CHART_COLORS_V68_49": ["#6254e8", "#0ea5e9", "#10b981"],
+        }
+        cls.render_creative_type_bar = staticmethod(
+            load_function("render_creative_type_bar_chart_v68_49", chart_namespace)
+        )
+        cls.render_creative_type_views = staticmethod(
+            load_function("render_creative_type_views_doughnut_v68_49", chart_namespace)
+        )
 
     def test_group_summary_uses_average_engagement_metrics(self):
         rows = pd.DataFrame([
@@ -118,11 +141,115 @@ class SummaryV6815Tests(unittest.TestCase):
         ]:
             self.assertIn(column, APP_SOURCE)
 
+    def test_creative_type_post_chart_counts_rows_and_calculates_share(self):
+        rows = pd.DataFrame([
+            {"Primary Creative Type": "Dance"},
+            {"Primary Creative Type": "Dance"},
+            {"Primary Creative Type": "Lip Sync"},
+            {"Primary Creative Type": None},
+        ])
+        chart = self.creative_type_chart_data(rows, "Posts")
+        self.assertEqual(chart["Creative Type"].tolist(), ["Dance", "Lip Sync", "Others"])
+        self.assertEqual(chart["Posts"].tolist(), [2, 1, 1])
+        self.assertAlmostEqual(float(chart["Share"].sum()), 100.0)
+        self.assertAlmostEqual(float(chart.loc[0, "Share"]), 50.0)
+
+    def test_creative_type_views_chart_keeps_full_total_when_categories_collapse(self):
+        rows = pd.DataFrame([
+            {"Primary Creative Type": "Dance", "Views": "1,000"},
+            {"Primary Creative Type": "Lip Sync", "Views": 500},
+            {"Primary Creative Type": "Comedy", "Views": 250},
+            {"Primary Creative Type": "POV", "Views": 100},
+        ])
+        chart = self.creative_type_chart_data(rows, "Views", max_categories=3)
+        self.assertEqual(
+            chart["Creative Type"].tolist(),
+            ["Dance", "Lip Sync", "Remaining creative types"],
+        )
+        self.assertEqual(float(chart["Views"].sum()), 1850.0)
+        self.assertAlmostEqual(float(chart["Share"].sum()), 100.0)
+
+    def test_visual_summary_uses_interactive_post_bar_and_views_doughnut(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        self.assertIn("render_creative_type_bar_chart_v68_49(mix)", step_six)
+        self.assertIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
+        self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
+        self.assertNotIn("metric_for_chart = focus_metric", step_six)
+
+    def test_summary_filters_allow_multiple_values_and_empty_means_all(self):
+        rows = pd.DataFrame({
+            "Market Display": ["SG", "MY", "TH"],
+            "Primary Creative Type": ["Dance", "Lip Sync", "Dance"],
+            "KOL Size Display": ["Micro", "Macro", "Nano"],
+        })
+        all_rows = self.filter_summary(rows, "Market Display", [])
+        selected_markets = self.filter_summary(rows, "Market Display", ["SG", "TH"])
+        combined = self.filter_summary(
+            selected_markets,
+            "Primary Creative Type",
+            ["Dance"],
+        )
+        self.assertEqual(len(all_rows), 3)
+        self.assertEqual(selected_markets["Market Display"].tolist(), ["SG", "TH"])
+        self.assertEqual(combined["Market Display"].tolist(), ["SG", "TH"])
+
+        selected_kol_sizes = self.filter_summary(
+            rows,
+            "KOL Size Display",
+            ["Micro", "Nano"],
+        )
+        self.assertEqual(selected_kol_sizes["KOL Size Display"].tolist(), ["Micro", "Nano"])
+
+    def test_summary_ui_uses_six_multiselect_filters_with_kol_size(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        filter_block = step_six.split("# Combined filters", 1)[1].split(
+            "# Summary sections retain", 1
+        )[0]
+        self.assertEqual(filter_block.count("st.multiselect("), 6)
+        self.assertNotIn("st.selectbox(", filter_block)
+        self.assertEqual(filter_block.count('placeholder="All"'), 6)
+        for key in [
+            "summary_platform_multi_v68_50",
+            "summary_source_multi_v68_50",
+            "summary_market_multi_v68_50",
+            "summary_track_multi_v68_50",
+            "summary_type_multi_v68_50",
+            "summary_kol_size_multi_v68_51",
+        ]:
+            self.assertIn(key, filter_block)
+        self.assertIn('("KOL Size Display", kol_size_filters)', step_six)
+
+    def test_creative_type_bar_hover_shows_post_number_and_percentage(self):
+        self.rendered_chart_figures.clear()
+        mix = pd.DataFrame({
+            "Creative Type": ["Dance", "Lip Sync"],
+            "Posts": [8, 2],
+            "Share": [80.0, 20.0],
+        })
+        self.render_creative_type_bar(mix)
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertIn("Posts: %{x:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of posts: %{customdata[0]:.1f}%", trace.hovertemplate)
+
+    def test_views_doughnut_hover_shows_view_number_and_percentage(self):
+        self.rendered_chart_figures.clear()
+        mix = pd.DataFrame({
+            "Creative Type": ["Dance", "Lip Sync"],
+            "Views": [8000, 2000],
+            "Share": [80.0, 20.0],
+        })
+        self.render_creative_type_views(mix)
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertEqual(float(trace.hole), 0.58)
+        self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
+
     def test_summary_has_requested_order_and_no_median_metric(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         positions = [
             step_six.index('section_title("Market Summary"'),
             step_six.index('section_title("Track Summary"'),
+            step_six.index('section_title("Sound Breakdown"'),
             step_six.index('section_title("Creative Type Mix"'),
             step_six.index('section_title("Top Posts"'),
             step_six.index("render_top_creator_performance_v68_47(filtered)"),
@@ -186,7 +313,7 @@ class SummaryV6815Tests(unittest.TestCase):
 
     def test_every_summary_table_uses_clickable_header_sorting(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
-        for title in ["Platform Summary", "Market Summary", "Track Summary", "Source Summary"]:
+        for title in ["Platform Summary", "Market Summary", "Track Summary", "Sound Breakdown", "Source Summary"]:
             with self.subTest(title=title):
                 section = step_six.split(f'section_title("{title}"', 1)[1]
                 self.assertIn("render_sortable_summary_table_v68_46(", section)
@@ -218,7 +345,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(int(summary.loc[0, "Average Engagement"]), 60)
         self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 15.0)
 
-    def test_creator_performance_uses_latest_three_months_in_available_data(self):
+    def test_creator_campaign_performance_uses_all_posts_in_current_batch(self):
         rows = pd.DataFrame([
             {
                 "Platform": "TikTok", "Market": "SG", "Creator": "Alice",
@@ -234,13 +361,22 @@ class SummaryV6815Tests(unittest.TestCase):
             },
         ])
         summary, _ = self.creator_summary(rows)
-        self.assertEqual(int(summary.loc[0, "Posts"]), 2)
-        self.assertEqual(int(summary.loc[0, "Total Views"]), 1_500)
-        self.assertEqual(int(summary.loc[0, "Total Engagement"]), 200)
-        self.assertEqual(int(summary.loc[0, "Average Engagement"]), 100)
-        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 15.0)
-        self.assertEqual(summary.attrs["date_window_start"], "2026-03-30")
-        self.assertEqual(summary.attrs["date_window_end"], "2026-06-30")
+        self.assertEqual(int(summary.loc[0, "Posts"]), 3)
+        self.assertEqual(int(summary.loc[0, "Total Views"]), 2_500)
+        self.assertEqual(int(summary.loc[0, "Total Engagement"]), 700)
+        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement"]), 700 / 3)
+        self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 80 / 3)
+
+    def test_creator_section_exposes_optional_profile_enrichment_and_links(self):
+        creator_section = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
+            "def bar_list", 1
+        )[0]
+        self.assertIn("Fetch profile metrics (uses Apify credits)", creator_section)
+        self.assertIn("maximum {max_post_results:,} post results", creator_section)
+        self.assertIn('drop_duplicates(["Platform", "Creator Key"]', creator_section)
+        self.assertIn("creator_profile_url", creator_section)
+        self.assertIn('"Creator Profile"', creator_section)
+        self.assertIn("DEFAULT_PROFILE_POST_LIMIT", creator_section)
 
     def test_creator_performance_ranks_engagement_and_keeps_market_platform_separate(self):
         rows = pd.DataFrame([

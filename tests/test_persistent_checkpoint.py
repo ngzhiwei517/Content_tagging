@@ -37,6 +37,7 @@ def load_function(name, namespace):
 class MemoryObjectStore:
     def __init__(self):
         self.objects = {}
+        self.list_prefix_calls = 0
 
     def save(self, key, payload):
         self.objects[key] = copy.deepcopy(payload)
@@ -45,6 +46,7 @@ class MemoryObjectStore:
         return copy.deepcopy(self.objects.get(key))
 
     def list_prefix(self, prefix):
+        self.list_prefix_calls += 1
         return {
             key: copy.deepcopy(payload)
             for key, payload in self.objects.items()
@@ -59,7 +61,130 @@ class MemoryObjectStore:
             self.objects.pop(key, None)
 
 
+class ChunkWriteFailureObjectStore(MemoryObjectStore):
+    """Simulate a transient remote failure while compacting one chunk."""
+
+    def save(self, key, payload):
+        if "/chunk_" in key or key.startswith("chunk_"):
+            raise RuntimeError("simulated remote chunk failure")
+        super().save(key, payload)
+
+
 class PersistentLargeBatchTests(unittest.TestCase):
+    def test_compact_partial_snapshot_replaces_per_post_remote_writes(self):
+        selected = pd.DataFrame([
+            {
+                "Link": f"https://www.tiktok.com/@creator/video/{5000 + index}",
+                "Platform": "TikTok",
+            }
+            for index in range(50)
+        ])
+        remote = MemoryObjectStore()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "active"
+            store = BatchCheckpointStore(
+                root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            manifest = store.prepare(
+                "e" * 32,
+                selected,
+                model="gemini-test",
+                comparison_run_id="compact-partial",
+                comparison_started_utc="2026-08-04T00:00:00+00:00",
+            )
+            for position in range(5):
+                store.save_partial_row(
+                    manifest["job_id"],
+                    0,
+                    position,
+                    {
+                        "Link": selected.iloc[position]["Link"],
+                        "Creative Type": "Others",
+                    },
+                    persist_remote=False,
+                )
+            self.assertTrue(store.save_partial_snapshot(manifest["job_id"], 0))
+
+            remote_keys = list(remote.objects)
+            self.assertTrue(any(key.endswith("/snapshot.json") for key in remote_keys))
+            self.assertFalse(any("/row_" in key for key in remote_keys))
+
+            restarted_root = Path(directory) / "restarted"
+            restarted = BatchCheckpointStore(
+                restarted_root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            resumed = restarted.find(
+                "e" * 32,
+                selected,
+                model="gemini-test",
+            )
+            restored = restarted.load_saved_results(resumed)
+            self.assertEqual(resumed["saved_rows"], 5)
+            self.assertEqual(len(restored), 5)
+
+    def test_remote_job_prefix_is_hydrated_once_per_local_container(self):
+        selected = pd.DataFrame([
+            {
+                "Link": f"https://www.tiktok.com/@creator/video/{6000 + index}",
+                "Platform": "TikTok",
+            }
+            for index in range(256)
+        ])
+        remote = MemoryObjectStore()
+        with tempfile.TemporaryDirectory() as directory:
+            original = BatchCheckpointStore(
+                Path(directory) / "original",
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            manifest = original.prepare(
+                "f" * 32,
+                selected,
+                model="gemini-test",
+                comparison_run_id="hydrate-once",
+                comparison_started_utc="2026-08-04T00:00:00+00:00",
+            )
+            original.save_partial_row(
+                manifest["job_id"],
+                0,
+                0,
+                {"Link": selected.iloc[0]["Link"], "Creative Type": "Dance"},
+            )
+
+            restarted_root = Path(directory) / "restarted"
+            restarted = BatchCheckpointStore(
+                restarted_root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            resumed = restarted.find(
+                "f" * 32,
+                selected,
+                model="gemini-test",
+            )
+            calls_after_first_hydration = remote.list_prefix_calls
+            self.assertEqual(resumed["saved_rows"], 1)
+            self.assertEqual(calls_after_first_hydration, 1)
+
+            # A fresh store object models the next Streamlit script rerun while
+            # keeping the same local container filesystem.
+            next_rerun = BatchCheckpointStore(
+                restarted_root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            resumed_again = next_rerun.find(
+                "f" * 32,
+                selected,
+                model="gemini-test",
+            )
+            self.assertEqual(resumed_again["saved_rows"], 1)
+            self.assertEqual(remote.list_prefix_calls, calls_after_first_hydration)
+
     def test_partial_row_rehydrates_after_local_container_is_removed(self):
         selected = pd.DataFrame([
             {"Link": f"https://www.tiktok.com/@creator/video/{7000 + index}", "Platform": "TikTok"}
@@ -112,6 +237,70 @@ class PersistentLargeBatchTests(unittest.TestCase):
             self.assertNotIn("secret-value", serialized)
             self.assertNotIn("media", serialized)
             self.assertNotIn("video_bytes", serialized)
+
+    def test_failed_remote_chunk_write_keeps_row_backups_for_restart(self):
+        selected = pd.DataFrame([
+            {
+                "Link": f"https://www.tiktok.com/@creator/video/{8000 + index}",
+                "Platform": "TikTok",
+            }
+            for index in range(250)
+        ])
+        remote = ChunkWriteFailureObjectStore()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tagging_jobs"
+            store = BatchCheckpointStore(
+                root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            runtime_id = "f" * 32
+            manifest = store.prepare(
+                runtime_id,
+                selected,
+                model="gemini-test",
+                comparison_run_id="run-restart",
+                comparison_started_utc="2026-08-04T00:00:00+00:00",
+            )
+            first_chunk = store.chunk_frame(selected, manifest, 0)
+            for position, row in first_chunk.iterrows():
+                store.save_partial_row(
+                    manifest["job_id"],
+                    0,
+                    position,
+                    {**row.to_dict(), "Creative Type": "Others"},
+                )
+
+            manifest = store.save_completed_chunk(
+                manifest,
+                0,
+                first_chunk.assign(**{"Creative Type": "Others"}),
+                elapsed_seconds=1.0,
+            )
+            self.assertEqual(manifest["completed_rows"], 50)
+            self.assertEqual(
+                len([key for key in remote.objects if "/partial_00000/" in key]),
+                50,
+            )
+
+            # A replacement Streamlit container has no local files. Recovery
+            # must retain the 50 completed rows instead of restarting at zero.
+            shutil.rmtree(root)
+            restarted = BatchCheckpointStore(
+                root,
+                chunk_size=50,
+                persistent_store=remote,
+            )
+            recovered = restarted.find(
+                runtime_id,
+                selected,
+                model="gemini-test",
+            )
+            restored_rows = restarted.load_saved_results(recovered)
+
+            self.assertEqual(recovered["saved_rows"], 50)
+            self.assertEqual(restarted.next_chunk_index(recovered), 0)
+            self.assertEqual(len(restored_rows), 50)
 
 
 class SupabaseBackendTests(unittest.TestCase):
@@ -222,7 +411,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
         self.assertIn('"Save this batch"', APP_SOURCE)
-        self.assertIn("Bookmark this page, or copy the private link below", APP_SOURCE)
+        self.assertIn("Copy the private link below to continue later", APP_SOURCE)
         self.assertIn('with st.expander("Open a saved batch"', APP_SOURCE)
         self.assertIn("If you only have a recovery ID", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)

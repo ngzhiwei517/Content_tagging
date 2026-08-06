@@ -30,6 +30,7 @@ import ugc_tagger.final_update2_adapter as _final_update2_adapter
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
+    input_fingerprint,
 )
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
@@ -37,6 +38,14 @@ from ugc_tagger.persistent_checkpoint import (
     create_persistent_checkpoint_backend,
 )
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
+from ugc_tagger.creator_profile_enrichment import (
+    DEFAULT_PROFILE_POST_LIMIT,
+    PROFILE_SCOPE_OPTIONS,
+    creator_key,
+    creator_profile_url,
+    profile_scope_count,
+    scrape_creator_profile_metrics,
+)
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
     GEMINI_MODEL_OPTIONS,
@@ -143,11 +152,12 @@ MARKET_OPTIONS = ["Other / no market"] + MARKETS
 DATE_SCOPE_SHARED = "Same date for all tracks"
 DATE_SCOPE_PER_TRACK = "Different date by track"
 CREATIVE_TYPES = [
-    "Dance", "Lip Sync", "Lyrics", "Lyrics Translation", "Carousel", "Quotes",
+    "Dance", "Lip Sync", "Lyrics", "Lyrics Translation", "Quotes",
     "Relationship", "POV", "Slice of Life", "Reflection", "Comedy", "Beauty",
     "Fashion", "Travel", "Fitness", "Gaming", "Media/Infotainment",
     "Movie/Tv/Drama Edits", "Celebrity Edits", "Cover", "Remix", "Others",
 ]
+RETIRED_CREATIVE_TYPES = {"Carousel"}
 
 # -----------------------------------------------------------------------------
 # Theme and page layout
@@ -917,6 +927,7 @@ DEFAULT_STATE = {
     "tagged_df": pd.DataFrame(),
     "last_message": "",
     "review_pointer": 0,
+    "review_queue_indices_v68_57": [],
     "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
@@ -929,6 +940,10 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
+    # Public profile metrics are session-only metadata. They are intentionally
+    # excluded from restart checkpoints and never contain API tokens or media.
+    "creator_profile_metrics_v68_51": pd.DataFrame(),
+    "creator_profile_updated_at_v68_51": "",
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
@@ -941,9 +956,12 @@ def reset_review_state_for_new_tagging_run() -> None:
         if str(key).startswith("review_"):
             st.session_state.pop(key, None)
     st.session_state.review_pointer = 0
+    st.session_state.review_queue_indices_v68_57 = []
 
 # Navigation helpers
 def go(step: int):
+    if int(step) != 4:
+        _clear_tagging_continue_query_v68_55()
     st.session_state.step = step
     _persist_runtime_checkpoint_v68_15()
     st.rerun()
@@ -958,6 +976,46 @@ def safe_str(v) -> str:
     return str(v).strip()
 
 
+def review_queue_indices_v68_57(
+    tagged: pd.DataFrame,
+    saved_queue=None,
+) -> List:
+    """Keep reviewed rows navigable while retaining the original review order."""
+    if not isinstance(tagged, pd.DataFrame) or tagged.empty:
+        return []
+
+    index_by_key = {safe_str(index): index for index in tagged.index}
+    queue = []
+    if isinstance(saved_queue, (list, tuple)):
+        for saved_index in saved_queue:
+            actual_index = index_by_key.get(safe_str(saved_index))
+            if actual_index is not None and actual_index not in queue:
+                queue.append(actual_index)
+
+    needs_review = tagged.get(
+        "Needs Review",
+        pd.Series([False] * len(tagged), index=tagged.index),
+    ).fillna(False).eq(True)
+    tier_used = tagged.get(
+        "Tier Used",
+        pd.Series([""] * len(tagged), index=tagged.index),
+    ).fillna("").astype(str).str.strip().str.lower()
+    candidate_indices = tagged.index[
+        needs_review | tier_used.eq("tier3_human")
+    ].tolist()
+    for candidate_index in candidate_indices:
+        if candidate_index not in queue:
+            queue.append(candidate_index)
+    return queue
+
+
+def next_review_pointer_v68_57(pointer: int, queue_size: int) -> int:
+    """Advance through a stable review queue without dropping review history."""
+    if queue_size <= 0:
+        return 0
+    return min(max(0, int(pointer)) + 1, queue_size - 1)
+
+
 @st.cache_data(ttl=900, max_entries=128, show_spinner=False)
 def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
     """Cache the public catalogue check so UI reruns do not repeat requests."""
@@ -966,6 +1024,18 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
 
 RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
 TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
+# Keep each live Streamlit execution deliberately short. The durable manifest
+# still uses 50-row chunks for backward-compatible recovery, while only this
+# many unfinished rows are analysed before yielding to a fresh script run.
+MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5
+# Apify media collection can exceed Streamlit Cloud's execution window when a
+# whole campaign is submitted at once. Save each smaller scrape window before
+# yielding, then save every five completed Gemini rows to persistent storage.
+MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
+REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
+TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
+TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
+TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
     "mode",
@@ -974,6 +1044,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "tagged_df",
     "last_message",
     "review_pointer",
+    "review_queue_indices_v68_57",
     "enable_full_video_fallback_v46",
     "date_filter_scope_v68",
     "track_date_settings_v68",
@@ -1084,6 +1155,49 @@ def _runtime_query_value_v68_15(name: str) -> str:
     return safe_str(value)
 
 
+def _clear_tagging_continue_query_v68_55() -> None:
+    """Remove the temporary active-run marker without touching the recovery id."""
+    try:
+        st.query_params.pop(TAGGING_CONTINUE_JOB_QUERY_V68_55, None)
+        st.query_params.pop(TAGGING_CONTINUE_UNTIL_QUERY_V68_55, None)
+    except Exception:
+        pass
+
+
+def _set_tagging_continue_query_v68_55(job_id: str) -> bool:
+    """Mark one exact large job as user-authorised to continue after refresh."""
+    job_id = _valid_runtime_id_v68_15(job_id)
+    if not job_id:
+        _clear_tagging_continue_query_v68_55()
+        return False
+    try:
+        st.query_params[TAGGING_CONTINUE_JOB_QUERY_V68_55] = job_id
+        st.query_params[TAGGING_CONTINUE_UNTIL_QUERY_V68_55] = str(
+            int(time.time()) + TAGGING_CONTINUE_TTL_SECONDS_V68_55
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _tagging_continue_job_v68_55() -> str:
+    """Return a fresh job-specific continuation marker, or clear stale input."""
+    raw_job_id = _runtime_query_value_v68_15(TAGGING_CONTINUE_JOB_QUERY_V68_55)
+    raw_continue_until = _runtime_query_value_v68_15(
+        TAGGING_CONTINUE_UNTIL_QUERY_V68_55
+    )
+    job_id = _valid_runtime_id_v68_15(raw_job_id)
+    try:
+        continue_until = int(raw_continue_until)
+    except (TypeError, ValueError):
+        continue_until = 0
+    if not job_id or continue_until <= int(time.time()):
+        if raw_job_id or raw_continue_until:
+            _clear_tagging_continue_query_v68_55()
+        return ""
+    return job_id
+
+
 def _sync_runtime_query_v68_15() -> None:
     """Keep the active batch id and workflow step in the browser URL."""
     run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
@@ -1190,6 +1304,7 @@ def _runtime_checkpoint_candidates_v68_44(run_id: str) -> List[Dict]:
 
 
 def _new_runtime_recovery_id_v68_44() -> str:
+    _clear_tagging_continue_query_v68_55()
     run_id = uuid.uuid4().hex
     st.session_state.runtime_run_id_v68_15 = run_id
     st.session_state.runtime_restore_checked_v68_15 = True
@@ -1198,6 +1313,7 @@ def _new_runtime_recovery_id_v68_44() -> str:
 
 
 def _request_runtime_recovery_v68_44(recovery_id: str) -> bool:
+    _clear_tagging_continue_query_v68_55()
     requested_id = _valid_runtime_id_v68_15(recovery_id)
     if not requested_id or not _runtime_checkpoint_candidates_v68_44(requested_id):
         return False
@@ -1229,7 +1345,7 @@ def _runtime_recovery_url_v68_44() -> str:
 def _show_runtime_save_dialog_v68_44() -> None:
     recovery_url = _runtime_recovery_url_v68_44()
     st.markdown("**Your progress is already saved automatically.**")
-    st.caption("Bookmark this page, or copy the private link below to continue later.")
+    st.caption("Copy the private link below to continue later.")
     if recovery_url:
         st.code(recovery_url, language=None)
         st.caption("Use the copy button on the link. Keep it private because it can reopen this batch.")
@@ -1412,13 +1528,24 @@ def display_market(v: str) -> str:
 
 
 def split_creative_labels(value) -> List[str]:
-    """Split the stored 1-2 label output into clean individual labels."""
+    """Split operational labels while dropping retired format-only labels."""
     labels = []
     for part in safe_str(value).split(","):
         label = re.sub(r"\s+", " ", part).strip()
-        if label and label not in labels:
+        if label and label not in RETIRED_CREATIVE_TYPES and label not in labels:
             labels.append(label)
     return labels
+
+
+def operational_creative_type(value, fallback: str = "Others") -> str:
+    """Return the current user-facing Creative Type value.
+
+    Carousel remains available internally as post-format metadata, but it is no
+    longer a marketing Creative Type. Older checkpoints are cleaned here so a
+    resumed batch follows the current taxonomy without rerunning any posts.
+    """
+    labels = split_creative_labels(value)
+    return ", ".join(labels[:2]) if labels else fallback
 
 
 def primary_creative_type(value) -> str:
@@ -2033,6 +2160,8 @@ def standardize_file_rows(
     source_name: str,
     platform: str = "",
     fallback_market: str = "",
+    fallback_track: str = "",
+    fallback_artist: str = "",
 ) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     cols = detect_columns(df)
     link_col = cols.get("link")
@@ -2045,13 +2174,18 @@ def standardize_file_rows(
         detected_platform = post_platform(link)
         if not detected_platform or (platform and detected_platform != platform):
             continue
-        track = safe_str(r.get(cols["track"])) if cols.get("track") else ""
-        artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
+        original_sound = safe_str(r.get(cols["track"])) if cols.get("track") else ""
+        detected_track = original_sound
+        detected_artist = safe_str(r.get(cols["artist"])) if cols.get("artist") else ""
         if detected_platform == INSTAGRAM_REELS:
-            if is_opaque_instagram_sound_id(track):
-                track = filename_track
-            if not artist:
-                artist = filename_artist
+            if is_opaque_instagram_sound_id(detected_track):
+                detected_track = filename_track
+            if not detected_artist:
+                detected_artist = filename_artist
+        # A user-confirmed campaign track groups the whole file without
+        # destroying the post-level sound supplied by the source export.
+        campaign_track = safe_str(fallback_track) or detected_track
+        campaign_artist = safe_str(fallback_artist) or detected_artist
         row_market = normalize_market(r.get(cols["market"])) if cols.get("market") else ""
         likes = clean_num(r.get(cols["likes"])) if cols.get("likes") else 0
         comments = clean_num(r.get(cols["comments"])) if cols.get("comments") else 0
@@ -2072,8 +2206,9 @@ def standardize_file_rows(
             # Explicit row data remains authoritative. The per-file selector is
             # only a fallback for exports that keep market context in filenames.
             "Market": row_market or normalize_market(fallback_market),
-            "Track": track,
-            "Campaign Artist": artist,
+            "Track": campaign_track,
+            "Original Sound": original_sound or detected_track,
+            "Campaign Artist": campaign_artist,
             "Viral Date": safe_str(r.get(cols["viral_date"])) if cols.get("viral_date") else "",
             "Date": safe_str(r.get(cols["date"])) if cols.get("date") else "",
             "Creator": safe_str(r.get(cols["creator"])) if cols.get("creator") else extract_creator(link),
@@ -2104,7 +2239,7 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty or "_link_key" not in frame.columns:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
     backfill_columns = [
-        "Platform", "Market", "Track", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
+        "Platform", "Market", "Track", "Original Sound", "Campaign Artist", "Viral Date", "Date", "Creator", "Followers",
         "Caption", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves",
         "Metrics Unavailable",
         "Total Engagement",
@@ -2628,7 +2763,7 @@ def _create_batch_checkpoint_store_v68_48(
 
 
 def _large_batch_store_v68_43() -> BatchCheckpointStore:
-    """Return the durable store used only for large Tag every link runs."""
+    """Return the durable store used for every large tagging selection."""
     runtime_id = _valid_runtime_id_v68_15(
         st.session_state.get("runtime_run_id_v68_15")
     )
@@ -2639,11 +2774,10 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 
 
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
-    """Keep established small/Top-N runs unchanged."""
+    """Protect any selection too large for one bounded Apify request."""
     return (
         isinstance(selected, pd.DataFrame)
-        and len(selected) > DEFAULT_CHUNK_SIZE
-        and st.session_state.get("selection_mode", "Top posts") == "Tag every link"
+        and len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54
     )
 
 
@@ -2667,6 +2801,122 @@ def _large_batch_manifest_v68_43(selected: pd.DataFrame) -> Optional[Dict]:
         )
     except Exception:
         return None
+
+
+def _large_batch_job_id_v68_55(selected: pd.DataFrame) -> str:
+    """Return the exact durable job id that belongs to the current selection."""
+    if not _uses_large_batch_checkpoints_v68_43(selected):
+        return ""
+    runtime_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
+    if not runtime_id:
+        return ""
+    model = normalize_gemini_model(
+        st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
+    )
+    try:
+        fingerprint = input_fingerprint(selected.reset_index(drop=True), model)
+        return _large_batch_store_v68_43()._job_id(runtime_id, fingerprint)
+    except Exception:
+        return ""
+
+
+def _tagging_execution_owner_v68_55() -> str:
+    """Return a session-only owner id; it is never written to recovery storage."""
+    owner_id = _valid_runtime_id_v68_15(
+        st.session_state.get("tagging_execution_owner_v68_55")
+    )
+    if not owner_id:
+        owner_id = uuid.uuid4().hex
+        st.session_state.tagging_execution_owner_v68_55 = owner_id
+    return owner_id
+
+
+def _tagging_auto_resume_action_v68_55(
+    marker_job_id: str,
+    expected_job_id: str,
+    manifest: Optional[Dict],
+    *,
+    now_epoch: Optional[int] = None,
+) -> str:
+    """Choose a free UI action without starting or repeating provider work."""
+    if (
+        not marker_job_id
+        or marker_job_id != expected_job_id
+        or not _valid_runtime_id_v68_15(expected_job_id)
+    ):
+        return "manual"
+    if manifest is None:
+        # The user may refresh immediately after selecting Start, before the
+        # first manifest write. The exact job marker still proves intent.
+        return "resume"
+    if _valid_runtime_id_v68_15(manifest.get("job_id")) != expected_job_id:
+        return "manual"
+    status = safe_str(manifest.get("status")).lower()
+    if status in {"paused_error", "paused_quota", "completed"}:
+        return "manual"
+    if bool(manifest.get("continuation_ready", False)):
+        return "resume"
+    try:
+        lease_until = int(manifest.get("execution_lease_until", 0) or 0)
+    except (TypeError, ValueError):
+        lease_until = 0
+    current_epoch = int(time.time()) if now_epoch is None else int(now_epoch)
+    if status == "running" and lease_until > current_epoch:
+        return "wait"
+    if status == "running" and lease_until <= 0:
+        # The explicit Start may have created the manifest just before a
+        # refresh, but no provider execution fence was acquired yet.
+        return "resume"
+    return "manual"
+
+
+def _tagging_active_job_matches_v68_55(
+    tagging_job_active: bool,
+    marker_job_id: str,
+    expected_job_id: str,
+) -> bool:
+    """Prevent an active rerun from switching to another checkpoint job."""
+    if not tagging_job_active or not expected_job_id:
+        return True
+    return bool(
+        _valid_runtime_id_v68_15(expected_job_id)
+        and marker_job_id == expected_job_id
+    )
+
+
+@st.fragment(run_every="3s")
+def _render_tagging_auto_wait_v68_55(job_id: str) -> None:
+    """Poll a still-active unit after refresh without launching a duplicate call."""
+    st.info(
+        "Tagging is still finishing the current saved step. "
+        "This page will continue automatically."
+    )
+    try:
+        store = _large_batch_store_v68_43()
+        manifest = store.load_manifest(job_id)
+        manifest = store.reconcile(manifest) if manifest else None
+    except Exception:
+        store = None
+        manifest = None
+    marker_job_id = _tagging_continue_job_v68_55()
+    action = _tagging_auto_resume_action_v68_55(
+        marker_job_id,
+        job_id,
+        manifest,
+    )
+    if action == "resume":
+        try:
+            if store is not None and store.execution_is_active(job_id):
+                return
+        except Exception:
+            _clear_tagging_continue_query_v68_55()
+            st.rerun(scope="app")
+        st.rerun(scope="app")
+    if action == "manual":
+        _clear_tagging_continue_query_v68_55()
+        st.rerun(scope="app")
 
 
 def _attach_comparison_metadata_v68_43(
@@ -2737,6 +2987,7 @@ def _large_batch_must_pause_v68_43(error) -> bool:
             "SERVICE UNAVAILABLE",
             "SSL",
             "503",
+            "REMOTE_CHECKPOINT_WRITE_FAILED",
         )
     )
 
@@ -2772,6 +3023,8 @@ def _large_batch_error_code_v68_43(error) -> str:
     ):
         return "PROVIDER_SERVICE"
     if isinstance(error, (OSError, PermissionError)):
+        return "CHECKPOINT_STORAGE"
+    if "REMOTE_CHECKPOINT_WRITE_FAILED" in text:
         return "CHECKPOINT_STORAGE"
     if "SYSTEMIC_TAGGING_FAILURE" in text:
         return "SYSTEMIC_TAGGING"
@@ -2957,33 +3210,85 @@ def _run_checkpointed_tag_every_link_v68_43(
     chunk_timer = time.perf_counter()
 
     try:
-        records = store.load_scraped_records(manifest["job_id"], next_chunk_index)
-        if records is None:
-            status.write("Collecting public post data from Apify...")
-            links = [
-                safe_str(link)
-                for link in chunk["Link"].tolist()
-                if is_supported_link(link)
-            ]
-            records = final_update2_scrape_links(links, apify_token)
-            store.save_scraped_records(
-                manifest["job_id"],
-                next_chunk_index,
-                records,
-            )
-        else:
-            status.write("Reusing the saved Apify result for this chunk.")
-
+        manifest = store.mark_executing(manifest)
         existing_positions = set(
             store.partial_positions(manifest["job_id"], next_chunk_index)
         )
-        remaining_positions = [
+        all_remaining_positions = [
             position
             for position in range(len(chunk))
             if position not in existing_positions
         ]
+        remaining_positions = all_remaining_positions[
+            :MAX_LIVE_POSTS_PER_EXECUTION_V68_52
+        ]
         remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
         saved_positions = set(existing_positions)
+
+        records = store.load_scraped_records(manifest["job_id"], next_chunk_index)
+        records = list(records or [])
+        by_id, by_url = _final_update2_adapter.index_records(records)
+        rows_missing_records = [
+            row
+            for position, row in chunk.iterrows()
+            if position in all_remaining_positions
+            and _final_update2_adapter.match_record(row, by_id, by_url) is None
+        ]
+        if rows_missing_records:
+            scrape_rows = rows_missing_records[
+                :MAX_APIFY_POSTS_PER_EXECUTION_V68_54
+            ]
+            links = [
+                safe_str(row.get("Link"))
+                for row in scrape_rows
+                if is_supported_link(row.get("Link"))
+            ]
+            status.write(
+                f"Collecting public post data for {len(links):,} post(s) from "
+                "Apify, then saving it before continuing..."
+            )
+            new_records = final_update2_scrape_links(links, apify_token)
+            new_records = list(new_records or [])
+            new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
+            for row in scrape_rows:
+                if _final_update2_adapter.match_record(row, new_by_id, new_by_url) is None:
+                    link = safe_str(row.get("Link"))
+                    platform = safe_str(row.get("Platform")) or platform_for_url(link)
+                    new_records.append(
+                        {
+                            "url": link,
+                            "submittedVideoUrl": link,
+                            "_platform": platform,
+                            "platform": platform,
+                            "error": "POST_NOT_FOUND",
+                            "errorCode": "POST_NOT_FOUND",
+                        }
+                    )
+            records.extend(new_records)
+            remote_records_saved = store.save_scraped_records(
+                manifest["job_id"],
+                next_chunk_index,
+                records,
+            )
+            if (
+                getattr(store, "persistent_store", None) is not None
+                and remote_records_saved is False
+            ):
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
+            remaining_scrape_count = len(rows_missing_records) - len(scrape_rows)
+            if remaining_scrape_count > 0:
+                status.update(
+                    label=(
+                        f"Saved public data for {len(records):,} post(s); "
+                        "continuing safely"
+                    ),
+                    state="complete",
+                    expanded=False,
+                )
+                store.mark_continuation_ready(manifest)
+                return None
+        else:
+            status.write("Reusing the saved Apify result for this chunk.")
 
         def on_result(input_position: int, tagged_row: Dict, tier: str):
             chunk_position = remaining_positions[int(input_position)]
@@ -2991,12 +3296,21 @@ def _run_checkpointed_tag_every_link_v68_43(
                 pd.DataFrame([tagged_row]),
                 "Tag every link",
             )
-            store.save_partial_row(
+            remote_row_saved = store.save_partial_row(
                 manifest["job_id"],
                 next_chunk_index,
                 chunk_position,
                 routed_row.iloc[0],
             )
+            # The immediately previous checkpoint class returned ``None`` even
+            # after a successful remote write. Only an explicit ``False`` from
+            # the current class proves that configured persistence failed. This
+            # keeps Streamlit's brief mixed-module hot-reload window compatible.
+            if (
+                getattr(store, "persistent_store", None) is not None
+                and remote_row_saved is False
+            ):
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
             saved_positions.add(chunk_position)
             if sensitive_count:
                 logs.append("Routed 1 sensitive post to human review.")
@@ -3023,6 +3337,17 @@ def _run_checkpointed_tag_every_link_v68_43(
                 on_result,
                 on_progress,
             )
+            # Also compact the individual remote rows into a periodic snapshot.
+            # Completed chunks replace these temporary recovery objects.
+            if (
+                len(saved_positions) % REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52
+                == 0
+                and len(saved_positions) < len(chunk)
+            ):
+                store.save_partial_snapshot(
+                    manifest["job_id"],
+                    next_chunk_index,
+                )
 
         partial_chunk = store.load_partial_chunk_results(
             manifest["job_id"],
@@ -3037,7 +3362,30 @@ def _run_checkpointed_tag_every_link_v68_43(
             ).tolist()
         )
         if actual_positions != expected_positions:
-            raise RuntimeError("PARTIAL_CHECKPOINT_INCOMPLETE")
+            # This is an intentional yield, not a failure. Row checkpoints are
+            # already durable, so a fresh Streamlit execution can continue the
+            # same 50-row manifest without repeating completed Gemini calls.
+            partial = _attach_comparison_metadata_v68_43(
+                store.load_saved_results(manifest),
+                manifest,
+            )
+            if not partial.empty:
+                st.session_state.tagged_df = partial
+            saved_count = min(
+                total_rows,
+                completed_rows + len(actual_positions),
+            )
+            progress.progress(min(saved_count / total_rows, 1.0))
+            status.update(
+                label=(
+                    f"Saved {saved_count:,} of {total_rows:,} posts; "
+                    "continuing safely"
+                ),
+                state="complete",
+                expanded=False,
+            )
+            store.mark_continuation_ready(manifest)
+            return None
         tagged_chunk = partial_chunk.drop(
             columns=["_checkpoint_row_position"],
             errors="ignore",
@@ -3070,6 +3418,8 @@ def _run_checkpointed_tag_every_link_v68_43(
             state="complete",
             expanded=False,
         )
+        if manifest.get("status") != "completed":
+            store.mark_continuation_ready(manifest)
     except Exception as exc:
         error_code = _large_batch_error_code_v68_43(exc)
         LOGGER.exception(
@@ -3102,6 +3452,20 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"diagnostic code {error_code} before resuming."
             )
         return pd.DataFrame()
+    except BaseException as control:
+        control_type = type(control)
+        if (
+            control_type.__module__.startswith("streamlit.")
+            and control_type.__name__ in {"StopException", "RerunException"}
+        ):
+            # Streamlit only raises its control exceptions at UI yield points.
+            # Provider results reached before those points have already been
+            # checkpointed, so a replacement browser session can continue.
+            try:
+                store.mark_continuation_ready(manifest)
+            except Exception:
+                pass
+        raise
 
     if manifest.get("status") == "completed":
         completed = store.load_completed_results(manifest)
@@ -3462,6 +3826,194 @@ def chart_bar(df: pd.DataFrame, x: str, y: str, title: str = "", orientation: st
         st.bar_chart(df.set_index(x)[y])
 
 
+CREATIVE_TYPE_CHART_COLORS_V68_49 = [
+    "#6254e8", "#0ea5e9", "#10b981", "#f97316", "#ec4899", "#8b5cf6",
+    "#14b8a6", "#f59e0b", "#ef4444", "#64748b", "#38bdf8", "#a78bfa",
+]
+
+
+def prepare_creative_type_chart_data_v68_49(
+    df: pd.DataFrame,
+    metric: str,
+    *,
+    max_categories: int = 12,
+) -> pd.DataFrame:
+    """Aggregate creative types for complete, readable dashboard charts.
+
+    ``Posts`` counts rows; other metrics are summed after safe numeric coercion.
+    When more categories exist than the chart can show clearly, the remainder
+    is combined so shares still add up to 100%.
+    """
+    columns = ["Creative Type", metric, "Share"]
+    if df is None or df.empty or "Primary Creative Type" not in df.columns:
+        return pd.DataFrame(columns=columns)
+    if metric != "Posts" and metric not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    working = df[["Primary Creative Type"]].copy()
+    labels = working["Primary Creative Type"].fillna("").astype(str).str.strip()
+    working["Creative Type"] = labels.mask(
+        labels.str.casefold().isin({"", "nan", "none", "null"}),
+        "Others",
+    )
+
+    if metric == "Posts":
+        summary = working.groupby("Creative Type", dropna=False).size().rename(metric).reset_index()
+    else:
+        working[metric] = df[metric].map(clean_num).clip(lower=0)
+        summary = working.groupby("Creative Type", dropna=False)[metric].sum().reset_index()
+
+    summary = summary.sort_values([metric, "Creative Type"], ascending=[False, True]).reset_index(drop=True)
+    max_categories = max(2, int(max_categories))
+    if len(summary) > max_categories:
+        visible = summary.head(max_categories - 1).copy()
+        remaining_value = float(summary.iloc[max_categories - 1 :][metric].sum())
+        remaining = pd.DataFrame([{"Creative Type": "Remaining creative types", metric: remaining_value}])
+        summary = pd.concat([visible, remaining], ignore_index=True)
+
+    total = float(summary[metric].sum())
+    summary["Share"] = (summary[metric] / total * 100.0) if total > 0 else 0.0
+    if metric == "Posts":
+        summary[metric] = summary[metric].round().astype(int)
+    return summary[columns]
+
+
+def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
+    """Show post mix as an interactive horizontal bar chart."""
+    if mix is None or mix.empty or float(mix["Posts"].sum()) <= 0:
+        st.markdown("<div class='empty-panel'>Creative type mix will appear after posts are tagged.</div>", unsafe_allow_html=True)
+        return
+    if px is None:
+        st.markdown(
+            bar_list(mix, "Creative Type", "Posts", max_rows=12, value_suffix="posts", show_share=True),
+            unsafe_allow_html=True,
+        )
+        return
+
+    chart_data = mix.copy()
+    chart_data["Label"] = chart_data.apply(
+        lambda row: f"{int(row['Posts']):,} ({float(row['Share']):.1f}%)",
+        axis=1,
+    )
+    fig = px.bar(
+        chart_data,
+        x="Posts",
+        y="Creative Type",
+        orientation="h",
+        text="Label",
+        color_discrete_sequence=["#6254e8"],
+        template="plotly_white",
+    )
+    fig.update_traces(
+        customdata=chart_data[["Share"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>Posts: %{x:,.0f}"
+            "<br>Share of posts: %{customdata[0]:.1f}%<extra></extra>"
+        ),
+        textposition="outside",
+        cliponaxis=False,
+        marker=dict(line=dict(color="rgba(255,255,255,0.75)", width=1)),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        showlegend=False,
+        height=520,
+        margin=dict(l=8, r=72, t=18, b=48),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        xaxis=dict(
+            title="Number of posts",
+            rangemode="tozero",
+            gridcolor="#e2e8f0",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title="",
+            categoryorder="total ascending",
+            automargin=True,
+        ),
+    )
+    render_plotly_chart(fig)
+
+
+def render_creative_type_views_doughnut_v68_49(views_mix: pd.DataFrame) -> None:
+    """Show view contribution as an interactive doughnut chart."""
+    if views_mix is None or views_mix.empty or float(views_mix["Views"].sum()) <= 0:
+        st.markdown("<div class='empty-panel'>Views chart will appear after view metrics are available.</div>", unsafe_allow_html=True)
+        return
+    if px is None:
+        st.markdown(
+            bar_list(views_mix, "Creative Type", "Views", max_rows=12),
+            unsafe_allow_html=True,
+        )
+        return
+
+    total_views = float(views_mix["Views"].sum())
+    if total_views >= 1_000_000_000:
+        total_label = f"{total_views / 1_000_000_000:.1f}B"
+    elif total_views >= 1_000_000:
+        total_label = f"{total_views / 1_000_000:.1f}M"
+    elif total_views >= 1_000:
+        total_label = f"{total_views / 1_000:.1f}K"
+    else:
+        total_label = f"{total_views:,.0f}"
+
+    fig = px.pie(
+        views_mix,
+        values="Views",
+        names="Creative Type",
+        hole=0.58,
+        color_discrete_sequence=CREATIVE_TYPE_CHART_COLORS_V68_49,
+        template="plotly_white",
+    )
+    fig.update_traces(
+        sort=False,
+        textinfo="none",
+        hovertemplate=(
+            "<b>%{label}</b><br>Views: %{value:,.0f}"
+            "<br>Share of views: %{percent:.1%}<extra></extra>"
+        ),
+        marker=dict(line=dict(color="#ffffff", width=2)),
+    )
+    fig.add_annotation(
+        text=f"<b>{total_label}</b><br><span style='font-size:12px'>Total views</span>",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(color="#111827", size=20),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=520,
+        margin=dict(l=12, r=12, t=18, b=92),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.06,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+    )
+    render_plotly_chart(fig)
+
+
+def filter_summary_by_selected_values_v68_50(
+    df: pd.DataFrame,
+    column: str,
+    selected_values: List[str],
+) -> pd.DataFrame:
+    """Apply OR within one Summary filter; an empty selection means All."""
+    if df is None or df.empty or column not in df.columns or not selected_values:
+        return df
+    return df[df[column].isin(selected_values)]
+
+
 def summary_kpi_row(items: List[Tuple[str, str, str, str]]) -> str:
     """Colored KPI cards for marketing Summary page."""
     cards = []
@@ -3493,6 +4045,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Market Summary": "M",
         "Top Creator Performance": "C",
         "Track Summary": "T",
+        "Sound Breakdown": "S",
         "Top Posts": "",
         "Post Summary": "P",
         "Downloads": "↓",
@@ -3585,6 +4138,14 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Average Engagement",
     "Average Views",
     "Average Engagements",
+    "Batch Posts",
+    "Batch Views",
+    "Batch Engagement",
+    "Batch Average Engagement",
+    "Profile Posts",
+    "Current Followers",
+    "Profile Average Views",
+    "Profile Average Engagement",
 }
 SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Engagement Rate",
@@ -3593,6 +4154,8 @@ SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Comments Rate",
     "Shares Rate",
     "Saves Rate",
+    "Batch Average Engagement Rate",
+    "Profile Average Engagement Rate",
 }
 TOP_POST_TABLE_COLUMNS_V68_46 = [
     "Platform",
@@ -3650,6 +4213,12 @@ def render_sortable_summary_table_v68_46(
             column_config[column] = st.column_config.NumberColumn(column, format="%.2f%%")
     if "Link" in table.columns:
         column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open post")
+    if "Creator Profile" in table.columns:
+        column_config["Creator Profile"] = st.column_config.LinkColumn(
+            "Creator",
+            display_text=r"https://(?:www\.)?(?:tiktok\.com/@|instagram\.com/)([^/?#]+)",
+            pinned=True,
+        )
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
     st.dataframe(
@@ -3702,14 +4271,14 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
-    """Aggregate the latest three months available per creator.
+    """Aggregate campaign contribution from the current filtered batch.
 
     Creators stay separate by platform and market. Total engagement prefers the
     available Likes + Comments + Shares + Saves components so an inconsistent
     uploaded total cannot inflate the leaderboard; an existing Total Engagement
-    value remains the fallback when no component engagement is available. The
-    three-month window ends on the newest dated post in the current filtered
-    data, allowing historical campaign batches to retain a meaningful window.
+    value remains the fallback when no component engagement is available. Public
+    three-month profile performance is retrieved separately and never inferred
+    from the campaign CSV.
     """
     columns = [
         "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
@@ -3724,22 +4293,6 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         if column not in working.columns:
             working[column] = 0
         working[column] = pd.to_numeric(working[column], errors="coerce")
-
-    parsed_dates = pd.to_datetime(
-        working.apply(canonical_post_date, axis=1),
-        errors="coerce",
-        utc=True,
-    ).dt.tz_convert(None).dt.normalize()
-    valid_dates = parsed_dates.dropna()
-    window_start = None
-    window_end = None
-    undated_posts = 0
-    if not valid_dates.empty:
-        window_end = valid_dates.max()
-        window_start = window_end - pd.DateOffset(months=3)
-        in_window = parsed_dates.between(window_start, window_end, inclusive="both")
-        undated_posts = int(parsed_dates.isna().sum())
-        working = working[in_window].copy()
 
     working["Creator Display"] = working.get(
         "Creator",
@@ -3826,18 +4379,11 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
         ascending=[False, False, False, True],
         kind="stable",
     ).reset_index(drop=True)
-    summary.attrs["date_window_start"] = (
-        window_start.date().isoformat() if window_start is not None else ""
-    )
-    summary.attrs["date_window_end"] = (
-        window_end.date().isoformat() if window_end is not None else ""
-    )
-    summary.attrs["undated_posts_excluded"] = undated_posts
     return summary, missing_creator_posts
 
 
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
-    """Render the creator-level campaign contribution leaderboard."""
+    """Render campaign contribution plus optional public-profile metrics."""
     with st.container(border=True):
         st.markdown(section_title("Top Creator Performance", "#14b8a6"), unsafe_allow_html=True)
         creator_table, missing_creator_posts = creator_performance_summary_v68_47(filtered)
@@ -3847,38 +4393,157 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 unsafe_allow_html=True,
             )
             return
-        window_start = creator_table.attrs.get("date_window_start")
-        window_end = creator_table.attrs.get("date_window_end")
-        undated_posts = int(creator_table.attrs.get("undated_posts_excluded", 0) or 0)
-        if window_start and window_end:
-            st.caption(
-                "Creator metrics use the latest three months available in this data "
-                f"({pd.Timestamp(window_start).strftime('%d %b %Y')} to "
-                f"{pd.Timestamp(window_end).strftime('%d %b %Y')}) "
-                "and are ranked by total engagement."
-            )
-        else:
-            st.caption(
-                "Post dates are unavailable, so creator metrics use all posts in the current view. "
-                "Rows are ranked by total engagement."
-            )
-        if undated_posts:
-            st.caption(
-                f"{undated_posts:,} post{'s' if undated_posts != 1 else ''} without a date "
-                "are excluded from the three-month creator metrics."
-            )
+        st.caption(
+            "Batch columns use posts in the current batch. Profile columns are fetched separately "
+            "from each creator's public platform activity."
+        )
         if missing_creator_posts:
             st.caption(
                 f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
                 "are excluded from this ranking."
             )
 
+        target_candidates = creator_table[["Platform", "Creator"]].copy()
+        target_candidates["Creator Key"] = target_candidates["Creator"].map(creator_key)
+        target_candidates = target_candidates[
+            target_candidates["Creator Key"].ne("")
+        ].drop_duplicates(["Platform", "Creator Key"], keep="first")
+
+        if st.session_state.get("creator_profile_scope_v68_51") not in PROFILE_SCOPE_OPTIONS:
+            # Migrate older sessions that may still contain the retired "All"
+            # option to the new cost-safe default.
+            st.session_state.creator_profile_scope_v68_51 = PROFILE_SCOPE_OPTIONS[0]
+
+        control_col, action_col = st.columns([2, 1])
+        with control_col:
+            profile_scope = st.selectbox(
+                "Profiles to enrich",
+                PROFILE_SCOPE_OPTIONS,
+                index=0,
+                key="creator_profile_scope_v68_51",
+                help="Top creators are selected by batch engagement.",
+            )
+        with action_col:
+            enrich_clicked = st.button(
+                "Fetch profile metrics (uses Apify credits)",
+                type="secondary",
+                width="stretch",
+                key="creator_profile_fetch_v68_51",
+            )
+        target_count_preview = profile_scope_count(profile_scope, len(target_candidates))
+        max_post_results = target_count_preview * DEFAULT_PROFILE_POST_LIMIT
+        st.caption(
+            f"Checks up to {target_count_preview:,} creator"
+            f"{'s' if target_count_preview != 1 else ''} × the latest "
+            f"{DEFAULT_PROFILE_POST_LIMIT} public posts within three months "
+            f"(maximum {max_post_results:,} post results)."
+        )
+
+        if enrich_clicked:
+            apify_token = safe_str(
+                st.session_state.get("apify_token", "")
+                or st.session_state.get("apify_token_input_v52", "")
+                or st.session_state.get("apify_token_input", "")
+            )
+            if not apify_token:
+                st.warning("Add the Apify token on the API Keys page before enriching creator profiles.")
+            else:
+                target_count = target_count_preview
+                targets = target_candidates.head(target_count)[["Platform", "Creator"]].copy()
+                try:
+                    with st.spinner(
+                        f"Fetching public profile posts for {len(targets):,} creator"
+                        f"{'s' if len(targets) != 1 else ''}..."
+                    ):
+                        profile_metrics, profile_errors = scrape_creator_profile_metrics(
+                            targets,
+                            apify_token,
+                            months=3,
+                            post_limit=DEFAULT_PROFILE_POST_LIMIT,
+                        )
+                    existing_metrics = st.session_state.get(
+                        "creator_profile_metrics_v68_51", pd.DataFrame()
+                    )
+                    combined_metrics = pd.concat(
+                        [existing_metrics, profile_metrics], ignore_index=True
+                    ) if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty else profile_metrics.copy()
+                    if not combined_metrics.empty:
+                        combined_metrics = combined_metrics.drop_duplicates(
+                            ["Platform", "Creator Key"], keep="last"
+                        ).reset_index(drop=True)
+                    st.session_state.creator_profile_metrics_v68_51 = combined_metrics
+                    st.session_state.creator_profile_updated_at_v68_51 = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    available_count = int(
+                        profile_metrics.get("Profile Posts", pd.Series(dtype=float)).fillna(0).gt(0).sum()
+                    )
+                    st.success(
+                        f"Profile metrics updated for {available_count:,} of {len(targets):,} selected creators."
+                    )
+                    for profile_error in profile_errors:
+                        st.warning(profile_error)
+                except Exception:
+                    LOGGER.exception("Creator profile enrichment failed")
+                    st.error("Creator profile enrichment could not be completed. Batch metrics are still available.")
+
+        display_table = creator_table.rename(columns={
+            "Posts": "Batch Posts",
+            "Total Views": "Batch Views",
+            "Total Engagement": "Batch Engagement",
+            "Average Engagement": "Batch Average Engagement",
+            "Average Engagement Rate": "Batch Average Engagement Rate",
+        }).copy()
+        display_table["Creator Key"] = display_table["Creator"].map(creator_key)
+        display_table["Creator Profile"] = display_table.apply(
+            lambda row: creator_profile_url(row.get("Platform"), row.get("Creator")),
+            axis=1,
+        )
+
+        profile_metrics = st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame())
+        profile_columns = []
+        if isinstance(profile_metrics, pd.DataFrame) and not profile_metrics.empty:
+            merge_columns = [
+                "Platform", "Creator Key", "Profile Posts", "Current Followers",
+                "Profile Average Views", "Profile Average Engagement",
+                "Profile Average Engagement Rate", "Profile Data Status",
+            ]
+            available_merge_columns = [
+                column for column in merge_columns if column in profile_metrics.columns
+            ]
+            display_table = display_table.merge(
+                profile_metrics[available_merge_columns],
+                on=["Platform", "Creator Key"],
+                how="left",
+            )
+            profile_columns = [
+                "Current Followers", "Profile Posts", "Profile Average Views",
+                "Profile Average Engagement", "Profile Average Engagement Rate",
+                "Profile Data Status",
+            ]
+            updated_at = safe_str(st.session_state.get("creator_profile_updated_at_v68_51"))
+            if updated_at:
+                try:
+                    updated_label = pd.Timestamp(updated_at).strftime("%d %b %Y %H:%M UTC")
+                except Exception:
+                    updated_label = updated_at
+                st.caption(
+                    f"Public profile metadata updated {updated_label}. Latest "
+                    f"{DEFAULT_PROFILE_POST_LIMIT} public posts per creator dated within "
+                    "the past three months; no media is downloaded."
+                )
+        else:
+            st.caption(
+                f"Optional enrichment checks each creator's latest {DEFAULT_PROFILE_POST_LIMIT} "
+                "public posts dated within the past three months. It runs only when you click the button."
+            )
+
         render_sortable_summary_table_v68_46(
-            creator_table,
+            display_table,
             columns=[
-                "Creator", "Market", "Platform", "Posts", "Followers", "KOL Size",
-                "Total Views", "Total Engagement", "Average Engagement",
-                "Average Engagement Rate",
+                "Creator Profile", "Market", "Platform", "Batch Posts",
+                "Batch Views", "Batch Engagement", "Batch Average Engagement",
+                "Batch Average Engagement Rate", *profile_columns,
             ],
             max_visible_rows=15,
         )
@@ -4011,9 +4676,78 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
-            with st.expander("Confirm markets for uploaded files", expanded=True):
-                st.caption("Markets in the file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
+            with st.expander("Confirm details for uploaded files", expanded=True):
+                st.caption(
+                    "Add the campaign track to group all sounds from a file into one campaign summary. "
+                    "Original sound names remain available in Sound Breakdown."
+                )
+                apply_shared_campaign = True
+                if len(files) > 1:
+                    shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"
+                    uploaded_files_signature = tuple(
+                        (
+                            safe_str(getattr(uploaded_file, "file_id", "")),
+                            safe_str(uploaded_file.name),
+                            int(getattr(uploaded_file, "size", 0) or 0),
+                        )
+                        for uploaded_file in files
+                    )
+                    signature_state_key = "uploaded_campaign_files_signature_v68_52"
+                    if (
+                        st.session_state.get(signature_state_key)
+                        != uploaded_files_signature
+                    ):
+                        # Every newly selected file set starts in per-file mode.
+                        # Users can still opt into shared campaign details after
+                        # the upload has settled without the next rerun undoing it.
+                        st.session_state[signature_state_key] = uploaded_files_signature
+                        st.session_state[shared_campaign_toggle_key] = False
+                    elif shared_campaign_toggle_key not in st.session_state:
+                        st.session_state[shared_campaign_toggle_key] = False
+                    apply_shared_campaign = st.toggle(
+                        "Apply the same track and artist to all uploaded files",
+                        key=shared_campaign_toggle_key,
+                    )
+                shared_track = ""
+                shared_artist = ""
+                if apply_shared_campaign:
+                    shared_track_col, shared_artist_col = st.columns(2)
+                    with shared_track_col:
+                        shared_track = st.text_input(
+                            "Campaign track / sound name (recommended)",
+                            placeholder="e.g. Hate That I Made You Love Me",
+                            key="shared_uploaded_campaign_track_v68_51",
+                            help="Groups every original sound in the selected file or files into one campaign.",
+                        )
+                    with shared_artist_col:
+                        shared_artist = st.text_input(
+                            "Artist name (optional)",
+                            placeholder="e.g. Ariana Grande",
+                            key="shared_uploaded_campaign_artist_v68_51",
+                            help="Useful when different artists have tracks with the same title.",
+                        )
+                st.caption("Markets in each file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
                 for f in files:
+                    file_key = hashlib.sha1(
+                        f"{f.name}:{len(f.getvalue())}".encode("utf-8")
+                    ).hexdigest()[:12]
+                    fallback_track = safe_str(shared_track)
+                    fallback_artist = safe_str(shared_artist)
+                    if not apply_shared_campaign:
+                        st.markdown(f"**{esc(f.name)}**")
+                        file_track_col, file_artist_col = st.columns(2)
+                        with file_track_col:
+                            fallback_track = st.text_input(
+                                f"Campaign track - {f.name}",
+                                placeholder="Track name",
+                                key=f"uploaded_file_track_v68_51_{file_key}",
+                            )
+                        with file_artist_col:
+                            fallback_artist = st.text_input(
+                                f"Artist - {f.name} (optional)",
+                                placeholder="Artist name",
+                                key=f"uploaded_file_artist_v68_51_{file_key}",
+                            )
                     try:
                         df = read_any_table(f)
                         detected_cols = detect_columns(df)
@@ -4032,9 +4766,6 @@ if st.session_state.step == 2:
                         else:
                             filename_market = infer_market_from_filename(f.name)
                             default_choice = filename_market or "Other / no market"
-                            file_key = hashlib.sha1(
-                                f"{f.name}:{len(f.getvalue())}".encode("utf-8")
-                            ).hexdigest()[:12]
                             market_choice = st.selectbox(
                                 f.name,
                                 MARKET_OPTIONS,
@@ -4053,6 +4784,8 @@ if st.session_state.step == 2:
                             df,
                             f.name,
                             fallback_market=fallback_market,
+                            fallback_track=fallback_track,
+                            fallback_artist=fallback_artist,
                         )
                         parsed_frames.append(std)
                         platforms = sorted([
@@ -4061,13 +4794,17 @@ if st.session_state.step == 2:
                         ])
                         markets = sorted([m for m in std.get("Market", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(m)])
                         tracks = sorted([t for t in std.get("Track", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        artists = sorted([t for t in std.get("Campaign Artist", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
+                        original_sounds = sorted([t for t in std.get("Original Sound", pd.Series(dtype=str)).fillna("").unique().tolist() if safe_str(t)])
                         summary_rows.append({
                             "File": f.name,
                             "Posts": len(std),
                             "Platforms": ", ".join(platforms) if platforms else "Not detected",
                             "Markets": ", ".join(markets[:3]) + ("..." if len(markets) > 3 else "") if markets else "Not specified",
                             "Market source": market_source,
-                            "Tracks": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                            "Campaign track": ", ".join(tracks[:2]) + ("..." if len(tracks) > 2 else "") if tracks else "Not specified",
+                            "Artist": ", ".join(artists[:2]) + ("..." if len(artists) > 2 else "") if artists else "Not specified",
+                            "Original sounds": len(original_sounds),
                         })
                     except Exception as e:
                         errors.append(f"{f.name}: {e}")
@@ -4189,13 +4926,15 @@ if st.session_state.step == 2:
             ("Platforms", str(batch.get("Platform", pd.Series([TIKTOK] * len(batch))).nunique()), "TikTok + Instagram"),
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
-        st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
+        st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
                 st.session_state.batch_df = pd.DataFrame()
                 st.session_state.selected_df = pd.DataFrame()
                 st.session_state.tagged_df = pd.DataFrame()
+                st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
+                st.session_state.creator_profile_updated_at_v68_51 = ""
                 st.session_state.last_message = ""
                 reset_date_filter_state_v68()
                 st.rerun()
@@ -4632,6 +5371,9 @@ elif st.session_state.step == 4:
             options=list(GEMINI_MODEL_OPTIONS.keys()),
             format_func=gemini_model_label,
             key="qa_gemini_model_v68_41_4",
+            disabled=bool(
+                st.session_state.get("tagging_job_active_v68_43", False)
+            ),
             help="3.1 Flash-Lite is recommended for routine batches. 3.5 Flash is slower and is available for smaller ambiguous batches.",
         )
         st.caption(
@@ -4642,6 +5384,7 @@ elif st.session_state.step == 4:
     # evidence remain unresolved.
     st.session_state.enable_full_video_fallback_v46 = True
     saved_large_batch = _large_batch_manifest_v68_43(selected)
+    expected_large_job_id = _large_batch_job_id_v68_55(selected)
     if _uses_large_batch_checkpoints_v68_43(selected):
         completed_count = int(
             (saved_large_batch or {}).get(
@@ -4650,7 +5393,7 @@ elif st.session_state.step == 4:
             )
         )
         st.info(
-            "Large-batch protection is on. Each completed post is saved"
+            "Large-batch protection is on. Progress is saved automatically"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count
@@ -4658,13 +5401,88 @@ elif st.session_state.step == 4:
             )
         )
 
-    if st.session_state.get("tagging_job_active_v68_43", False):
-        tagged_result = run_real_tagging_backend(selected)
+    tagging_job_active = bool(
+        st.session_state.get("tagging_job_active_v68_43", False)
+    )
+    auto_resume_action = "manual"
+    marker_job_id = (
+        _tagging_continue_job_v68_55() if expected_large_job_id else ""
+    )
+    if not _tagging_active_job_matches_v68_55(
+        tagging_job_active,
+        marker_job_id,
+        expected_large_job_id,
+    ):
+        # The selected rows or model changed during a Streamlit rerun. Never
+        # let an active flag launch paid work for a different checkpoint job.
+        st.session_state.tagging_job_active_v68_43 = False
+        tagging_job_active = False
+        _clear_tagging_continue_query_v68_55()
+        st.warning(
+            "Tagging paused because the run settings changed. Select Resume "
+            "tagging to continue with the current settings."
+        )
+    elif not tagging_job_active and expected_large_job_id:
+        auto_resume_action = _tagging_auto_resume_action_v68_55(
+            marker_job_id,
+            expected_large_job_id,
+            saved_large_batch,
+        )
+        if auto_resume_action == "resume":
+            _set_tagging_continue_query_v68_55(expected_large_job_id)
+            st.session_state.tagging_job_active_v68_43 = True
+            tagging_job_active = True
+        elif auto_resume_action == "manual" and marker_job_id:
+            _clear_tagging_continue_query_v68_55()
+
+    execution_store = None
+    execution_owner = ""
+    execution_lock_acquired = False
+    execution_lock_error = False
+    if tagging_job_active and expected_large_job_id:
+        execution_store = _large_batch_store_v68_43()
+        execution_owner = _tagging_execution_owner_v68_55()
+        try:
+            execution_lock_acquired = execution_store.try_acquire_execution(
+                expected_large_job_id,
+                execution_owner,
+            )
+        except Exception:
+            execution_lock_error = True
+        if not execution_lock_acquired:
+            st.session_state.tagging_job_active_v68_43 = False
+            tagging_job_active = False
+            if execution_lock_error:
+                auto_resume_action = "manual"
+                _clear_tagging_continue_query_v68_55()
+            else:
+                auto_resume_action = "wait"
+
+    if execution_lock_error:
+        st.warning(
+            "Automatic continuation paused because the execution safeguard "
+            "could not be created. Select Resume tagging to try again."
+        )
+
+    if auto_resume_action == "wait" and not tagging_job_active:
+        _render_tagging_auto_wait_v68_55(expected_large_job_id)
+    elif tagging_job_active:
+        try:
+            tagged_result = run_real_tagging_backend(selected)
+        finally:
+            if execution_lock_acquired and execution_store is not None:
+                execution_store.release_execution(
+                    expected_large_job_id,
+                    execution_owner,
+                )
         if tagged_result is None:
             # Each large-batch chunk runs in a fresh Streamlit execution. This
             # avoids one 800-row request monopolising a single script run.
+            if expected_large_job_id:
+                _set_tagging_continue_query_v68_55(expected_large_job_id)
             st.rerun()
         st.session_state.tagging_job_active_v68_43 = False
+        _clear_tagging_continue_query_v68_55()
         if tagged_result is not None and not tagged_result.empty:
             reset_review_state_for_new_tagging_run()
             st.session_state.tagged_df = tagged_result
@@ -4681,6 +5499,8 @@ elif st.session_state.step == 4:
                 go(3)
         with retry_run:
             if st.button(retry_label, type="primary", width="stretch"):
+                if expected_large_job_id:
+                    _set_tagging_continue_query_v68_55(expected_large_job_id)
                 st.session_state.tagging_job_active_v68_43 = True
                 st.rerun()
     else:
@@ -4688,12 +5508,7 @@ elif st.session_state.step == 4:
         if saved_large_batch:
             if saved_large_batch.get("status") == "completed":
                 start_label = "Use saved results"
-            elif int(
-                saved_large_batch.get(
-                    "saved_rows",
-                    saved_large_batch.get("completed_rows", 0),
-                )
-            ) > 0:
+            else:
                 start_label = "Resume tagging"
         c1, c2 = st.columns(2)
         with c1:
@@ -4701,6 +5516,8 @@ elif st.session_state.step == 4:
                 go(3)
         with c2:
             if st.button(start_label, type="primary", width="stretch"):
+                if expected_large_job_id:
+                    _set_tagging_continue_query_v68_55(expected_large_job_id)
                 st.session_state.tagging_job_active_v68_43 = True
                 st.rerun()
 
@@ -4720,8 +5537,14 @@ elif st.session_state.step == 5:
             go(4)
         st.stop()
 
-    review_action_series = tagged.get("Review Action", pd.Series([""] * len(tagged), index=tagged.index)).fillna("").astype(str).str.upper()
-    review_df = tagged[(tagged.get("Needs Review", False) == True) & (review_action_series != "REMOVE")].copy()
+    review_queue_indices = review_queue_indices_v68_57(
+        tagged,
+        st.session_state.get("review_queue_indices_v68_57"),
+    )
+    st.session_state.review_queue_indices_v68_57 = [
+        safe_str(index) for index in review_queue_indices
+    ]
+    review_df = tagged.loc[review_queue_indices].copy() if review_queue_indices else tagged.iloc[0:0].copy()
 
     if review_df.empty:
         st.markdown("<div class='good-note'>All flagged posts have been reviewed.</div>", unsafe_allow_html=True)
@@ -4733,6 +5556,19 @@ elif st.session_state.step == 5:
             if st.button("Continue to Summary", type="primary", width="stretch"):
                 go(6)
         st.stop()
+
+    pending_review_count = int(
+        review_df.get(
+            "Needs Review",
+            pd.Series([False] * len(review_df), index=review_df.index),
+        ).fillna(False).eq(True).sum()
+    )
+    if pending_review_count == 0:
+        st.markdown(
+            "<div class='good-note'>All flagged posts have been reviewed. "
+            "You can revisit them below or continue to Summary.</div>",
+            unsafe_allow_html=True,
+        )
 
     # Original-app style: one review item at a time, with Previous / Skip navigation.
     pointer = int(st.session_state.get("review_pointer", 0) or 0)
@@ -4749,7 +5585,7 @@ elif st.session_state.step == 5:
             st.rerun()
     with nav2:
         st.markdown(
-            f"<div style='text-align:center;color:#64748b;font-size:13px;font-weight:800;padding:10px 0'>Post {pointer + 1} of {len(review_df)}</div>",
+            f"<div style='text-align:center;color:#64748b;font-size:13px;font-weight:800;padding:10px 0'>Post {pointer + 1} of {len(review_df)} &middot; {pending_review_count} remaining</div>",
             unsafe_allow_html=True,
         )
     with nav3:
@@ -4778,7 +5614,7 @@ elif st.session_state.step == 5:
         _first_nonblank_v43(row.get("Review Note"), row.get("QA Reason"), row.get("Reasoning")),
         "The AI result needs a manual check.",
     )
-    current_type = safe_str(row.get("Creative Type"))
+    current_type = operational_creative_type(row.get("Creative Type"))
     current_narrative = safe_str(row.get("Narrative"))
     current_details = safe_str(row.get("Content Details"))
 
@@ -4829,7 +5665,11 @@ elif st.session_state.step == 5:
     with right:
         action_key = f"review_action_v55_{original_idx}"
         if action_key not in st.session_state:
-            st.session_state[action_key] = "Keep & Tag"
+            st.session_state[action_key] = (
+                "Remove"
+                if safe_str(row.get("Review Action")).upper() == "REMOVE"
+                else "Keep & Tag"
+            )
 
         st.markdown("<div class='review-panel-card'><h3>Review Action</h3><div class='review-action-title'>What should happen to this post?</div>", unsafe_allow_html=True)
         keep_col, remove_col = st.columns(2)
@@ -4876,7 +5716,10 @@ elif st.session_state.step == 5:
                 st.session_state.tagged_df.at[original_idx, "QA Priority"] = "Removed"
                 st.session_state.tagged_df.at[original_idx, "Tier Used"] = "tier3_human"
                 st.session_state.tagged_df.at[original_idx, "Validation Status"] = "removed"
-                st.session_state.review_pointer = 0
+                st.session_state.review_pointer = next_review_pointer_v68_57(
+                    pointer,
+                    len(review_df),
+                )
                 st.session_state.pop(action_key, None)
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
@@ -4944,7 +5787,10 @@ elif st.session_state.step == 5:
             ai_prefill = st.session_state.get(ai_result_key, {})
             if not restricted_manual_review and ai_prefill and not ai_prefill.get("parse_error"):
                 ai_conf = float(ai_prefill.get("Confidence", 0) or 0)
-                ai_labels = safe_str(ai_prefill.get("Creative Type")) or "—"
+                ai_labels = operational_creative_type(
+                    ai_prefill.get("Creative Type"),
+                    fallback="—",
+                )
                 ai_reason = safe_str(ai_prefill.get("Reasoning"))
                 st.markdown(
                     f"<div class='review-note-info'><strong>AI suggestion:</strong> {esc(ai_labels)} · {ai_conf:.0%} confidence"
@@ -5116,7 +5962,10 @@ elif st.session_state.step == 5:
                     st.session_state.tagged_df.at[original_idx, "Tier Used"] = "tier3_human"
                     st.session_state.tagged_df.at[original_idx, "Validation Status"] = "reviewed"
                     st.session_state.tagged_df = add_performance_fields(st.session_state.tagged_df)
-                    st.session_state.review_pointer = 0
+                    st.session_state.review_pointer = next_review_pointer_v68_57(
+                        pointer,
+                        len(review_df),
+                    )
                     for key in [
                         ai_result_key, narrative_key, type_key, details_key, action_key,
                         *metric_keys.values(), *drama_keys.values(),
@@ -5146,8 +5995,13 @@ elif st.session_state.step == 6:
     # Marketing summary excludes auto-removed unavailable/private posts. The
     # internal QA workbook still receives every attempted row below.
     qa_all_rows = tagged.copy()
+    for label_column in ["Creative Type", "Final Labels"]:
+        if label_column in qa_all_rows.columns:
+            qa_all_rows[label_column] = qa_all_rows[label_column].map(
+                operational_creative_type
+            )
     work = tagged[~_removed_mask_v56(tagged)].copy()
-    for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
+    for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
         if col not in work.columns:
             work[col] = ""
     for col in ["Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Followers"]:
@@ -5158,45 +6012,84 @@ elif st.session_state.step == 6:
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)
     work["Track Display"] = work["Track"].map(lambda x: display_empty(x, "Not specified"))
+    work["Original Sound Display"] = work["Original Sound"].map(lambda x: display_empty(x, "Not specified"))
+    work["Campaign Artist Display"] = work["Campaign Artist"].map(lambda x: display_empty(x, "Not specified"))
     work["Source Display"] = work["Source"].map(lambda x: display_empty(x, "Manual / pasted links"))
-    work["Creative Type"] = work["Creative Type"].map(lambda x: display_empty(x, "Others"))
+    work["Creative Type"] = work["Creative Type"].map(operational_creative_type)
     work["Primary Creative Type"] = work["Creative Type"].map(primary_creative_type)
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Combined filters: users can focus by platform + source + market + track + creative type.
-    f0, f1, f2, f3, f4 = st.columns(5)
+    # Combined filters: users can focus by platform + source + market + track +
+    # creative type + creator size. Empty selections continue to mean All.
+    f0, f1, f2, f3, f4, f5 = st.columns(6)
     with f0:
-        platform_opts = ["All"] + sorted(work["Platform Display"].dropna().unique().tolist())
-        platform_filter = st.selectbox("Platform", platform_opts, key="summary_platform_v68_42")
+        platform_opts = sorted(work["Platform Display"].dropna().unique().tolist())
+        platform_filters = st.multiselect(
+            "Platform",
+            platform_opts,
+            key="summary_platform_multi_v68_50",
+            placeholder="All",
+        )
     with f1:
-        source_opts = ["All"] + sorted(work["Source Display"].dropna().unique().tolist())
-        source_filter = st.selectbox("Source", source_opts, key="summary_source_v28")
+        source_opts = sorted(work["Source Display"].dropna().unique().tolist())
+        source_filters = st.multiselect(
+            "Source",
+            source_opts,
+            key="summary_source_multi_v68_50",
+            placeholder="All",
+        )
     with f2:
-        market_opts = ["All"] + sorted(work["Market Display"].dropna().unique().tolist())
-        market_filter = st.selectbox("Market", market_opts, key="summary_market_v28")
+        market_opts = sorted(work["Market Display"].dropna().unique().tolist())
+        market_filters = st.multiselect(
+            "Market",
+            market_opts,
+            key="summary_market_multi_v68_50",
+            placeholder="All",
+        )
     with f3:
-        track_opts = ["All"] + sorted(work["Track Display"].dropna().unique().tolist())
-        track_filter = st.selectbox("Track", track_opts, key="summary_track_v28")
+        track_opts = sorted(work["Track Display"].dropna().unique().tolist())
+        track_filters = st.multiselect(
+            "Track",
+            track_opts,
+            key="summary_track_multi_v68_50",
+            placeholder="All",
+        )
     with f4:
-        type_opts = ["All"] + sorted(work["Primary Creative Type"].dropna().unique().tolist())
-        type_filter = st.selectbox("Creative Type", type_opts, key="summary_type_v55")
+        type_opts = sorted(work["Primary Creative Type"].dropna().unique().tolist())
+        type_filters = st.multiselect(
+            "Creative Type",
+            type_opts,
+            key="summary_type_multi_v68_50",
+            placeholder="All",
+        )
+    with f5:
+        kol_size_opts = sorted(work["KOL Size Display"].dropna().unique().tolist())
+        kol_size_filters = st.multiselect(
+            "KOL Size",
+            kol_size_opts,
+            key="summary_kol_size_multi_v68_51",
+            placeholder="All",
+        )
     # Summary sections retain the former default order. Every Summary table
     # can then be sorted directly from its column headings.
     focus_metric = "Views"
     sort_order = "Highest first"
-    st.caption("Click any table column heading to sort ascending or descending.")
+    st.caption("Choose one or more values in any filter. Empty means All. Click any table column heading to sort ascending or descending.")
 
     filtered = work.copy()
-    if platform_filter != "All":
-        filtered = filtered[filtered["Platform Display"] == platform_filter]
-    if source_filter != "All":
-        filtered = filtered[filtered["Source Display"] == source_filter]
-    if market_filter != "All":
-        filtered = filtered[filtered["Market Display"] == market_filter]
-    if track_filter != "All":
-        filtered = filtered[filtered["Track Display"] == track_filter]
-    if type_filter != "All":
-        filtered = filtered[filtered["Primary Creative Type"] == type_filter]
+    for filter_column, selected_values in [
+        ("Platform Display", platform_filters),
+        ("Source Display", source_filters),
+        ("Market Display", market_filters),
+        ("Track Display", track_filters),
+        ("Primary Creative Type", type_filters),
+        ("KOL Size Display", kol_size_filters),
+    ]:
+        filtered = filter_summary_by_selected_values_v68_50(
+            filtered,
+            filter_column,
+            selected_values,
+        )
 
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
@@ -5287,43 +6180,73 @@ elif st.session_state.step == 6:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>" + section_title("Track Summary", "#f97316"), unsafe_allow_html=True)
-    track_summary = aggregate_summary_performance_v68_15(filtered, ["Market Display", "Track Display"]).rename(columns={
-        "Market Display": "Market",
+    campaign_summary = aggregate_summary_performance_v68_15(filtered, ["Track Display", "Campaign Artist Display"]).rename(columns={
         "Track Display": "Track",
+        "Campaign Artist Display": "Artist",
         "Average_Views": "Average Views",
         "Average_Engagements": "Average Engagements",
         "Average_Engagement_Rate": "Average Engagement Rate",
         "Average_Shares_Rate": "Shares Rate",
         "Average_Saves_Rate": "Saves Rate",
     })
-    track_summary = sort_summary_performance_v68_18(
-        track_summary, focus_metric, sort_order
+    campaign_summary = sort_summary_performance_v68_18(
+        campaign_summary, focus_metric, sort_order
     )
     render_sortable_summary_table_v68_46(
-        track_summary,
-        columns=["Market", "Track", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
+        campaign_summary,
+        columns=["Track", "Artist", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
         max_visible_rows=12,
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Visual summary. Use custom visible bars instead of a plain white chart, so every number is obvious.
+    original_sound_values = filtered["Original Sound"].map(safe_str)
+    campaign_track_values = filtered["Track"].map(safe_str)
+    has_sound_breakdown = bool(
+        original_sound_values.ne("").any()
+        and original_sound_values.ne(campaign_track_values).any()
+    )
+    if has_sound_breakdown:
+        st.markdown("<div class='card'>" + section_title("Sound Breakdown", "#0ea5e9"), unsafe_allow_html=True)
+        st.caption("Original platform sounds are shown separately and are not added to the campaign totals above.")
+        sound_summary = aggregate_summary_performance_v68_15(
+            filtered,
+            ["Market Display", "Track Display", "Original Sound Display"],
+        ).rename(columns={
+            "Market Display": "Market",
+            "Track Display": "Campaign Track",
+            "Original Sound Display": "Original Sound",
+            "Average_Views": "Average Views",
+            "Average_Engagements": "Average Engagements",
+            "Average_Engagement_Rate": "Average Engagement Rate",
+            "Average_Shares_Rate": "Shares Rate",
+            "Average_Saves_Rate": "Saves Rate",
+        })
+        sound_summary = sort_summary_performance_v68_18(
+            sound_summary, focus_metric, sort_order
+        )
+        render_sortable_summary_table_v68_46(
+            sound_summary,
+            columns=[
+                "Market", "Campaign Track", "Original Sound", "Posts",
+                "Average Views", "Average Engagements", "Average Engagement Rate",
+                "Shares Rate", "Saves Rate",
+            ],
+            max_visible_rows=12,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Interactive creative-type summary. Hover/tap exposes both values and shares.
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("<div class='card'>" + section_title("Creative Type Mix", "#6254e8"), unsafe_allow_html=True)
-        mix = filtered["Primary Creative Type"].value_counts().reset_index()
-        mix.columns = ["Creative Type", "Posts"]
-        st.markdown(bar_list(mix, "Creative Type", "Posts", max_rows=12, value_suffix="posts", show_share=True), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Creative Type Mix", "#6254e8"), unsafe_allow_html=True)
+            mix = prepare_creative_type_chart_data_v68_49(filtered, "Posts", max_categories=12)
+            render_creative_type_bar_chart_v68_49(mix)
     with c2:
-        metric_for_chart = focus_metric if focus_metric != "Engagement Rate" else "Views"
-        metric_title = f"{metric_for_chart} by Creative Type"
-        st.markdown("<div class='card'>" + section_title(metric_title, "#0ea5e9"), unsafe_allow_html=True)
-        if has_metrics and metric_for_chart in filtered.columns and filtered[metric_for_chart].notna().any():
-            metric_mix = filtered.groupby("Primary Creative Type", dropna=False)[metric_for_chart].sum().reset_index().rename(columns={"Primary Creative Type": "Creative Type"}).sort_values(metric_for_chart, ascending=False)
-            st.markdown(bar_list(metric_mix.head(12), "Creative Type", metric_for_chart, max_rows=12), unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='empty-panel'>Performance chart will appear after metrics are available.</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
+            views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
+            render_creative_type_views_doughnut_v68_49(views_mix)
 
     # Source summary is useful when users mix uploaded files and pasted links.
     if filtered["Source Display"].nunique() > 1:
@@ -5386,7 +6309,7 @@ elif st.session_state.step == 6:
     qa_df = qa_all_rows.copy()
     qa_front = [
         "App Version", "Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds",
-        "Platform", "Source", "Input Type", "Link", "Market", "Track", "Campaign Artist", "Creator",
+        "Platform", "Source", "Input Type", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator",
         "Narrative", "Creative Type", *QA_AUDIT_COLUMNS, "Content Details",
         *MANUAL_METRIC_AUDIT_COLUMNS,
         "Needs Review", "Review Action", "Review Note", "Review Risk",
@@ -5447,6 +6370,8 @@ elif st.session_state.step == 6:
             st.session_state.batch_df = pd.DataFrame()
             st.session_state.selected_df = pd.DataFrame()
             st.session_state.tagged_df = pd.DataFrame()
+            st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
+            st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()

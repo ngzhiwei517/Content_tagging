@@ -129,6 +129,8 @@ class CsvCompatibilityTests(unittest.TestCase):
         encoding: str = "utf-8",
         name: str = "test.csv",
         fallback_market: str = "",
+        fallback_track: str = "",
+        fallback_artist: str = "",
     ):
         raw = text.encode(encoding)
         frame = self.read_any_table(UploadedFile(name, raw))
@@ -136,6 +138,8 @@ class CsvCompatibilityTests(unittest.TestCase):
             frame,
             name,
             fallback_market=fallback_market,
+            fallback_track=fallback_track,
+            fallback_artist=fallback_artist,
         )
 
     def test_utf8_bom_and_generic_headers(self):
@@ -148,7 +152,27 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(columns["link"], "TikTok Link")
         self.assertEqual(rows.loc[0, "Market"], "MY")
         self.assertEqual(rows.loc[0, "Track"], "Track A")
+        self.assertEqual(rows.loc[0, "Original Sound"], "Track A")
         self.assertEqual(rows.loc[0, "Views"], 1234)
+
+    def test_campaign_track_override_preserves_original_sound(self):
+        text = (
+            "Link,Sound,Username,Views\n"
+            "https://www.tiktok.com/@alpha/video/7600000000000000001,original-sound-alpha-123,alpha,100\n"
+            "https://www.tiktok.com/@beta/video/7600000000000000002,remix-beta-456,beta,200\n"
+        )
+        rows, _ = self.parse(
+            text,
+            name="campaign.csv",
+            fallback_track="Hate That I Made You Love Me",
+            fallback_artist="Ariana Grande",
+        )
+        self.assertEqual(rows["Track"].unique().tolist(), ["Hate That I Made You Love Me"])
+        self.assertEqual(rows["Campaign Artist"].unique().tolist(), ["Ariana Grande"])
+        self.assertEqual(
+            rows["Original Sound"].tolist(),
+            ["original-sound-alpha-123", "remix-beta-456"],
+        )
 
     def test_filename_market_prefix_is_detected(self):
         self.assertEqual(
@@ -220,7 +244,26 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertNotIn("Paste extra {platform_short} links", APP_SOURCE)
         self.assertIn('st.tabs(["Upload post files", "Paste post links"])', APP_SOURCE)
         self.assertIn("fallback_market=fallback_market", APP_SOURCE)
-        self.assertIn('st.expander("Confirm markets for uploaded files"', APP_SOURCE)
+        self.assertIn('st.expander("Confirm details for uploaded files"', APP_SOURCE)
+        self.assertIn("Apply the same track and artist to all uploaded files", APP_SOURCE)
+        shared_toggle_block = APP_SOURCE.split(
+            '"Apply the same track and artist to all uploaded files"', 1
+        )[1].split(")", 1)[0]
+        self.assertIn("key=shared_campaign_toggle_key", shared_toggle_block)
+        self.assertIn(
+            'shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"',
+            APP_SOURCE,
+        )
+        self.assertIn(
+            'signature_state_key = "uploaded_campaign_files_signature_v68_52"',
+            APP_SOURCE,
+        )
+        self.assertIn(
+            "st.session_state[shared_campaign_toggle_key] = False",
+            APP_SOURCE,
+        )
+        self.assertIn("fallback_track=fallback_track", APP_SOURCE)
+        self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)
         self.assertIn("links = parse_links(link_text)", APP_SOURCE)
         self.assertIn('"Platform": detected_platform', APP_SOURCE)
