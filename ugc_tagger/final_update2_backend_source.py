@@ -4187,7 +4187,6 @@ def build_prompt(row):
         if is_instagram else
         "Campaign Market is workflow context; TikTok-reported Location is platform metadata. Do not use either field as proof of content format, subject identity, or setting, and never substitute TikTok-reported Location for Campaign Market."
     )
-    carousel_platform = 'Instagram Reels' if is_instagram else 'TikTok'
     tiktok_location = _kb_norm_text(row.get('locationCreated', '')) or '(not reported)'
     play       = row.get('playCount', 0)
     likes      = row.get('diggCount', 0)
@@ -4197,7 +4196,11 @@ def build_prompt(row):
     is_slide = 'true' if slideshow_flag is True else ('false' if slideshow_flag is False else 'unknown')
     slide_count = _slideshow_image_count(row)
     slide_count_display = slide_count if slide_count is not None else 'unknown'
-    allowed_str = '\n'.join(f'  - {t}' for t in ALLOWED_CREATIVE_TYPES)
+    allowed_str = '\n'.join(
+        f'  - {creative_type}'
+        for creative_type in ALLOWED_CREATIVE_TYPES
+        if creative_type != 'Carousel'
+    )
     return f"""{analyst_intro}
 
 Return ONLY valid JSON. No markdown. No explanation outside JSON.
@@ -4239,11 +4242,8 @@ Examples:
 === OUTPUT RULES ===
 - {location_rule}
 - Creative Type: return 1 or 2 labels only.
-- Include Carousel only when the post has at least 2 confirmed slideshow images.
-- If Confirmed Slideshow Images is 1, do NOT use Carousel; classify the single image by its content.
-- Carousel is a {carousel_platform} photo-mode format, not an editing style. If Is Slideshow is false, do NOT use Carousel even when a normal video is edited from several photos.
-- If the slideshow image count is unknown, use isSlideshow conservatively and never infer Carousel from a video montage alone.
-- If Carousel is included, use the second label for the actual content type when possible, e.g. ["Carousel", "Beauty"].
+- Carousel/slideshow/photo mode is a post format, not a Creative Type.
+- For every photo or slideshow, do NOT use Carousel as a Creative Type. Classify it by its actual content, such as Beauty, Quotes, Celebrity Edits or Slice of Life.
 - Do not use Slice of Life as a fallback when a more specific label applies.
 - If uncertain, choose the strongest visible signal and lower confidence.
 - Remix is audio-only. Never use Remix for visual transitions, outfit changes, or editing style.
@@ -4277,7 +4277,7 @@ Good narrative examples:
 Do not force narrative into one label like Relationship or Lifestyle if a more specific short phrase fits.
 
 === DECISION TREE — APPLY IN THIS ORDER ===
-1. Is this a slideshow/photo carousel? If yes, include Carousel.
+1. If this is a slideshow/photo carousel, classify its actual content; do not return Carousel as a Creative Type.
 2. Is the main content from a movie, drama, TV show, anime, web series or fictional scene? Use Movie/Tv/Drama Edits. A polished montage of the same recurring couple/characters across multiple cinematic settings is normally a drama edit, not Dance or ordinary Relationship content.
 3. Is the main content a fan edit/montage of a real celebrity, idol, singer, actor, athlete, influencer or public figure? Use Celebrity Edits.
 4. Is visible full-body, upper-body, rhythmic hand/arm choreography, repeated trend movement, dance challenge, or synchronized/group movement the main focus? Use Dance. The creator may be seated or close-up; full-body framing is not required.
@@ -4349,7 +4349,7 @@ Do NOT use Beauty just because someone looks attractive.
 Do NOT confuse with Fashion: Fashion requires clothing/outfit to be the focus.
 Rule: If cosmetics/hair/skin/nails are the main action or product, choose Beauty.
 Distinctive doll-like, graphic, creative or transformation makeup may count as Beauty when the visual styling itself is clearly showcased, even if no application step is shown. Do not infer Beauty from ordinary makeup alone.
-Makeup advice, eye-shape guidance, cosmetic recommendations and beauty tips are Beauty; combine with Carousel when there are at least two confirmed slideshow images.
+Makeup advice, eye-shape guidance, cosmetic recommendations and beauty tips are Beauty, including when they are presented as a slideshow or photo carousel.
 
 7) Fashion
 Definition: Clothing/outfit/styling is the main focus.
@@ -4435,13 +4435,6 @@ Use for: workout, gym, bodybuilding, flexing muscles, showing physique, fitness 
 Definition: Audio has been transformed.
 Use ONLY for: sped up, slowed, mashup, DJ edit, remix audio, alternate audio version.
 Do NOT use for: visual transitions, edited clips, fashion transformations, fan edits.
-
-21) Carousel
-Definition: {carousel_platform} slideshow/photo carousel format.
-Use when: {carousel_platform}/Apify metadata confirms photo/slideshow mode with at least 2 images.
-Do not use Carousel for a confirmed single-image photo-mode post; classify that image by its content.
-Do not use Carousel for a normal {carousel_platform} video made from a montage or sequence of photos.
-Best practice: use Carousel + content label, e.g. Carousel + Beauty, Carousel + Quotes, Carousel + Celebrity Edits.
 
 === COMMON CONFUSIONS TO AVOID ===
 - Dance vs Lip Sync: Dance = choreography/body movement. Lip Sync = mouth/face performance to lyrics.

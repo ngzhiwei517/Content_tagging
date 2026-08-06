@@ -152,11 +152,12 @@ MARKET_OPTIONS = ["Other / no market"] + MARKETS
 DATE_SCOPE_SHARED = "Same date for all tracks"
 DATE_SCOPE_PER_TRACK = "Different date by track"
 CREATIVE_TYPES = [
-    "Dance", "Lip Sync", "Lyrics", "Lyrics Translation", "Carousel", "Quotes",
+    "Dance", "Lip Sync", "Lyrics", "Lyrics Translation", "Quotes",
     "Relationship", "POV", "Slice of Life", "Reflection", "Comedy", "Beauty",
     "Fashion", "Travel", "Fitness", "Gaming", "Media/Infotainment",
     "Movie/Tv/Drama Edits", "Celebrity Edits", "Cover", "Remix", "Others",
 ]
+RETIRED_CREATIVE_TYPES = {"Carousel"}
 
 # -----------------------------------------------------------------------------
 # Theme and page layout
@@ -1527,13 +1528,24 @@ def display_market(v: str) -> str:
 
 
 def split_creative_labels(value) -> List[str]:
-    """Split the stored 1-2 label output into clean individual labels."""
+    """Split operational labels while dropping retired format-only labels."""
     labels = []
     for part in safe_str(value).split(","):
         label = re.sub(r"\s+", " ", part).strip()
-        if label and label not in labels:
+        if label and label not in RETIRED_CREATIVE_TYPES and label not in labels:
             labels.append(label)
     return labels
+
+
+def operational_creative_type(value, fallback: str = "Others") -> str:
+    """Return the current user-facing Creative Type value.
+
+    Carousel remains available internally as post-format metadata, but it is no
+    longer a marketing Creative Type. Older checkpoints are cleaned here so a
+    resumed batch follows the current taxonomy without rerunning any posts.
+    """
+    labels = split_creative_labels(value)
+    return ", ".join(labels[:2]) if labels else fallback
 
 
 def primary_creative_type(value) -> str:
@@ -5602,7 +5614,7 @@ elif st.session_state.step == 5:
         _first_nonblank_v43(row.get("Review Note"), row.get("QA Reason"), row.get("Reasoning")),
         "The AI result needs a manual check.",
     )
-    current_type = safe_str(row.get("Creative Type"))
+    current_type = operational_creative_type(row.get("Creative Type"))
     current_narrative = safe_str(row.get("Narrative"))
     current_details = safe_str(row.get("Content Details"))
 
@@ -5775,7 +5787,10 @@ elif st.session_state.step == 5:
             ai_prefill = st.session_state.get(ai_result_key, {})
             if not restricted_manual_review and ai_prefill and not ai_prefill.get("parse_error"):
                 ai_conf = float(ai_prefill.get("Confidence", 0) or 0)
-                ai_labels = safe_str(ai_prefill.get("Creative Type")) or "—"
+                ai_labels = operational_creative_type(
+                    ai_prefill.get("Creative Type"),
+                    fallback="—",
+                )
                 ai_reason = safe_str(ai_prefill.get("Reasoning"))
                 st.markdown(
                     f"<div class='review-note-info'><strong>AI suggestion:</strong> {esc(ai_labels)} · {ai_conf:.0%} confidence"
@@ -5980,6 +5995,11 @@ elif st.session_state.step == 6:
     # Marketing summary excludes auto-removed unavailable/private posts. The
     # internal QA workbook still receives every attempted row below.
     qa_all_rows = tagged.copy()
+    for label_column in ["Creative Type", "Final Labels"]:
+        if label_column in qa_all_rows.columns:
+            qa_all_rows[label_column] = qa_all_rows[label_column].map(
+                operational_creative_type
+            )
     work = tagged[~_removed_mask_v56(tagged)].copy()
     for col in ["Platform", "Source", "Input Type", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Creator", "Date", "Creative Type", "Narrative", "Content Details", "KOL Size"]:
         if col not in work.columns:
@@ -5995,7 +6015,7 @@ elif st.session_state.step == 6:
     work["Original Sound Display"] = work["Original Sound"].map(lambda x: display_empty(x, "Not specified"))
     work["Campaign Artist Display"] = work["Campaign Artist"].map(lambda x: display_empty(x, "Not specified"))
     work["Source Display"] = work["Source"].map(lambda x: display_empty(x, "Manual / pasted links"))
-    work["Creative Type"] = work["Creative Type"].map(lambda x: display_empty(x, "Others"))
+    work["Creative Type"] = work["Creative Type"].map(operational_creative_type)
     work["Primary Creative Type"] = work["Creative Type"].map(primary_creative_type)
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 

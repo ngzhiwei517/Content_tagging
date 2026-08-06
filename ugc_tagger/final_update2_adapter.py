@@ -65,6 +65,7 @@ CAMPAIGN_MARKET_MISSING = {
     "UNKNOWN", "NOT SPECIFIED", "N/A", "NA", "NONE", "NULL", "NAN",
 }
 TIKTOK_SHORT_LINK_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
+RETIRED_CREATIVE_TYPES = {"Carousel"}
 
 
 MARKETING_EXPORT_COLUMNS = [
@@ -154,6 +155,16 @@ def normalize_label_list(value) -> List[str]:
         if label and label not in labels:
             labels.append(label)
     return labels[:2]
+
+
+def operational_creative_type(value, fallback: str = "Others") -> str:
+    """Remove format-only labels from the user-facing Creative Type value."""
+    labels = [
+        label
+        for label in normalize_label_list(value)
+        if label not in RETIRED_CREATIVE_TYPES
+    ]
+    return ", ".join(labels[:2]) if labels else fallback
 
 
 def _history_entries(value) -> List[Dict]:
@@ -551,7 +562,6 @@ def _resolved_narrative_suggestion(tagged: Dict, creative_type: str) -> str:
         "Relationship": "Relationship moment",
         "Reflection": "Personal reflection",
         "Quotes": "Text-led message",
-        "Carousel": "Photo carousel",
         "Gaming": "Gaming content",
         "Movie/Tv/Drama Edits": "Drama or entertainment edit",
         "Celebrity Edits": "Celebrity edit",
@@ -578,7 +588,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
     if removed:
         validation_status = "removed"
     needs_review = False if removed else _truthy(tagged_dict.get("needs_human_review"))
-    creative_type = _text(tagged_dict.get("Creative Type")) or "Others"
+    creative_type = operational_creative_type(tagged_dict.get("Creative Type"))
     narrative = _resolved_narrative_suggestion(tagged_dict, creative_type)
     qa_reason = " | ".join(
         value for value in [
