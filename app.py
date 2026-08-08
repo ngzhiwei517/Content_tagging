@@ -42,13 +42,10 @@ from ugc_tagger.creator_profile_enrichment import (
     DEFAULT_PROFILE_HISTORY_MODE,
     DEFAULT_PROFILE_POST_LIMIT,
     PROFILE_HISTORY_FULL,
-    PROFILE_HISTORY_OPTIONS,
-    PROFILE_SCOPE_OPTIONS,
     creator_key,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
     profile_history_settings,
-    profile_scope_count,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -4443,29 +4440,32 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             target_candidates["Creator Key"].ne("")
         ].drop_duplicates(["Platform", "Creator Key"], keep="first")
 
-        if st.session_state.get("creator_profile_scope_v68_51") not in PROFILE_SCOPE_OPTIONS:
-            # Migrate older sessions that may still contain the retired "All"
-            # option to the new cost-safe default.
-            st.session_state.creator_profile_scope_v68_51 = PROFILE_SCOPE_OPTIONS[0]
-        if st.session_state.get("creator_profile_history_mode_v68_59") not in PROFILE_HISTORY_OPTIONS:
-            st.session_state.creator_profile_history_mode_v68_59 = DEFAULT_PROFILE_HISTORY_MODE
-
-        control_col, history_col, action_col = st.columns([1.1, 1.5, 1])
-        with control_col:
-            profile_scope = st.selectbox(
-                "Profiles to enrich",
-                PROFILE_SCOPE_OPTIONS,
-                index=0,
-                key="creator_profile_scope_v68_51",
-                help="Top creators are selected by batch engagement.",
+        max_creator_count = min(100, len(target_candidates))
+        default_creator_count = min(10, max_creator_count)
+        try:
+            stored_creator_count = int(
+                st.session_state.get(
+                    "creator_profile_count_v68_60", default_creator_count
+                )
             )
-        with history_col:
-            history_mode = st.selectbox(
-                "Profile history",
-                PROFILE_HISTORY_OPTIONS,
-                index=PROFILE_HISTORY_OPTIONS.index(DEFAULT_PROFILE_HISTORY_MODE),
-                key="creator_profile_history_mode_v68_59",
-                help="Full mode scans newest to oldest until it reaches the three-month cutoff.",
+        except (TypeError, ValueError):
+            stored_creator_count = default_creator_count
+        st.session_state.creator_profile_count_v68_60 = min(
+            max(stored_creator_count, 1), max_creator_count
+        )
+
+        history_mode, history_post_limit = profile_history_settings(
+            PROFILE_HISTORY_FULL
+        )
+        control_col, action_col = st.columns([2, 1])
+        with control_col:
+            profile_count = st.number_input(
+                "Profiles to enrich",
+                min_value=1,
+                max_value=max_creator_count,
+                step=1,
+                key="creator_profile_count_v68_60",
+                help="Enter how many top creators to check, ranked by batch engagement.",
             )
         with action_col:
             enrich_clicked = st.button(
@@ -4474,27 +4474,21 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 width="stretch",
                 key="creator_profile_fetch_v68_51",
             )
-        target_count_preview = profile_scope_count(profile_scope, len(target_candidates))
-        history_mode, history_post_limit = profile_history_settings(history_mode)
+        target_count_preview = min(int(profile_count), len(target_candidates))
         max_post_results = target_count_preview * history_post_limit
-        if history_mode == PROFILE_HISTORY_FULL:
-            history_caption = (
-                "Scans public posts newest to oldest until the three-month cutoff. "
-                f"A {history_post_limit:,}-post-per-creator emergency ceiling prevents the app from freezing; "
-                "the table warns if that ceiling or a platform interruption makes a result partial."
-            )
-        else:
-            history_caption = (
-                f"Uses up to the latest {history_post_limit} public posts within three months "
-                "for a faster directional result."
-            )
         st.caption(
-            f"Checks up to {target_count_preview:,} creator"
+            f"Checks the top {target_count_preview:,} creator"
             f"{'s' if target_count_preview != 1 else ''} (maximum {max_post_results:,} post results). "
-            f"{history_caption} Public metadata only; no Apify profile credits or media downloads. "
+            "Scans public posts newest to oldest until the three-month cutoff. "
+            f"A {history_post_limit:,}-post-per-creator emergency ceiling prevents a stalled run; "
+            "the table identifies partial results. Public metadata only; no Apify profile credits or media downloads. "
             "Successful results are reused for six hours. Direct profile enrichment currently supports "
             "TikTok; Instagram rows keep batch metrics."
         )
+        if target_count_preview > 20:
+            st.caption(
+                "Large profile runs are processed one creator at a time and may take several minutes."
+            )
 
         if enrich_clicked:
             target_count = target_count_preview
@@ -4666,21 +4660,15 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                     updated_label = pd.Timestamp(updated_at).strftime("%d %b %Y %H:%M UTC")
                 except Exception:
                     updated_label = updated_at
-                if history_mode == PROFILE_HISTORY_FULL:
-                    coverage_label = "Public posts were scanned back to the three-month cutoff where available"
-                else:
-                    coverage_label = f"Up to the latest {history_post_limit} public posts per creator were checked"
                 st.caption(
-                    f"Latest successful {history_mode} fetch: {updated_label}. {coverage_label}; "
+                    f"Latest successful {history_mode} fetch: {updated_label}. Public posts were scanned "
+                    "back to the three-month cutoff where available; "
                     "no media is downloaded."
                 )
         else:
-            if history_mode == PROFILE_HISTORY_FULL:
-                empty_history_label = "all reachable public posts within the past three months"
-            else:
-                empty_history_label = f"the latest {history_post_limit} public posts within the past three months"
             st.caption(
-                f"Optional enrichment checks {empty_history_label}. It runs only when you click the button."
+                "Optional enrichment checks all reachable public posts within the past three months. "
+                "It runs only when you click the button."
             )
 
         render_sortable_summary_table_v68_46(

@@ -80,11 +80,11 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         self.assertEqual(DEFAULT_PROFILE_HISTORY_MODE, PROFILE_HISTORY_LATEST)
         self.assertEqual(
             PROFILE_HISTORY_OPTIONS,
-            ("Latest 20 (fast)", "Full 3 months (slower)"),
+            ("Latest 20 (fast)", "Full 3 months"),
         )
-        self.assertEqual(FULL_PROFILE_POST_CEILING, 500)
+        self.assertEqual(FULL_PROFILE_POST_CEILING, 2000)
         self.assertEqual(profile_history_settings(PROFILE_HISTORY_LATEST, 999), (PROFILE_HISTORY_LATEST, 20))
-        self.assertEqual(profile_history_settings(PROFILE_HISTORY_FULL, 1), (PROFILE_HISTORY_FULL, 500))
+        self.assertEqual(profile_history_settings(PROFILE_HISTORY_FULL, 1), (PROFILE_HISTORY_FULL, 2000))
         self.assertEqual(profile_history_settings("unexpected", 7), (PROFILE_HISTORY_LATEST, 7))
         self.assertEqual(profile_scope_count("Top 5", 25), 5)
         self.assertEqual(profile_scope_count("Top 10", 25), 10)
@@ -500,7 +500,7 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         self.assertEqual(query, "tiktokuser:sec-full")
         self.assertEqual(cutoff_utc, pd.Timestamp("2026-05-08T00:00:00Z"))
         self.assertEqual(as_of_utc, pd.Timestamp("2026-08-08T00:00:00Z"))
-        self.assertEqual(cap, 500)
+        self.assertEqual(cap, 2000)
         self.assertEqual(int(metrics.iloc[0]["Profile Posts"]), 30)
         self.assertEqual(int(metrics.iloc[0]["Current Followers"]), 4321)
         self.assertEqual(metrics.iloc[0]["Profile Data Status"], "Available")
@@ -557,18 +557,18 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
                 "formats": [{"url": "https://media.example/video.mp4"}],
                 "thumbnail": "https://media.example/cover.jpg",
             }
-            for index in range(501)
+            for index in range(2001)
         ]
         result = _collect_tiktok_full_window(
             source,
             cutoff_utc="2026-05-08T00:00:00Z",
             as_of_utc="2026-08-08T00:00:00Z",
-            cap=500,
+            cap=2000,
         )
 
-        self.assertEqual(len(result["entries"]), 500)
+        self.assertEqual(len(result["entries"]), 2000)
         self.assertFalse(result["complete"])
-        self.assertIn("500-post safety limit reached", result["partial_reason"])
+        self.assertIn("2000-post safety limit reached", result["partial_reason"])
         self.assertNotIn("url", result["entries"][0])
         self.assertNotIn("formats", result["entries"][0])
         self.assertNotIn("thumbnail", result["entries"][0])
