@@ -97,6 +97,11 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["display_market"] = lambda value: namespace["safe_str"](value) or "Other"
         namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
+        namespace["creator_key"] = lambda value: namespace["safe_str"](value).lstrip("@").lower()
+        namespace["CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61"] = 6 * 60 * 60
+        cls.pending_profile_targets = staticmethod(
+            load_function("pending_creator_profile_targets_v68_61", namespace)
+        )
         cls.creative_type_chart_data = staticmethod(
             load_function("prepare_creative_type_chart_data_v68_49", namespace)
         )
@@ -375,13 +380,15 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
         self.assertNotIn("scrape_creator_profile_metrics", creator_section)
         self.assertNotIn("apify_token", creator_section)
-        self.assertIn("Direct profile enrichment currently supports", creator_section)
-        self.assertIn("TikTok; Instagram rows keep batch metrics", creator_section)
-        self.assertIn("maximum {max_post_results:,} post results", creator_section)
         self.assertIn("st.number_input", creator_section)
+        self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
         self.assertIn('min_value=1', creator_section)
+        self.assertIn('max_value=max_creator_count', creator_section)
         self.assertIn('max_creator_count = min(100, len(target_candidates))', creator_section)
-        self.assertNotIn('st.selectbox(\n                "Profiles to enrich"', creator_section)
+        self.assertNotIn('"Profiles to enrich"', creator_section)
+        self.assertNotIn("maximum {max_post_results:,} post results", creator_section)
+        self.assertNotIn("Optional enrichment checks", creator_section)
+        self.assertNotIn("st.caption(", creator_section)
         self.assertNotIn('"Profile history"', creator_section)
         self.assertNotIn("PROFILE_HISTORY_OPTIONS", creator_section)
         self.assertIn("PROFILE_HISTORY_FULL", creator_section)
@@ -394,12 +401,126 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("creator_profile_url", creator_section)
         self.assertIn('"Creator Profile"', creator_section)
         self.assertIn("profile_history_settings", creator_section)
+        self.assertIn("pending_creator_profile_targets_v68_61", creator_section)
 
         cache_section = APP_SOURCE.split(
             "def direct_creator_profile_metrics_v68_58", 1
         )[1].split("def normalize_url_v68_15", 1)[0]
         self.assertIn("history_mode: str = DEFAULT_PROFILE_HISTORY_MODE", cache_section)
         self.assertIn("history_mode=history_mode", cache_section)
+
+    def test_profile_enrichment_fetches_only_additional_creators(self):
+        fetched_at = pd.Timestamp.now(tz="UTC").isoformat()
+        targets = pd.DataFrame([
+            {"Platform": "TikTok", "Creator": f"creator{index}", "Creator Key": f"creator{index}"}
+            for index in range(25)
+        ])
+        existing = pd.DataFrame([
+            {
+                "Platform": "TikTok",
+                "Creator Key": f"creator{index}",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "Available",
+                "Profile Fetched At": fetched_at,
+            }
+            for index in range(20)
+        ])
+
+        pending = self.pending_profile_targets(targets, existing, "Full 3 months")
+
+        self.assertEqual(
+            pending["Creator Key"].tolist(),
+            [f"creator{index}" for index in range(20, 25)],
+        )
+
+    def test_profile_enrichment_retries_unavailable_creators(self):
+        fetched_at = pd.Timestamp.now(tz="UTC").isoformat()
+        targets = pd.DataFrame([
+            {"Platform": "TikTok", "Creator": "ready", "Creator Key": "ready"},
+            {"Platform": "TikTok", "Creator": "retry", "Creator Key": "retry"},
+        ])
+        existing = pd.DataFrame([
+            {
+                "Platform": "TikTok",
+                "Creator Key": "ready",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "No recent public posts",
+                "Profile Fetched At": fetched_at,
+            },
+            {
+                "Platform": "TikTok",
+                "Creator Key": "retry",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "Unavailable",
+                "Profile Fetched At": fetched_at,
+            },
+        ])
+
+        pending = self.pending_profile_targets(targets, existing, "Full 3 months")
+
+        self.assertEqual(pending["Creator Key"].tolist(), ["retry"])
+
+    def test_profile_enrichment_reuses_all_recent_completed_results(self):
+        fetched_at = pd.Timestamp.now(tz="UTC").isoformat()
+        targets = pd.DataFrame([
+            {"Platform": "TikTok", "Creator": status, "Creator Key": status}
+            for status in ("available", "none", "partial")
+        ])
+        existing = pd.DataFrame([
+            {
+                "Platform": "TikTok",
+                "Creator Key": "available",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "Available",
+                "Profile Fetched At": fetched_at,
+            },
+            {
+                "Platform": "TikTok",
+                "Creator Key": "none",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "No recent public posts",
+                "Profile Fetched At": fetched_at,
+            },
+            {
+                "Platform": "TikTok",
+                "Creator Key": "partial",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "Partial (safety limit reached)",
+                "Profile Fetched At": fetched_at,
+            },
+        ])
+
+        pending = self.pending_profile_targets(targets, existing, "Full 3 months")
+
+        self.assertTrue(pending.empty)
+
+    def test_profile_enrichment_refetches_stale_or_wrong_mode_results(self):
+        targets = pd.DataFrame([
+            {"Platform": "TikTok", "Creator": "stale", "Creator Key": "stale"},
+            {"Platform": "TikTok", "Creator": "wrong", "Creator Key": "wrong"},
+        ])
+        existing = pd.DataFrame([
+            {
+                "Platform": "TikTok",
+                "Creator Key": "stale",
+                "Profile History Mode": "Full 3 months",
+                "Profile Data Status": "Available",
+                "Profile Fetched At": (
+                    pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=7)
+                ).isoformat(),
+            },
+            {
+                "Platform": "TikTok",
+                "Creator Key": "wrong",
+                "Profile History Mode": "Latest 20 posts",
+                "Profile Data Status": "Available",
+                "Profile Fetched At": pd.Timestamp.now(tz="UTC").isoformat(),
+            },
+        ])
+
+        pending = self.pending_profile_targets(targets, existing, "Full 3 months")
+
+        self.assertEqual(pending["Creator Key"].tolist(), ["stale", "wrong"])
 
     def test_creator_performance_ranks_engagement_and_keeps_market_platform_separate(self):
         rows = pd.DataFrame([

@@ -1022,7 +1022,14 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
     return campaign_track_catalog_status(track_value)
 
 
-@st.cache_data(ttl=6 * 60 * 60, max_entries=500, show_spinner=False)
+CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
+
+
+@st.cache_data(
+    ttl=CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61,
+    max_entries=500,
+    show_spinner=False,
+)
 def direct_creator_profile_metrics_v68_58(
     platform: str,
     creator: str,
@@ -4412,27 +4419,70 @@ def creator_performance_summary_v68_47(filtered: pd.DataFrame) -> Tuple[pd.DataF
     return summary, missing_creator_posts
 
 
+def pending_creator_profile_targets_v68_61(
+    targets: pd.DataFrame,
+    existing_metrics: pd.DataFrame,
+    history_mode: str,
+) -> pd.DataFrame:
+    """Return only creators without a recent successful profile result."""
+    if not isinstance(targets, pd.DataFrame) or targets.empty:
+        return pd.DataFrame(columns=["Platform", "Creator", "Creator Key"])
+
+    pending = targets.copy()
+    if "Creator Key" not in pending.columns:
+        pending["Creator Key"] = pending.get(
+            "Creator", pd.Series("", index=pending.index, dtype=str)
+        ).map(creator_key)
+    if not isinstance(existing_metrics, pd.DataFrame) or existing_metrics.empty:
+        return pending.reset_index(drop=True)
+
+    saved = existing_metrics.copy()
+    if "Profile History Mode" not in saved.columns:
+        saved["Profile History Mode"] = history_mode
+    required_columns = {
+        "Platform", "Creator Key", "Profile Data Status", "Profile Fetched At"
+    }
+    if not required_columns.issubset(saved.columns):
+        return pending.reset_index(drop=True)
+
+    saved_status = saved["Profile Data Status"].fillna("").astype(str).str.strip()
+    fetched_at = pd.to_datetime(saved["Profile Fetched At"], errors="coerce", utc=True)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    fresh_cutoff = now_utc - pd.Timedelta(
+        seconds=CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61
+    )
+    fresh = fetched_at.notna() & fetched_at.ge(fresh_cutoff) & fetched_at.le(now_utc)
+    unavailable = saved_status.str.startswith("Unavailable")
+    reusable_status = saved_status.ne("") & (
+        ~unavailable | saved["Platform"].ne(TIKTOK)
+    )
+    completed = saved[
+        saved["Profile History Mode"].eq(history_mode)
+        & reusable_status
+        & fresh
+    ]
+    completed_keys = {
+        (safe_str(platform), safe_str(key))
+        for platform, key in zip(completed["Platform"], completed["Creator Key"])
+    }
+    needs_fetch = [
+        (safe_str(platform), safe_str(key)) not in completed_keys
+        for platform, key in zip(pending["Platform"], pending["Creator Key"])
+    ]
+    return pending.loc[needs_fetch].reset_index(drop=True)
+
+
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
     """Render campaign contribution plus optional public-profile metrics."""
     with st.container(border=True):
         st.markdown(section_title("Top Creator Performance", "#14b8a6"), unsafe_allow_html=True)
-        creator_table, missing_creator_posts = creator_performance_summary_v68_47(filtered)
+        creator_table, _ = creator_performance_summary_v68_47(filtered)
         if creator_table.empty:
             st.markdown(
                 "<div class='empty-panel'>Creator names are not available in the current view.</div>",
                 unsafe_allow_html=True,
             )
             return
-        st.caption(
-            "Batch columns use posts in the current batch. Profile columns are fetched separately "
-            "from each creator's public platform activity."
-        )
-        if missing_creator_posts:
-            st.caption(
-                f"{missing_creator_posts:,} post{'s' if missing_creator_posts != 1 else ''} without a creator name "
-                "are excluded from this ranking."
-            )
-
         target_candidates = creator_table[["Platform", "Creator"]].copy()
         target_candidates["Creator Key"] = target_candidates["Creator"].map(creator_key)
         target_candidates = target_candidates[
@@ -4459,12 +4509,11 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         control_col, action_col = st.columns([2, 1])
         with control_col:
             profile_count = st.number_input(
-                "Profiles to enrich",
+                f"Top creators (max {max_creator_count})",
                 min_value=1,
                 max_value=max_creator_count,
                 step=1,
                 key="creator_profile_count_v68_60",
-                help="Enter how many top creators to check, ranked by batch engagement.",
             )
         with action_col:
             enrich_clicked = st.button(
@@ -4474,58 +4523,62 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 key="creator_profile_fetch_v68_51",
             )
         target_count_preview = min(int(profile_count), len(target_candidates))
-        max_post_results = target_count_preview * history_post_limit
-        st.caption(
-            f"Checks the top {target_count_preview:,} creator"
-            f"{'s' if target_count_preview != 1 else ''} (maximum {max_post_results:,} post results). "
-            "Scans public posts newest to oldest until the three-month cutoff. "
-            f"A {history_post_limit:,}-post-per-creator emergency ceiling prevents a stalled run; "
-            "the table identifies partial results. Public metadata only; no Apify profile credits or media downloads. "
-            "Successful results are reused for six hours. Direct profile enrichment currently supports "
-            "TikTok; Instagram rows keep batch metrics."
-        )
-        if target_count_preview > 20:
-            st.caption(
-                "Large profile runs are processed one creator at a time and may take several minutes."
-            )
-
         if enrich_clicked:
             target_count = target_count_preview
-            targets = target_candidates.head(target_count)[["Platform", "Creator"]].copy()
+            targets = target_candidates.head(target_count)[
+                ["Platform", "Creator", "Creator Key"]
+            ].copy()
+            existing_metrics = st.session_state.get(
+                "creator_profile_metrics_v68_51", pd.DataFrame()
+            )
+            if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty:
+                existing_metrics = existing_metrics.copy()
+                if "Profile History Mode" not in existing_metrics.columns:
+                    existing_metrics["Profile History Mode"] = DEFAULT_PROFILE_HISTORY_MODE
+            targets_to_fetch = pending_creator_profile_targets_v68_61(
+                targets,
+                existing_metrics,
+                history_mode,
+            )
             profile_frames = []
             failed_profile_frames = []
             profile_errors = []
-            progress_bar = st.progress(0)
-            try:
-                with st.spinner(
-                    f"Fetching public profile posts for {len(targets):,} creator"
-                    f"{'s' if len(targets) != 1 else ''}..."
-                ):
-                    for position, (_, target) in enumerate(targets.iterrows(), start=1):
-                        try:
-                            profile_frames.append(
-                                direct_creator_profile_metrics_v68_58(
+            if not targets_to_fetch.empty:
+                progress_bar = st.progress(0)
+                try:
+                    with st.spinner(
+                        f"Fetching public profile posts for {len(targets_to_fetch):,} creator"
+                        f"{'s' if len(targets_to_fetch) != 1 else ''}..."
+                    ):
+                        for position, (_, target) in enumerate(
+                            targets_to_fetch.iterrows(), start=1
+                        ):
+                            try:
+                                profile_frames.append(
+                                    direct_creator_profile_metrics_v68_58(
+                                        safe_str(target.get("Platform")),
+                                        safe_str(target.get("Creator")),
+                                        history_mode=history_mode,
+                                        months=3,
+                                        post_limit=history_post_limit,
+                                    )
+                                )
+                            except Exception as exc:
+                                LOGGER.warning(
+                                    "Direct creator profile lookup failed for %s/%s: %s",
                                     safe_str(target.get("Platform")),
                                     safe_str(target.get("Creator")),
-                                    history_mode=history_mode,
-                                    months=3,
-                                    post_limit=history_post_limit,
+                                    exc,
                                 )
+                                unavailable_metrics = getattr(exc, "profile_metrics", None)
+                                if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                    failed_profile_frames.append(unavailable_metrics)
+                                profile_errors.append(safe_str(exc))
+                            progress_bar.progress(
+                                position / max(len(targets_to_fetch), 1)
                             )
-                        except Exception as exc:
-                            LOGGER.warning(
-                                "Direct creator profile lookup failed for %s/%s: %s",
-                                safe_str(target.get("Platform")),
-                                safe_str(target.get("Creator")),
-                                exc,
-                            )
-                            unavailable_metrics = getattr(exc, "profile_metrics", None)
-                            if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                failed_profile_frames.append(unavailable_metrics)
-                            profile_errors.append(safe_str(exc))
-                        progress_bar.progress(position / max(len(targets), 1))
-            finally:
-                progress_bar.empty()
+                finally:
+                    progress_bar.empty()
 
             successful_profile_metrics = (
                 pd.concat(profile_frames, ignore_index=True)
@@ -4541,13 +4594,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 [successful_profile_metrics, failed_profile_metrics],
                 ignore_index=True,
             ) if not successful_profile_metrics.empty or not failed_profile_metrics.empty else pd.DataFrame()
-            existing_metrics = st.session_state.get(
-                "creator_profile_metrics_v68_51", pd.DataFrame()
-            )
-            if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty:
-                existing_metrics = existing_metrics.copy()
-                if "Profile History Mode" not in existing_metrics.columns:
-                    existing_metrics["Profile History Mode"] = DEFAULT_PROFILE_HISTORY_MODE
             combined_metrics = pd.concat(
                 [existing_metrics, profile_metrics], ignore_index=True
             ) if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty else profile_metrics.copy()
@@ -4573,10 +4619,12 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 ).fillna(0).gt(0).sum()
             )
             successful_count = len(successful_profile_metrics)
-            if available_count:
+            if targets_to_fetch.empty:
+                st.info("Profile results are already saved for all selected creators.")
+            elif available_count:
                 st.success(
                     f"Recent profile metrics are available for {available_count:,} of "
-                    f"{len(targets):,} selected creators."
+                    f"{len(targets_to_fetch):,} newly checked creators."
                 )
             elif successful_count:
                 st.info(
@@ -4648,27 +4696,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 "Profile Average Engagement", "Profile Average Engagement Rate",
                 "Profile Data Status",
             ]
-            fetched_at = pd.to_datetime(
-                profile_metrics.get("Profile Fetched At", pd.Series(dtype=str)),
-                errors="coerce",
-                utc=True,
-            ).dropna()
-            updated_at = fetched_at.max().isoformat() if not fetched_at.empty else ""
-            if updated_at:
-                try:
-                    updated_label = pd.Timestamp(updated_at).strftime("%d %b %Y %H:%M UTC")
-                except Exception:
-                    updated_label = updated_at
-                st.caption(
-                    f"Latest successful {history_mode} fetch: {updated_label}. Public posts were scanned "
-                    "back to the three-month cutoff where available; "
-                    "no media is downloaded."
-                )
-        else:
-            st.caption(
-                "Optional enrichment checks all reachable public posts within the past three months. "
-                "It runs only when you click the button."
-            )
 
         render_sortable_summary_table_v68_46(
             display_table,
