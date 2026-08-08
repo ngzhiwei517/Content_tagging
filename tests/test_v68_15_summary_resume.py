@@ -375,12 +375,27 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
         self.assertNotIn("scrape_creator_profile_metrics", creator_section)
         self.assertNotIn("apify_token", creator_section)
-        self.assertIn("currently supports TikTok", creator_section)
+        self.assertIn("Direct profile enrichment currently supports", creator_section)
+        self.assertIn("TikTok; Instagram rows keep batch metrics", creator_section)
         self.assertIn("maximum {max_post_results:,} post results", creator_section)
-        self.assertIn('drop_duplicates(["Platform", "Creator Key"]', creator_section)
+        self.assertIn("Profile history", creator_section)
+        self.assertIn("PROFILE_HISTORY_OPTIONS", creator_section)
+        self.assertIn("PROFILE_HISTORY_FULL", creator_section)
+        self.assertIn("Profile History Mode", creator_section)
+        self.assertIn(
+            '["Platform", "Creator Key", "Profile History Mode"]',
+            creator_section,
+        )
+        self.assertIn("Partial", creator_section)
         self.assertIn("creator_profile_url", creator_section)
         self.assertIn('"Creator Profile"', creator_section)
-        self.assertIn("DEFAULT_PROFILE_POST_LIMIT", creator_section)
+        self.assertIn("profile_history_settings", creator_section)
+
+        cache_section = APP_SOURCE.split(
+            "def direct_creator_profile_metrics_v68_58", 1
+        )[1].split("def normalize_url_v68_15", 1)[0]
+        self.assertIn("history_mode: str = DEFAULT_PROFILE_HISTORY_MODE", cache_section)
+        self.assertIn("history_mode=history_mode", cache_section)
 
     def test_creator_performance_ranks_engagement_and_keeps_market_platform_separate(self):
         rows = pd.DataFrame([

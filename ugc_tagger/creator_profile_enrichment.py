@@ -21,6 +21,11 @@ from ugc_tagger.instagram_reels_adapter import INSTAGRAM_REELS, TIKTOK
 TIKTOK_PROFILE_ACTOR_ID = "clockworks/tiktok-scraper"
 INSTAGRAM_PROFILE_ACTOR_ID = "apify/instagram-scraper"
 DEFAULT_PROFILE_POST_LIMIT = 20
+FULL_PROFILE_POST_CEILING = 500
+PROFILE_HISTORY_LATEST = "Latest 20 (fast)"
+PROFILE_HISTORY_FULL = "Full 3 months (slower)"
+PROFILE_HISTORY_OPTIONS = (PROFILE_HISTORY_LATEST, PROFILE_HISTORY_FULL)
+DEFAULT_PROFILE_HISTORY_MODE = PROFILE_HISTORY_LATEST
 PROFILE_SCOPE_OPTIONS = ("Top 5", "Top 10", "Top 20")
 DIRECT_PROFILE_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -119,6 +124,28 @@ def profile_scope_count(scope: str, total: int) -> int:
     # Unknown or retired values such as "All" must fail to the least costly
     # option instead of unexpectedly requesting every creator profile.
     return min(5, max(int(total), 0))
+
+
+def profile_history_settings(
+    history_mode: str,
+    post_limit: int = DEFAULT_PROFILE_POST_LIMIT,
+) -> Tuple[str, int]:
+    """Return a recognized history mode and its enforced metadata-only limit.
+
+    Unknown values deliberately fall back to the least expensive existing
+    behavior. Full-history mode always uses its fixed emergency ceiling so a
+    caller cannot accidentally request an unbounded profile crawl.
+    """
+    if _text(history_mode) == PROFILE_HISTORY_FULL:
+        return PROFILE_HISTORY_FULL, FULL_PROFILE_POST_CEILING
+    try:
+        safe_limit = int(post_limit)
+    except (TypeError, ValueError):
+        safe_limit = DEFAULT_PROFILE_POST_LIMIT
+    return PROFILE_HISTORY_LATEST, min(
+        max(safe_limit, 1),
+        DEFAULT_PROFILE_POST_LIMIT,
+    )
 
 
 def _dataset_id(run) -> str:
@@ -404,6 +431,186 @@ def _parse_post_dates(values: pd.Series) -> pd.Series:
     return parsed
 
 
+def _utc_timestamp(value=None) -> pd.Timestamp:
+    """Normalize one date-like value to a timezone-aware UTC timestamp."""
+    effective = datetime.now(timezone.utc) if value is None else value
+    parsed = _parse_post_dates(pd.Series([effective])).iloc[0]
+    if pd.isna(parsed):
+        raise ValueError("A valid UTC date is required.")
+    return pd.Timestamp(parsed).tz_convert("UTC")
+
+
+def _full_profile_entry_identity(entry: Dict) -> str:
+    return _text(_first(entry, ("id", "display_id", "webpage_url", "url")))
+
+
+def _metadata_only_tiktok_entry(entry: Dict) -> Dict:
+    """Keep only fields needed for aggregation; discard all media metadata."""
+    permitted_fields = (
+        "id",
+        "display_id",
+        "timestamp",
+        "release_timestamp",
+        "upload_date",
+        "release_date",
+        "view_count",
+        "viewCount",
+        "play_count",
+        "playCount",
+        "views",
+        "like_count",
+        "likeCount",
+        "diggCount",
+        "likes",
+        "comment_count",
+        "commentCount",
+        "comments",
+        "repost_count",
+        "share_count",
+        "shareCount",
+        "shares",
+        "save_count",
+        "collect_count",
+        "collectCount",
+        "saves",
+    )
+    return {field: entry[field] for field in permitted_fields if field in entry}
+
+
+def _collect_tiktok_full_window(
+    source_entries,
+    *,
+    cutoff_utc,
+    as_of_utc,
+    cap: int = FULL_PROFILE_POST_CEILING,
+) -> Dict:
+    """Collect newest-to-oldest metadata until the exact UTC cutoff.
+
+    The return contract is intentionally small and deterministic so callers
+    and tests never need to retain yt-dlp's raw playlist result::
+
+        {"entries": list[dict], "complete": bool, "partial_reason": str}
+
+    A cap is considered reached only after seeing a cap+1th distinct, dated,
+    in-window post. Exactly ``cap`` posts followed by the cutoff or natural
+    exhaustion is therefore still a complete result.
+    """
+    cutoff = _utc_timestamp(cutoff_utc)
+    effective_as_of = _utc_timestamp(as_of_utc)
+    if cutoff > effective_as_of:
+        raise ValueError("The profile cutoff cannot be after the as-of date.")
+    try:
+        safe_cap = min(max(int(cap), 1), FULL_PROFILE_POST_CEILING)
+    except (TypeError, ValueError):
+        safe_cap = FULL_PROFILE_POST_CEILING
+
+    collected: List[Dict] = []
+    seen_post_ids = set()
+    partial_reasons: List[str] = []
+    previous_timestamp: Optional[pd.Timestamp] = None
+    page_error = False
+
+    def mark_partial(reason: str) -> None:
+        if reason not in partial_reasons:
+            partial_reasons.append(reason)
+
+    try:
+        iterator = iter(source_entries if source_entries is not None else [])
+        for entry in iterator:
+            if not isinstance(entry, dict):
+                page_error = True
+                mark_partial("some profile pages could not be read")
+                continue
+
+            post_date = _yt_dlp_post_date(entry)
+            try:
+                post_timestamp = _utc_timestamp(post_date)
+            except (TypeError, ValueError):
+                mark_partial("some posts had no publish date")
+                continue
+
+            # Future-dated records cannot belong to the requested history.
+            if post_timestamp > effective_as_of:
+                continue
+
+            identity = _full_profile_entry_identity(entry)
+            if identity and identity in seen_post_ids:
+                continue
+            if identity:
+                seen_post_ids.add(identity)
+
+            if previous_timestamp is not None and post_timestamp > previous_timestamp:
+                mark_partial("post order could not be verified")
+            previous_timestamp = post_timestamp
+
+            if post_timestamp < cutoff:
+                break
+
+            if len(collected) >= safe_cap:
+                mark_partial(
+                    f"{safe_cap}-post safety limit reached"
+                )
+                break
+
+            collected.append(_metadata_only_tiktok_entry(entry))
+    except Exception as exc:
+        page_error = True
+        mark_partial("some profile pages could not be read")
+        if not collected:
+            raise RuntimeError("TikTok profile pages could not be read.") from exc
+
+    if page_error and not collected:
+        raise RuntimeError("TikTok profile pages could not be read.")
+
+    reason = "; ".join(partial_reasons)
+    return {
+        "entries": collected,
+        "complete": not bool(partial_reasons),
+        "partial_reason": reason,
+    }
+
+
+def _extract_tiktok_user_full_window(
+    query: str,
+    cutoff_utc,
+    as_of_utc,
+    cap: int = FULL_PROFILE_POST_CEILING,
+) -> Dict:
+    """Run a lazy, metadata-only TikTok profile crawl for a full date window."""
+    try:
+        import yt_dlp
+    except Exception as exc:  # pragma: no cover - dependency contract
+        raise RuntimeError("Missing dependency: install yt-dlp.") from exc
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+        "lazy_playlist": True,
+        "cachedir": False,
+        "allow_playlist_files": False,
+        "ignoreerrors": False,
+        "socket_timeout": 15,
+        "extractor_retries": 2,
+        "retries": 2,
+    }
+    with yt_dlp.YoutubeDL(options) as downloader:
+        result = downloader.extract_info(
+            query,
+            download=False,
+            process=False,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("TikTok profile posts were not available.")
+        return _collect_tiktok_full_window(
+            result.get("entries"),
+            cutoff_utc=cutoff_utc,
+            as_of_utc=as_of_utc,
+            cap=cap,
+        )
+
+
 def _requested_creator_frame(creators) -> pd.DataFrame:
     if isinstance(creators, pd.DataFrame):
         frame = creators.copy()
@@ -523,8 +730,10 @@ def fetch_direct_creator_profile_metrics(
     *,
     months: int = 3,
     post_limit: int = DEFAULT_PROFILE_POST_LIMIT,
+    history_mode: str = DEFAULT_PROFILE_HISTORY_MODE,
     profile_fetcher: Optional[Callable[[str], str]] = None,
     extractor: Optional[Callable[[str, int], Dict]] = None,
+    full_extractor: Optional[Callable[[str, object, object, int], Dict]] = None,
     as_of=None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """Fetch TikTok profile metadata directly without Apify or media downloads.
@@ -539,17 +748,19 @@ def fetch_direct_creator_profile_metrics(
         return pd.DataFrame(columns=PROFILE_METRIC_COLUMNS), []
 
     months = max(int(months), 1)
-    post_limit = min(
-        max(int(post_limit), 1),
-        DEFAULT_PROFILE_POST_LIMIT,
-    )
+    history_mode, post_limit = profile_history_settings(history_mode, post_limit)
     fetch_profile_html = profile_fetcher or _fetch_tiktok_profile_html
     extract_user_playlist = extractor or _extract_tiktok_user_playlist
+    extract_full_window = full_extractor or _extract_tiktok_user_full_window
+    effective_as_of = _utc_timestamp(as_of)
+    cutoff_utc = effective_as_of - pd.DateOffset(months=months)
 
     rows: List[Dict] = []
     errors: List[str] = []
     failed_creators: List[Tuple[str, str]] = []
     profile_followers: Dict[Tuple[str, str], int] = {}
+    partial_statuses: Dict[Tuple[str, str], str] = {}
+    followers_unavailable = set()
 
     for _, target in requested.iterrows():
         platform = _text(target.get("Platform"))
@@ -567,15 +778,50 @@ def fetch_direct_creator_profile_metrics(
             continue
 
         try:
-            profile_html = fetch_profile_html(creator_profile_url(platform, handle))
+            profile_url = creator_profile_url(platform, handle)
+            try:
+                profile_html = fetch_profile_html(profile_url)
+            except Exception:
+                # TikTok can intermittently return an anti-bot page without
+                # the public hydration data. yt-dlp can still resolve the
+                # public profile URL directly, so do not turn that transient
+                # HTML response into a false Unavailable result.
+                profile_html = ""
             sec_uid, followers, public_post_count = _tiktok_profile_details(profile_html)
+            extraction_query = f"tiktokuser:{sec_uid}" if sec_uid else profile_url
             if not sec_uid:
-                raise RuntimeError("TikTok profile identifier was not available.")
+                followers_unavailable.add((platform, key))
             profile_followers[(platform, key)] = followers
             if public_post_count == 0:
                 entries = []
+                extraction_complete = True
+                partial_reason = ""
+            elif history_mode == PROFILE_HISTORY_FULL:
+                extraction_result = extract_full_window(
+                    extraction_query,
+                    cutoff_utc,
+                    effective_as_of,
+                    post_limit,
+                )
+                if not isinstance(extraction_result, dict):
+                    raise RuntimeError("TikTok profile posts were not available.")
+                entries = [
+                    entry
+                    for entry in list(extraction_result.get("entries", []) or [])
+                    if isinstance(entry, dict)
+                ]
+                extraction_complete = extraction_result.get("complete") is True
+                partial_reason = _text(extraction_result.get("partial_reason"))
+                if not extraction_complete and not partial_reason:
+                    partial_reason = "full history may be incomplete"
+                if (
+                    not entries
+                    and not extraction_complete
+                    and "could not be read" in partial_reason.casefold()
+                ):
+                    raise RuntimeError("TikTok profile posts were not available.")
             else:
-                playlist = extract_user_playlist(f"tiktokuser:{sec_uid}", post_limit)
+                playlist = extract_user_playlist(extraction_query, post_limit)
                 if not isinstance(playlist, dict):
                     raise RuntimeError("TikTok profile posts were not available.")
                 entries = [
@@ -585,6 +831,8 @@ def fetch_direct_creator_profile_metrics(
                 ]
                 if not entries:
                     raise RuntimeError("TikTok profile posts were not available.")
+                extraction_complete = True
+                partial_reason = ""
             seen_post_ids = set()
             accepted_entries = 0
             for entry in entries:
@@ -595,6 +843,18 @@ def fetch_direct_creator_profile_metrics(
                     continue
                 if post_identity:
                     seen_post_ids.add(post_identity)
+                if accepted_entries >= post_limit:
+                    if history_mode == PROFILE_HISTORY_FULL:
+                        cap_reason = (
+                            f"{FULL_PROFILE_POST_CEILING}-post safety limit reached"
+                        )
+                        partial_reason = "; ".join(
+                            reason
+                            for reason in (partial_reason, cap_reason)
+                            if reason
+                        )
+                        extraction_complete = False
+                    break
                 rows.append(
                     _yt_dlp_tiktok_post_row(
                         entry,
@@ -603,20 +863,40 @@ def fetch_direct_creator_profile_metrics(
                     )
                 )
                 accepted_entries += 1
-                if accepted_entries >= post_limit:
-                    break
+            if history_mode == PROFILE_HISTORY_FULL and not extraction_complete:
+                partial_statuses[(platform, key)] = (
+                    f"Partial ({partial_reason or 'full history may be incomplete'})"
+                )
         except Exception:
             failed_creators.append((platform, key))
             errors.append(f"TikTok creator @{handle} could not be retrieved in this run.")
 
-    return _aggregate_profile_posts(
+    metrics = _aggregate_profile_posts(
         requested,
         rows,
         profile_followers=profile_followers,
         failed_creators=failed_creators,
         months=months,
         as_of=as_of,
-    ), errors
+    )
+    for (platform, key), status in partial_statuses.items():
+        mask = metrics["Platform"].eq(platform) & metrics["Creator Key"].eq(key)
+        mask &= metrics["Profile Data Status"].ne("Unavailable")
+        metrics.loc[mask, "Profile Data Status"] = status
+    for platform, key in followers_unavailable:
+        mask = metrics["Platform"].eq(platform) & metrics["Creator Key"].eq(key)
+        mask &= ~metrics["Profile Data Status"].isin(["Unavailable"])
+        mask &= ~metrics["Profile Data Status"].astype(str).str.startswith("Partial")
+        has_posts = pd.to_numeric(
+            metrics["Profile Posts"], errors="coerce"
+        ).fillna(0).gt(0)
+        metrics.loc[mask & has_posts, "Profile Data Status"] = (
+            "Available (followers unavailable)"
+        )
+        metrics.loc[mask & ~has_posts, "Profile Data Status"] = (
+            "No recent public posts (followers unavailable)"
+        )
+    return metrics, errors
 
 
 def scrape_creator_profile_metrics(
