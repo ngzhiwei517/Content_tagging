@@ -21,6 +21,7 @@ from ugc_tagger.instagram_reels_adapter import (
     normalize_post_url,
     platform_for_record,
     post_identifier,
+    scrape_instagram_posts_direct,
     scrape_instagram_posts,
 )
 from ugc_tagger.model_comparison import DEFAULT_GEMINI_MODEL, normalize_gemini_model
@@ -836,7 +837,10 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
                 record.setdefault("_resolved_url", resolved)
         records.extend(tiktok_records)
     if instagram_links:
-        records.extend(scrape_instagram_posts(instagram_links, apify_token))
+        direct_records, fallback_links = scrape_instagram_posts_direct(instagram_links)
+        records.extend(direct_records)
+        if fallback_links:
+            records.extend(scrape_instagram_posts(fallback_links, apify_token))
     return records
 
 
