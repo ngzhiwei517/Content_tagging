@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import re
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 
@@ -58,15 +59,28 @@ def _usable_video_info(info: Optional[Dict]) -> bool:
     return bool(info.get("id") and (info.get("url") or info.get("formats")))
 
 
+def _tiktok_handle_from_url(url: str) -> str:
+    match = re.search(r"tiktok\.com/@([^/?#]+)", str(url or ""), flags=re.IGNORECASE)
+    return match.group(1).strip().lstrip("@") if match else ""
+
+
+def _non_numeric_handle(*values) -> str:
+    for value in values:
+        candidate = str(value or "").strip().lstrip("@")
+        if candidate and not candidate.isdigit():
+            return candidate
+    return ""
+
+
 def _direct_record(requested_url: str, info: Dict) -> Dict:
     canonical_url = str(info.get("webpage_url") or requested_url).strip()
-    uploader_id = str(
-        info.get("uploader_id")
-        or info.get("channel_id")
-        or info.get("uploader")
-        or ""
-    ).lstrip("@")
-    display_name = str(info.get("uploader") or uploader_id)
+    uploader_id = _non_numeric_handle(
+        _tiktok_handle_from_url(canonical_url),
+        _tiktok_handle_from_url(requested_url),
+        info.get("uploader"),
+        info.get("uploader_id"),
+    )
+    display_name = str(info.get("channel") or info.get("uploader") or uploader_id)
     thumbnail = str(info.get("thumbnail") or "")
     tags = info.get("tags") if isinstance(info.get("tags"), list) else []
     timestamp = _number(info.get("timestamp"), 0)

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
-from ugc_tagger.final_update2_adapter import scrape_links
+from ugc_tagger.final_update2_adapter import _resolved_creator_handle, scrape_links
 
 
 class _Backend:
@@ -23,7 +23,7 @@ def _video_info(url):
         "webpage_url": url,
         "url": "https://cdn.example/video.mp4",
         "title": "A public TikTok post",
-        "uploader_id": "creator",
+        "uploader_id": "99320625143398400",
         "uploader": "Creator",
         "view_count": 123,
         "like_count": 12,
@@ -50,6 +50,26 @@ class DirectPostScraperTests(unittest.TestCase):
         self.assertEqual(records[0]["playCount"], 123)
         self.assertEqual(records[0]["videoMeta.duration"], 9)
         self.assertEqual(records[0]["authorMeta.name"], "creator")
+
+    def test_numeric_account_id_never_replaces_public_username(self):
+        link = "https://www.tiktok.com/@public.handle/video/123"
+        records, fallback = scrape_tiktok_posts_direct([link], extractor=_video_info)
+        self.assertEqual(fallback, [])
+        self.assertEqual(records[0]["authorMeta.name"], "public.handle")
+
+    def test_existing_numeric_creator_is_repaired_from_post_link(self):
+        original = {
+            "Link": "https://www.tiktok.com/@restored.creator/video/123",
+            "Creator": "",
+        }
+        tagged = {
+            "creator_handle": "99320625143398400",
+            "creator": "99320625143398400",
+        }
+        self.assertEqual(
+            _resolved_creator_handle(original, tagged),
+            "restored.creator",
+        )
 
     def test_photo_and_failed_video_are_returned_for_fallback(self):
         video = "https://www.tiktok.com/@creator/video/123"

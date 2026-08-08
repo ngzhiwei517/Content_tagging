@@ -463,6 +463,28 @@ def _creator_followers(record: Dict) -> int:
     return _number(author.get("fans") or author.get("followers") or author.get("followerCount"))
 
 
+def _creator_handle_from_post_url(url: str) -> str:
+    match = re.search(r"tiktok\.com/@([^/?#]+)", _text(url), flags=re.IGNORECASE)
+    return match.group(1).strip().lstrip("@") if match else ""
+
+
+def _resolved_creator_handle(original: Dict, tagged: Dict) -> str:
+    """Prefer a public username and never display TikTok's numeric account ID."""
+    link_handle = _creator_handle_from_post_url(
+        tagged.get("tiktok_url") or original.get("Link")
+    )
+    for value in (
+        tagged.get("creator_handle"),
+        tagged.get("creator"),
+        original.get("Creator"),
+        link_handle,
+    ):
+        candidate = _text(value).lstrip("@")
+        if candidate and not candidate.isdigit() and candidate not in {"—", "-"}:
+            return candidate
+    return link_handle
+
+
 def _record_music_name(record: Dict) -> str:
     """Return TikTok's scraped sound title without requiring user input."""
     music = record.get("musicMeta") if isinstance(record.get("musicMeta"), dict) else {}
@@ -626,7 +648,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         ),
         "Original Sound": _text(original_dict.get("Original Sound")) or music_name,
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
-        "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
+        "Creator": _resolved_creator_handle(original_dict, tagged_dict),
         "Creator Display": _text(tagged_dict.get("creator_display")),
         "Caption": _text(tagged_dict.get("caption")) or _text(original_dict.get("Caption")),
         "Followers": _creator_followers(raw_record) or _number(original_dict.get("Followers")),
