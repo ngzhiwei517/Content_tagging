@@ -1022,6 +1022,38 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
     return campaign_track_catalog_status(track_value)
 
 
+def render_uploaded_track_catalog_feedback_v68_62(
+    track: str,
+    artist: str = "",
+) -> None:
+    """Confirm an uploaded file's track with the same cached Apple lookup."""
+    track = safe_str(track)
+    if not track:
+        return
+    lookup_value = " - ".join(
+        part for part in [safe_str(artist), track] if part
+    )
+    with st.spinner("Checking the track name..."):
+        track_status = campaign_track_catalog_status_v68_36(lookup_value)
+    if track_status.get("status") == "matched":
+        matched_title = " — ".join(
+            part for part in [
+                safe_str(track_status.get("artist_name")),
+                safe_str(track_status.get("track_name")),
+            ] if part
+        )
+        st.success(
+            f"Track confirmed in Apple Music/iTunes: {matched_title}. "
+            "If this is not the intended artist, fill in the optional Artist field."
+        )
+    else:
+        st.warning(
+            f"Could not confirm ‘{lookup_value}’ in Apple Music/iTunes. "
+            "Check the spelling. You can still continue because regional, niche, "
+            "or unreleased tracks may not be listed."
+        )
+
+
 CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
 
 
@@ -4859,6 +4891,10 @@ if st.session_state.step == 2:
                             placeholder="Artist name",
                             key="shared_uploaded_campaign_artist_v68_51",
                         )
+                    render_uploaded_track_catalog_feedback_v68_62(
+                        shared_track,
+                        shared_artist,
+                    )
                 for f in files:
                     file_key = hashlib.sha1(
                         f"{f.name}:{len(f.getvalue())}".encode("utf-8")
@@ -4880,6 +4916,10 @@ if st.session_state.step == 2:
                                 placeholder="Artist name",
                                 key=f"uploaded_file_artist_v68_51_{file_key}",
                             )
+                        render_uploaded_track_catalog_feedback_v68_62(
+                            fallback_track,
+                            fallback_artist,
+                        )
                     fallback_track = safe_str(fallback_track)
                     try:
                         df = read_any_table(f)
