@@ -1666,7 +1666,7 @@ def metric_is_available(row, metric: str) -> bool:
 
 def available_metric_rate(row, metric: str) -> float:
     """Calculate a rate, preserving unavailable platform metrics as missing."""
-    if not metric_is_available(row, metric):
+    if not metric_is_available(row, metric) or not metric_is_available(row, "Views"):
         return float("nan")
     return rate_pct(row.get(metric), row.get("Views"))
 
@@ -1727,9 +1727,13 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
     if "Total Engagement" not in out.columns:
         out["Total Engagement"] = 0
     out["Total Engagement"] = out.apply(lambda r: clean_num(r.get("Total Engagement")) or clean_num(r.get("Likes")) + clean_num(r.get("Comments")) + clean_num(r.get("Shares")) + clean_num(r.get("Saves")), axis=1)
-    out["Engagement Rate"] = out.apply(lambda r: rate_pct(r.get("Total Engagement"), r.get("Views")), axis=1)
-    out["Likes Rate"] = out.apply(lambda r: rate_pct(r.get("Likes"), r.get("Views")), axis=1)
-    out["Comments Rate"] = out.apply(lambda r: rate_pct(r.get("Comments"), r.get("Views")), axis=1)
+    out["Engagement Rate"] = out.apply(
+        lambda r: rate_pct(r.get("Total Engagement"), r.get("Views"))
+        if metric_is_available(r, "Views") else float("nan"),
+        axis=1,
+    )
+    out["Likes Rate"] = out.apply(lambda r: available_metric_rate(r, "Likes"), axis=1)
+    out["Comments Rate"] = out.apply(lambda r: available_metric_rate(r, "Comments"), axis=1)
     out["Shares Rate"] = out.apply(lambda r: available_metric_rate(r, "Shares"), axis=1)
     out["Saves Rate"] = out.apply(lambda r: available_metric_rate(r, "Saves"), axis=1)
     out = preserve_unavailable_metric_blanks(out)
@@ -1798,7 +1802,8 @@ def apply_profile_followers_v68_64(
 
 def format_display_value(col: str, val) -> str:
     unavailable_columns = {
-        "Views", "Likes", "Comments", "Shares", "Saves",
+        "Views", "Average Views", "Likes", "Comments", "Shares", "Saves",
+        "Engagement Rate", "Average Engagement Rate", "Likes Rate", "Comments Rate",
         "Shares Rate", "Average Shares Rate", "Saves Rate", "Average Saves Rate",
     }
     try:
@@ -2322,7 +2327,11 @@ def standardize_file_rows(
         saves = clean_num(r.get(cols["saves"])) if cols.get("saves") else 0
         unavailable_metrics = []
         if detected_platform == INSTAGRAM_REELS:
-            for metric_name, column_name in (("Shares", cols.get("shares")), ("Saves", cols.get("saves"))):
+            for metric_name, column_name in (
+                ("Views", cols.get("views")),
+                ("Shares", cols.get("shares")),
+                ("Saves", cols.get("saves")),
+            ):
                 raw_value = r.get(column_name) if column_name else None
                 if not column_name or pd.isna(raw_value) or safe_str(raw_value) == "":
                     unavailable_metrics.append(metric_name)
@@ -4313,7 +4322,13 @@ def prepare_sortable_summary_table_v68_46(
         table = table[[column for column in columns if column in table.columns]].copy()
     for column in table.columns:
         if column in SUMMARY_INTEGER_COLUMNS_V68_46:
-            table[column] = table[column].map(clean_num).astype("int64")
+            numeric = pd.to_numeric(
+                table[column].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            )
+            table[column] = (
+                numeric.astype("Int64") if numeric.isna().any() else numeric.astype("int64")
+            )
         elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
             table[column] = pd.to_numeric(
                 table[column].astype(str).str.replace("%", "", regex=False),
@@ -4370,15 +4385,25 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     if "Track Display" in top_posts.columns:
         top_posts["Track"] = top_posts["Track Display"]
 
-    for column in ["Followers", "Views", "Total Engagement"]:
+    for column in ["Followers", "Total Engagement"]:
         if column not in top_posts.columns:
             top_posts[column] = 0
         top_posts[column] = top_posts[column].map(clean_num).astype("int64")
+    if "Views" not in top_posts.columns:
+        top_posts["Views"] = pd.Series(pd.NA, index=top_posts.index, dtype="Int64")
+    else:
+        top_posts["Views"] = pd.to_numeric(
+            top_posts["Views"].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        ).astype("Int64")
 
     top_posts["Engagement Rate"] = top_posts.apply(
         lambda row: (
-            row["Total Engagement"] / row["Views"] * 100
-            if row["Views"] else 0.0
+            float("nan")
+            if pd.isna(row["Views"])
+            else row["Total Engagement"] / row["Views"] * 100
+            if row["Views"]
+            else 0.0
         ),
         axis=1,
     )
@@ -5216,7 +5241,7 @@ if st.session_state.step == 2:
                         "Comments": 0,
                         "Shares": 0,
                         "Saves": 0,
-                        "Metrics Unavailable": "Shares, Saves" if detected_platform == INSTAGRAM_REELS else "",
+                        "Metrics Unavailable": "Views, Shares, Saves" if detected_platform == INSTAGRAM_REELS else "",
                         "Total Engagement": 0,
                     })
                 added, skipped = append_to_batch(pd.DataFrame(rows))

@@ -259,6 +259,24 @@ class InstagramRecordTests(unittest.TestCase):
         self.assertEqual(record["shareCount"], 41)
         self.assertEqual(record["instagramMetricsUnavailable"], ["Saves"])
 
+    def test_missing_views_are_unavailable_instead_of_confirmed_zero(self):
+        raw = instagram_video_record()
+        raw.pop("videoPlayCount")
+        record = normalize_instagram_record(raw, VIDEO_URL)
+        self.assertEqual(record["playCount"], 0)
+        self.assertEqual(
+            record["instagramMetricsUnavailable"],
+            ["Views", "Shares", "Saves"],
+        )
+
+    def test_returned_zero_views_remain_available(self):
+        record = normalize_instagram_record(
+            {**instagram_video_record(), "videoPlayCount": 0},
+            VIDEO_URL,
+        )
+        self.assertEqual(record["playCount"], 0)
+        self.assertNotIn("Views", record["instagramMetricsUnavailable"])
+
     def test_full_metrics_actor_nested_output_maps_all_available_metrics(self):
         record = normalize_instagram_record(instagram_full_metrics_record(), VIDEO_URL)
         self.assertEqual(record["text"], "A short Reel #dance")
@@ -412,6 +430,38 @@ class InstagramScrapeTests(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertEqual(fallback, [VIDEO_URL])
 
+    def test_direct_reel_with_missing_views_is_kept_and_requested_for_fallback(self):
+        info = {
+            "id": "DExampleAbC1",
+            "webpage_url": VIDEO_URL,
+            "url": "https://cdn.example/reel.mp4",
+            "description": "A public Reel",
+            "channel": "creator_name",
+            "like_count": 250,
+        }
+        records, fallback = scrape_instagram_posts_direct(
+            [VIDEO_URL], extractor=lambda _url: info
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(fallback, [VIDEO_URL])
+        self.assertIn("Views", records[0]["instagramMetricsUnavailable"])
+
+    def test_direct_reel_with_confirmed_zero_views_does_not_use_fallback(self):
+        info = {
+            "id": "DExampleAbC1",
+            "webpage_url": VIDEO_URL,
+            "url": "https://cdn.example/reel.mp4",
+            "description": "A public Reel",
+            "channel": "creator_name",
+            "view_count": 0,
+        }
+        records, fallback = scrape_instagram_posts_direct(
+            [VIDEO_URL], extractor=lambda _url: info
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(fallback, [])
+        self.assertNotIn("Views", records[0]["instagramMetricsUnavailable"])
+
     def test_adapter_uses_apify_only_for_direct_instagram_failures(self):
         direct_record = normalize_instagram_record(instagram_video_record(), VIDEO_URL)
         with patch(
@@ -426,6 +476,45 @@ class InstagramScrapeTests(unittest.TestCase):
             records = scrape_links([VIDEO_URL], "token")
         self.assertEqual(records, [direct_record])
         apify_scrape.assert_not_called()
+
+    def test_adapter_replaces_partial_direct_record_when_apify_recovers_views(self):
+        direct_raw = instagram_video_record()
+        direct_raw.pop("videoPlayCount")
+        direct_record = normalize_instagram_record(direct_raw, VIDEO_URL)
+        fallback_record = normalize_instagram_record(instagram_video_record(), VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([direct_record], [VIDEO_URL]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
+            return_value=[fallback_record],
+        ) as apify_scrape:
+            records = scrape_links([VIDEO_URL], "token")
+        self.assertEqual(records, [fallback_record])
+        self.assertEqual(records[0]["playCount"], 5000)
+        apify_scrape.assert_called_once_with([VIDEO_URL], "token")
+
+    def test_adapter_keeps_partial_direct_record_when_apify_has_no_views(self):
+        direct_raw = instagram_video_record()
+        direct_raw.pop("videoPlayCount")
+        direct_record = normalize_instagram_record(direct_raw, VIDEO_URL)
+        fallback_record = normalize_instagram_record(direct_raw, VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([direct_record], [VIDEO_URL]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
+            return_value=[fallback_record],
+        ):
+            records = scrape_links([VIDEO_URL], "token")
+        self.assertEqual(records, [direct_record])
+        self.assertIn("Views", records[0]["instagramMetricsUnavailable"])
 
     def test_reel_actor_requests_post_details_and_preserves_full_metrics(self):
         client = _FakeClient([instagram_full_metrics_record()])
