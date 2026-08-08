@@ -421,7 +421,7 @@ def _yt_dlp_tiktok_post_row(
 
 def _parse_post_dates(values: pd.Series) -> pd.Series:
     """Parse mixed ISO strings and Unix timestamps into UTC datetimes."""
-    parsed = pd.to_datetime(values, errors="coerce", utc=True)
+    parsed = pd.to_datetime(values, errors="coerce", utc=True, format="mixed")
     numeric = pd.to_numeric(values, errors="coerce")
     unix_mask = numeric.notna() & numeric.between(1_000_000_000, 99_999_999_999)
     if unix_mask.any():
@@ -611,6 +611,79 @@ def _extract_tiktok_user_full_window(
         )
 
 
+def _extract_instagram_user_full_window(
+    handle: str,
+    cutoff_utc,
+    as_of_utc,
+    cap: int = FULL_PROFILE_POST_CEILING,
+) -> Dict:
+    """Collect public Instagram profile metadata without downloading media."""
+    try:
+        import instaloader
+    except Exception as exc:  # pragma: no cover - dependency contract
+        raise RuntimeError("Missing dependency: install instaloader.") from exc
+
+    cutoff = _utc_timestamp(cutoff_utc)
+    effective_as_of = _utc_timestamp(as_of_utc)
+    safe_cap = min(max(int(cap), 1), FULL_PROFILE_POST_CEILING)
+    loader = instaloader.Instaloader(
+        sleep=False,
+        quiet=True,
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        max_connection_attempts=1,
+        request_timeout=20,
+        resume_prefix=None,
+        check_resume_bbd=False,
+        iphone_support=False,
+    )
+    try:
+        profile = instaloader.Profile.from_username(loader.context, handle)
+        followers = _number(getattr(profile, "followers", 0))
+        entries: List[Dict] = []
+        complete = True
+        partial_reason = ""
+        for post in profile.get_posts():
+            post_date = getattr(post, "date_utc", None)
+            try:
+                post_timestamp = _utc_timestamp(post_date)
+            except (TypeError, ValueError):
+                complete = False
+                partial_reason = "some posts had no publish date"
+                continue
+            if post_timestamp > effective_as_of:
+                continue
+            if post_timestamp < cutoff:
+                break
+            if len(entries) >= safe_cap:
+                complete = False
+                partial_reason = f"{safe_cap}-post safety limit reached"
+                break
+            entries.append({
+                "id": _text(getattr(post, "mediaid", "")),
+                "shortCode": _text(getattr(post, "shortcode", "")),
+                "ownerUsername": handle,
+                "ownerFollowersCount": followers,
+                "timestamp": post_date,
+                "videoViewCount": _number(getattr(post, "video_view_count", 0)),
+                "likesCount": _number(getattr(post, "likes", 0)),
+                "commentsCount": _number(getattr(post, "comments", 0)),
+            })
+        return {
+            "followers": followers,
+            "entries": entries,
+            "complete": complete,
+            "partial_reason": partial_reason,
+        }
+    except Exception as exc:
+        raise RuntimeError("Instagram profile posts were not available anonymously.") from exc
+
+
 def _requested_creator_frame(creators) -> pd.DataFrame:
     if isinstance(creators, pd.DataFrame):
         frame = creators.copy()
@@ -734,14 +807,13 @@ def fetch_direct_creator_profile_metrics(
     profile_fetcher: Optional[Callable[[str], str]] = None,
     extractor: Optional[Callable[[str, int], Dict]] = None,
     full_extractor: Optional[Callable[[str, object, object, int], Dict]] = None,
+    instagram_extractor: Optional[Callable[[str, object, object, int], Dict]] = None,
     as_of=None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Fetch TikTok profile metadata directly without Apify or media downloads.
+    """Fetch public profile metadata directly without media downloads.
 
     Each creator is isolated so a blocked, renamed, private, or malformed
     profile cannot discard successful results for the other selected creators.
-    Instagram is deliberately reported as unavailable until a direct provider
-    with the same metadata-only contract is implemented.
     """
     requested = _requested_creator_frame(creators)
     if requested.empty:
@@ -752,6 +824,7 @@ def fetch_direct_creator_profile_metrics(
     fetch_profile_html = profile_fetcher or _fetch_tiktok_profile_html
     extract_user_playlist = extractor or _extract_tiktok_user_playlist
     extract_full_window = full_extractor or _extract_tiktok_user_full_window
+    extract_instagram_window = instagram_extractor or _extract_instagram_user_full_window
     effective_as_of = _utc_timestamp(as_of)
     cutoff_utc = effective_as_of - pd.DateOffset(months=months)
 
@@ -767,10 +840,32 @@ def fetch_direct_creator_profile_metrics(
         handle = normalize_creator_handle(target.get("Profile Creator"))
         key = creator_key(handle)
         if platform == INSTAGRAM_REELS:
-            failed_creators.append((platform, key))
-            errors.append(
-                f"Instagram creator @{handle} is not supported by the direct profile scraper yet."
-            )
+            try:
+                extraction_result = extract_instagram_window(
+                    handle,
+                    cutoff_utc,
+                    effective_as_of,
+                    post_limit,
+                )
+                if not isinstance(extraction_result, dict):
+                    raise RuntimeError("Instagram profile posts were not available.")
+                followers = _number(extraction_result.get("followers"))
+                profile_followers[(platform, key)] = followers
+                if not followers:
+                    followers_unavailable.add((platform, key))
+                for entry in extraction_result.get("entries", []) or []:
+                    if isinstance(entry, dict):
+                        rows.append(_instagram_post_row(entry))
+                if extraction_result.get("complete") is not True:
+                    reason = _text(extraction_result.get("partial_reason"))
+                    partial_statuses[(platform, key)] = (
+                        f"Partial ({reason or 'full history may be incomplete'})"
+                    )
+            except Exception:
+                failed_creators.append((platform, key))
+                errors.append(
+                    f"Instagram creator @{handle} could not be retrieved anonymously in this run."
+                )
             continue
         if platform != TIKTOK:
             failed_creators.append((platform, key))
@@ -896,7 +991,35 @@ def fetch_direct_creator_profile_metrics(
         metrics.loc[mask & ~has_posts, "Profile Data Status"] = (
             "No recent public posts (followers unavailable)"
         )
+    instagram_public = (
+        metrics["Platform"].eq(INSTAGRAM_REELS)
+        & metrics["Profile Data Status"].eq("Available")
+    )
+    metrics.loc[instagram_public, "Profile Data Status"] = (
+        "Available (public metrics; shares/saves unavailable)"
+    )
     return metrics, errors
+
+
+def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
+    """Return True when direct Instagram results are missing essential fields."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return True
+    required = {"Platform", "Profile Data Status", "Current Followers"}
+    if not required.issubset(metrics.columns):
+        return True
+    instagram = metrics[metrics.get("Platform", pd.Series(dtype=str)).eq(INSTAGRAM_REELS)]
+    if instagram.empty:
+        return True
+    status = instagram.get(
+        "Profile Data Status", pd.Series("", index=instagram.index, dtype=str)
+    ).fillna("").astype(str)
+    followers = pd.to_numeric(
+        instagram.get("Current Followers", 0), errors="coerce"
+    ).fillna(0)
+    incomplete_status = status.str.startswith(("Unavailable", "Partial"))
+    followers_missing = followers.le(0)
+    return bool((incomplete_status | followers_missing).any())
 
 
 def scrape_creator_profile_metrics(

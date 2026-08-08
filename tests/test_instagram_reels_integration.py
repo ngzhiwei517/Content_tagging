@@ -29,6 +29,7 @@ from ugc_tagger.instagram_reels_adapter import (
     normalize_instagram_record,
     normalize_post_url,
     post_identifier,
+    scrape_instagram_posts_direct,
     scrape_instagram_posts,
 )
 
@@ -372,6 +373,60 @@ class InstagramRecordTests(unittest.TestCase):
 
 
 class InstagramScrapeTests(unittest.TestCase):
+    def test_direct_reel_metadata_maps_to_shared_schema_without_apify(self):
+        info = {
+            "id": "DExampleAbC1",
+            "webpage_url": VIDEO_URL,
+            "url": "https://cdn.example/reel.mp4",
+            "description": "A public Reel #dance",
+            "uploader_id": "99320625143398400",
+            "uploader": "Creator Name",
+            "channel": "creator_name",
+            "channel_follower_count": 1000,
+            "view_count": 5000,
+            "like_count": 250,
+            "comment_count": 12,
+            "duration": 9,
+            "thumbnail": "https://cdn.example/cover.jpg",
+            "track": "Test Song",
+            "artist": "Test Artist",
+            "tags": ["dance"],
+        }
+        records, fallback = scrape_instagram_posts_direct(
+            [VIDEO_URL], extractor=lambda _url: info
+        )
+        self.assertEqual(fallback, [])
+        self.assertEqual(records[0]["_scrape_provider"], "direct_yt_dlp")
+        self.assertEqual(records[0]["authorMeta"]["name"], "creator_name")
+        self.assertEqual(records[0]["playCount"], 5000)
+        self.assertEqual(records[0]["diggCount"], 250)
+        self.assertEqual(records[0]["commentCount"], 12)
+        self.assertEqual(records[0]["mediaUrls"], ["https://cdn.example/reel.mp4"])
+        self.assertEqual(records[0]["instagramMetricsUnavailable"], ["Shares", "Saves"])
+
+    def test_direct_carousel_or_failed_reel_is_returned_for_fallback(self):
+        playlist = {"id": "DExampleAbC1", "_type": "playlist", "entries": []}
+        records, fallback = scrape_instagram_posts_direct(
+            [VIDEO_URL], extractor=lambda _url: playlist
+        )
+        self.assertEqual(records, [])
+        self.assertEqual(fallback, [VIDEO_URL])
+
+    def test_adapter_uses_apify_only_for_direct_instagram_failures(self):
+        direct_record = normalize_instagram_record(instagram_video_record(), VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([direct_record], []),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts"
+        ) as apify_scrape:
+            records = scrape_links([VIDEO_URL], "token")
+        self.assertEqual(records, [direct_record])
+        apify_scrape.assert_not_called()
+
     def test_reel_actor_requests_post_details_and_preserves_full_metrics(self):
         client = _FakeClient([instagram_full_metrics_record()])
         records = scrape_instagram_posts([VIDEO_URL], "", client=client)
@@ -439,6 +494,9 @@ class InstagramScrapeTests(unittest.TestCase):
         with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=fake_backend), patch(
             "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
             return_value=([], [tiktok_url]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([], [VIDEO_URL]),
         ), patch(
             "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
             return_value=[normalize_instagram_record(instagram_video_record(), VIDEO_URL)],

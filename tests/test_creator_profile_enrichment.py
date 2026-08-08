@@ -17,9 +17,11 @@ from ugc_tagger.creator_profile_enrichment import (
     PROFILE_SCOPE_OPTIONS,
     TIKTOK_PROFILE_ACTOR_ID,
     _collect_tiktok_full_window,
+    _extract_instagram_user_full_window,
     _extract_tiktok_user_full_window,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    instagram_profile_requires_fallback,
     normalize_creator_handle,
     profile_history_settings,
     profile_scope_count,
@@ -61,6 +63,74 @@ class _FakeClient:
 
 
 class CreatorProfileEnrichmentTests(unittest.TestCase):
+    def test_instagram_profile_fallback_requires_followers_and_complete_history(self):
+        base = pd.DataFrame([{
+            "Platform": INSTAGRAM_REELS,
+            "Current Followers": 800,
+            "Profile Data Status": "Available (public metrics; shares/saves unavailable)",
+        }])
+        self.assertFalse(instagram_profile_requires_fallback(base))
+
+        no_recent = base.copy()
+        no_recent["Profile Data Status"] = "No recent public posts"
+        self.assertFalse(instagram_profile_requires_fallback(no_recent))
+
+        missing_followers = base.copy()
+        missing_followers["Current Followers"] = 0
+        self.assertTrue(instagram_profile_requires_fallback(missing_followers))
+
+        partial = base.copy()
+        partial["Profile Data Status"] = "Partial (full history may be incomplete)"
+        self.assertTrue(instagram_profile_requires_fallback(partial))
+
+    def test_instagram_profile_extractor_is_metadata_only_and_stops_at_cutoff(self):
+        posts = [
+            types.SimpleNamespace(
+                mediaid="future", shortcode="future", date_utc="2026-08-09T00:00:00Z",
+                video_view_count=999, likes=99, comments=9,
+            ),
+            types.SimpleNamespace(
+                mediaid="recent", shortcode="recent", date_utc="2026-08-02T00:00:00Z",
+                video_view_count=300, likes=30, comments=3,
+            ),
+            types.SimpleNamespace(
+                mediaid="old", shortcode="old", date_utc="2026-04-01T00:00:00Z",
+                video_view_count=100, likes=10, comments=1,
+            ),
+        ]
+        profile = types.SimpleNamespace(
+            followers=800,
+            get_posts=lambda: iter(posts),
+        )
+
+        class FakeLoader:
+            kwargs = {}
+
+            def __init__(self, **kwargs):
+                FakeLoader.kwargs = kwargs
+                self.context = object()
+
+        fake_module = types.SimpleNamespace(
+            Instaloader=FakeLoader,
+            Profile=types.SimpleNamespace(
+                from_username=lambda _context, handle: profile if handle == "ig-user" else None
+            ),
+        )
+        with patch.dict(sys.modules, {"instaloader": fake_module}):
+            result = _extract_instagram_user_full_window(
+                "ig-user",
+                "2026-05-08T00:00:00Z",
+                "2026-08-08T00:00:00Z",
+                2000,
+            )
+
+        self.assertEqual(result["followers"], 800)
+        self.assertEqual([entry["id"] for entry in result["entries"]], ["recent"])
+        self.assertTrue(result["complete"])
+        self.assertFalse(FakeLoader.kwargs["download_pictures"])
+        self.assertFalse(FakeLoader.kwargs["download_videos"])
+        self.assertFalse(FakeLoader.kwargs["save_metadata"])
+
     def test_creator_profile_links_and_scope(self):
         self.assertEqual(normalize_creator_handle("@alice"), "alice")
         self.assertEqual(
@@ -250,7 +320,7 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         self.assertNotIn("url", metrics.columns)
         self.assertNotIn("media", metrics.columns)
 
-    def test_direct_provider_isolates_creator_failures_and_marks_instagram_unavailable(self):
+    def test_direct_provider_isolates_failures_and_supports_instagram(self):
         profile_payload = (
             '<script id="SIGI_STATE" type="application/json">'
             '{"UserModule":{"users":{"good":{"secUid":"sec-good"}},'
@@ -276,6 +346,24 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
                 }]
             }
 
+        def instagram_extractor(handle, cutoff_utc, as_of_utc, cap):
+            self.assertEqual(handle, "ig-user")
+            self.assertEqual(cap, 20)
+            return {
+                "followers": 800,
+                "entries": [{
+                    "id": "ig-1",
+                    "ownerUsername": handle,
+                    "ownerFollowersCount": 800,
+                    "timestamp": "2026-08-02T00:00:00Z",
+                    "videoViewCount": 300,
+                    "likesCount": 30,
+                    "commentsCount": 3,
+                }],
+                "complete": True,
+                "partial_reason": "",
+            }
+
         metrics, errors = fetch_direct_creator_profile_metrics(
             [
                 {"Platform": TIKTOK, "Creator": "good"},
@@ -284,16 +372,33 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             ],
             profile_fetcher=profile_fetcher,
             extractor=extractor,
+            instagram_extractor=instagram_extractor,
             as_of="2026-08-08T00:00:00Z",
         )
 
         status_by_creator = metrics.set_index("Profile Creator")["Profile Data Status"].to_dict()
         self.assertEqual(status_by_creator["good"], "Available")
         self.assertEqual(status_by_creator["broken"], "Unavailable")
-        self.assertEqual(status_by_creator["ig-user"], "Unavailable")
+        self.assertEqual(
+            status_by_creator["ig-user"],
+            "Available (public metrics; shares/saves unavailable)",
+        )
         self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("good"), "Profile Posts"].iloc[0]), 1)
+        self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("ig-user"), "Profile Posts"].iloc[0]), 1)
+        self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("ig-user"), "Current Followers"].iloc[0]), 800)
         self.assertTrue(any("@broken" in error for error in errors))
-        self.assertTrue(any("Instagram creator @ig-user" in error for error in errors))
+        self.assertFalse(any("Instagram creator @ig-user" in error for error in errors))
+
+    def test_direct_instagram_failure_is_isolated_and_marked_unavailable(self):
+        metrics, errors = fetch_direct_creator_profile_metrics(
+            [{"Platform": INSTAGRAM_REELS, "Creator": "blocked-user"}],
+            instagram_extractor=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("rate limited")
+            ),
+            as_of="2026-08-08T00:00:00Z",
+        )
+        self.assertEqual(metrics.iloc[0]["Profile Data Status"], "Unavailable")
+        self.assertTrue(any("@blocked-user" in error for error in errors))
 
     def test_direct_provider_marks_empty_extraction_for_a_nonempty_profile_unavailable(self):
         profile_html = (

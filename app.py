@@ -45,7 +45,9 @@ from ugc_tagger.creator_profile_enrichment import (
     creator_key,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    instagram_profile_requires_fallback,
     profile_history_settings,
+    scrape_creator_profile_metrics,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -1739,6 +1741,58 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
         return existing if existing and existing.lower() != "unknown" else "Unknown"
 
     out["KOL Size"] = out.apply(resolved_kol_size, axis=1)
+    return out
+
+
+def apply_profile_followers_v68_64(
+    rows: pd.DataFrame,
+    profile_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """Backfill zero batch followers from successfully fetched profile metrics."""
+    if not isinstance(rows, pd.DataFrame) or rows.empty:
+        return rows
+    if not isinstance(profile_metrics, pd.DataFrame) or profile_metrics.empty:
+        return rows
+    required = {"Platform", "Creator Key", "Current Followers"}
+    if not required.issubset(profile_metrics.columns):
+        return rows
+
+    out = rows.copy()
+    if "Platform" not in out.columns or "Creator" not in out.columns:
+        return out
+    if "Followers" not in out.columns:
+        out["Followers"] = 0
+    if "KOL Size" not in out.columns:
+        out["KOL Size"] = ""
+
+    lookup_rows = profile_metrics.copy()
+    lookup_rows["Current Followers"] = pd.to_numeric(
+        lookup_rows["Current Followers"], errors="coerce"
+    ).fillna(0)
+    lookup_rows = lookup_rows[lookup_rows["Current Followers"].gt(0)].drop_duplicates(
+        ["Platform", "Creator Key"], keep="last"
+    )
+    follower_lookup = {
+        (safe_str(platform), safe_str(key)): clean_num(followers)
+        for platform, key, followers in zip(
+            lookup_rows["Platform"],
+            lookup_rows["Creator Key"],
+            lookup_rows["Current Followers"],
+        )
+    }
+    for index, row in out.iterrows():
+        if clean_num(row.get("Followers")) > 0:
+            continue
+        followers = follower_lookup.get(
+            (safe_str(row.get("Platform")), creator_key(row.get("Creator"))),
+            0,
+        )
+        if followers <= 0:
+            continue
+        out.at[index, "Followers"] = followers
+        calculated_kol = kol_size_for_market(followers, row.get("Market"))
+        if calculated_kol != "Unknown":
+            out.at[index, "KOL Size"] = calculated_kol
     return out
 
 
@@ -4581,6 +4635,8 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             profile_frames = []
             failed_profile_frames = []
             profile_errors = []
+            instagram_fallback_targets = []
+            instagram_direct_failures = []
             if not targets_to_fetch.empty:
                 progress_bar = st.progress(0)
                 try:
@@ -4592,15 +4648,24 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             targets_to_fetch.iterrows(), start=1
                         ):
                             try:
-                                profile_frames.append(
-                                    direct_creator_profile_metrics_v68_58(
-                                        safe_str(target.get("Platform")),
-                                        safe_str(target.get("Creator")),
-                                        history_mode=history_mode,
-                                        months=3,
-                                        post_limit=history_post_limit,
-                                    )
+                                direct_metrics = direct_creator_profile_metrics_v68_58(
+                                    safe_str(target.get("Platform")),
+                                    safe_str(target.get("Creator")),
+                                    history_mode=history_mode,
+                                    months=3,
+                                    post_limit=history_post_limit,
                                 )
+                                if (
+                                    safe_str(target.get("Platform")) == INSTAGRAM_REELS
+                                    and instagram_profile_requires_fallback(direct_metrics)
+                                ):
+                                    instagram_fallback_targets.append({
+                                        "Platform": INSTAGRAM_REELS,
+                                        "Creator": safe_str(target.get("Creator")),
+                                    })
+                                    instagram_direct_failures.append(direct_metrics)
+                                else:
+                                    profile_frames.append(direct_metrics)
                             except Exception as exc:
                                 LOGGER.warning(
                                     "Direct creator profile lookup failed for %s/%s: %s",
@@ -4609,12 +4674,66 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     exc,
                                 )
                                 unavailable_metrics = getattr(exc, "profile_metrics", None)
-                                if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                    failed_profile_frames.append(unavailable_metrics)
-                                profile_errors.append(safe_str(exc))
+                                if safe_str(target.get("Platform")) == INSTAGRAM_REELS:
+                                    instagram_fallback_targets.append({
+                                        "Platform": INSTAGRAM_REELS,
+                                        "Creator": safe_str(target.get("Creator")),
+                                    })
+                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                        instagram_direct_failures.append(unavailable_metrics)
+                                else:
+                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                        failed_profile_frames.append(unavailable_metrics)
+                                    profile_errors.append(safe_str(exc))
                             progress_bar.progress(
                                 position / max(len(targets_to_fetch), 1)
                             )
+                        if instagram_fallback_targets:
+                            fallback_token = (
+                                _managed_api_secret_v68_43("APIFY_TOKEN")
+                                or clean_api_secret(
+                                    st.session_state.get("apify_token", "")
+                                    or st.session_state.get("apify_token_input_v52", "")
+                                    or st.session_state.get("apify_token_input", "")
+                                )
+                            )
+                            if fallback_token:
+                                try:
+                                    fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
+                                        pd.DataFrame(instagram_fallback_targets),
+                                        fallback_token,
+                                        months=3,
+                                        post_limit=history_post_limit,
+                                    )
+                                    if not fallback_metrics.empty:
+                                        fallback_metrics["Profile History Mode"] = history_mode
+                                        fallback_metrics["Profile Fetched At"] = datetime.now(
+                                            timezone.utc
+                                        ).isoformat()
+                                        fallback_unavailable = fallback_metrics[
+                                            fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                        ]
+                                        fallback_successful = fallback_metrics[
+                                            ~fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                        ]
+                                        if not fallback_successful.empty:
+                                            profile_frames.append(fallback_successful)
+                                        if not fallback_unavailable.empty:
+                                            failed_profile_frames.append(fallback_unavailable)
+                                    else:
+                                        failed_profile_frames.extend(instagram_direct_failures)
+                                    profile_errors.extend(fallback_errors)
+                                except Exception:
+                                    failed_profile_frames.extend(instagram_direct_failures)
+                                    profile_errors.append(
+                                        "Instagram profile fallback could not be completed in this run."
+                                    )
+                            else:
+                                failed_profile_frames.extend(instagram_direct_failures)
+                                profile_errors.append(
+                                    "Some Instagram profiles could not be retrieved anonymously. "
+                                    "Configure the existing Apify token to use the fallback."
+                                )
                 finally:
                     progress_bar.empty()
 
@@ -6190,6 +6309,10 @@ elif st.session_state.step == 6:
         if col not in work.columns:
             work[col] = 0
         work[col] = work[col].map(clean_num)
+    work = apply_profile_followers_v68_64(
+        work,
+        st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame()),
+    )
     work = preserve_unavailable_metric_blanks(work)
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)

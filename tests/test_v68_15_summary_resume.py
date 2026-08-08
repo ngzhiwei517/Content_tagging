@@ -98,6 +98,10 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["canonical_post_date"] = lambda row: pd.to_datetime(row.get("Date"), errors="coerce")
         cls.creator_summary = staticmethod(load_function("creator_performance_summary_v68_47", namespace))
         namespace["creator_key"] = lambda value: namespace["safe_str"](value).lstrip("@").lower()
+        namespace["kol_size_for_market"] = load_function("kol_size_for_market", namespace)
+        cls.apply_profile_followers = staticmethod(
+            load_function("apply_profile_followers_v68_64", namespace)
+        )
         namespace["CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61"] = 6 * 60 * 60
         cls.pending_profile_targets = staticmethod(
             load_function("pending_creator_profile_targets_v68_61", namespace)
@@ -378,8 +382,10 @@ class SummaryV6815Tests(unittest.TestCase):
         )[0]
         self.assertIn("Fetch profile metrics", creator_section)
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
-        self.assertNotIn("scrape_creator_profile_metrics", creator_section)
-        self.assertNotIn("apify_token", creator_section)
+        self.assertIn("scrape_creator_profile_metrics", creator_section)
+        self.assertIn("instagram_fallback_targets", creator_section)
+        self.assertIn('safe_str(target.get("Platform")) == INSTAGRAM_REELS', creator_section)
+        self.assertIn('fallback_token', creator_section)
         self.assertIn("st.number_input", creator_section)
         self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
         self.assertIn('min_value=1', creator_section)
@@ -402,6 +408,40 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn('"Creator Profile"', creator_section)
         self.assertIn("profile_history_settings", creator_section)
         self.assertIn("pending_creator_profile_targets_v68_61", creator_section)
+        self.assertIn("instagram_profile_requires_fallback", creator_section)
+
+    def test_profile_followers_backfill_zero_batch_values_and_kol_size(self):
+        rows = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Creator": "alice",
+            "Market": "SG",
+            "Followers": 0,
+            "KOL Size": "Unknown",
+        }])
+        profile_metrics = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Creator Key": "alice",
+            "Current Followers": 25_000,
+        }])
+        enriched = self.apply_profile_followers(rows, profile_metrics)
+        self.assertEqual(int(enriched.loc[0, "Followers"]), 25_000)
+        self.assertEqual(enriched.loc[0, "KOL Size"], "Micro")
+
+    def test_profile_followers_never_replace_existing_batch_value(self):
+        rows = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Creator": "alice",
+            "Market": "SG",
+            "Followers": 12_000,
+            "KOL Size": "Micro",
+        }])
+        profile_metrics = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Creator Key": "alice",
+            "Current Followers": 25_000,
+        }])
+        enriched = self.apply_profile_followers(rows, profile_metrics)
+        self.assertEqual(int(enriched.loc[0, "Followers"]), 12_000)
 
         cache_section = APP_SOURCE.split(
             "def direct_creator_profile_metrics_v68_58", 1

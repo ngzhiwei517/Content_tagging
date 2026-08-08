@@ -8,7 +8,8 @@ normalizes Instagram posts into that canonical shape before Gemini runs.
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -390,6 +391,123 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         normalized["error"] = _text(raw.get("error")) or record_error
         normalized["errorCode"] = _text(raw.get("errorCode")) or record_error
     return normalized
+
+
+# -----------------------------------------------------------------------------
+# Best-effort public retrieval without Apify
+# -----------------------------------------------------------------------------
+
+
+DirectInstagramExtractor = Callable[[str], Optional[Dict]]
+
+
+def _default_direct_instagram_extract(url: str) -> Optional[Dict]:
+    """Read one public post's metadata without downloading or retaining media."""
+    try:
+        import yt_dlp
+    except ImportError as exc:  # pragma: no cover - dependency contract
+        raise RuntimeError("Missing dependency: install yt-dlp.") from exc
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 1,
+        "extractor_retries": 1,
+        "format": "worst[height>=360]/best[height<=720]/worst",
+    }
+    with yt_dlp.YoutubeDL(options) as downloader:
+        result = downloader.extract_info(url, download=False)
+    return result if isinstance(result, dict) else None
+
+
+def _direct_instagram_username(info: Dict) -> str:
+    """Prefer a public username and never expose a numeric internal account ID."""
+    for value in (
+        info.get("channel"),
+        info.get("uploader_id"),
+        info.get("channel_id"),
+        info.get("uploader"),
+    ):
+        candidate = _text(value).lstrip("@")
+        if candidate and not candidate.isdigit():
+            return candidate
+    return ""
+
+
+def _usable_direct_instagram_info(info: Optional[Dict]) -> bool:
+    if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
+        return False
+    return bool(info.get("id") and (info.get("url") or info.get("formats")))
+
+
+def _direct_instagram_record(requested_url: str, info: Dict) -> Dict:
+    """Map yt-dlp metadata through the existing canonical Instagram adapter."""
+    canonical_url = _text(info.get("webpage_url")) or requested_url
+    username = _direct_instagram_username(info)
+    tags = info.get("tags") if isinstance(info.get("tags"), list) else []
+    raw = {
+        "id": _text(info.get("id")),
+        "shortCode": instagram_shortcode(canonical_url) or instagram_shortcode(requested_url),
+        "url": canonical_url,
+        "caption": _text(info.get("description") or info.get("title")),
+        "videoUrl": _text(info.get("url")),
+        "thumbnailUrl": _text(info.get("thumbnail")),
+        "videoDuration": _number(info.get("duration")),
+        "ownerUsername": username,
+        "ownerFullName": _text(info.get("uploader") or info.get("channel")),
+        "ownerFollowersCount": _number(info.get("channel_follower_count")),
+        "videoViewCount": _number(info.get("view_count")),
+        "likesCount": _number(info.get("like_count")),
+        "commentsCount": _number(info.get("comment_count")),
+        "timestamp": info.get("timestamp") or info.get("upload_date") or "",
+        "musicName": _text(info.get("track")),
+        "musicAuthor": _text(info.get("artist")),
+        "hashtags": [_text(tag).lstrip("#") for tag in tags if _text(tag)],
+        "type": "Video",
+        "productType": "clips",
+    }
+    record = normalize_instagram_record(raw, requested_url)
+    record["_scrape_provider"] = "direct_yt_dlp"
+    return record
+
+
+def scrape_instagram_posts_direct(
+    links: Iterable[str],
+    *,
+    extractor: Optional[DirectInstagramExtractor] = None,
+    max_workers: int = 4,
+) -> Tuple[List[Dict], List[str]]:
+    """Return direct records and links that still require the Apify fallback."""
+    requested = [
+        _text(link) for link in links or [] if is_instagram_post_url(_text(link))
+    ]
+    extractor = extractor or _default_direct_instagram_extract
+
+    def extract_one(link: str):
+        try:
+            info = extractor(link)
+        except Exception:
+            return None
+        if not _usable_direct_instagram_info(info):
+            return None
+        return _direct_instagram_record(link, info)
+
+    if len(requested) > 1:
+        workers = max(1, min(int(max_workers), len(requested)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            extracted = list(executor.map(extract_one, requested))
+    else:
+        extracted = [extract_one(link) for link in requested]
+
+    records = [record for record in extracted if isinstance(record, dict)]
+    fallback_links = [
+        link for link, record in zip(requested, extracted) if not isinstance(record, dict)
+    ]
+    return records, fallback_links
 
 
 # -----------------------------------------------------------------------------
