@@ -221,6 +221,15 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertTrue(pd.isna(rows.loc[0, "Shares"]))
         self.assertTrue(pd.isna(rows.loc[0, "Saves"]))
 
+    def test_instagram_file_without_view_column_marks_views_unavailable(self):
+        text = (
+            "Instagram Reel URL,Like Count\n"
+            "https://www.instagram.com/reel/DExampleAbC1/,250\n"
+        )
+        rows, _ = self.parse(text, name="instagram.csv")
+        self.assertEqual(rows.loc[0, "Metrics Unavailable"], "Views, Shares, Saves")
+        self.assertTrue(pd.isna(rows.loc[0, "Views"]))
+
     def test_mixed_platform_file_detects_each_row_from_its_link(self):
         text = (
             "Link,Market,Track Name\n"
@@ -378,6 +387,29 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertTrue(pd.isna(summary.loc[0, "Saves"]))
         self.assertTrue(pd.isna(summary.loc[0, "Average_Shares_Rate"]))
         self.assertTrue(pd.isna(summary.loc[0, "Average_Saves_Rate"]))
+
+    def test_instagram_unavailable_views_and_view_based_rates_remain_missing(self):
+        frame = pd.DataFrame([{
+            "Platform": INSTAGRAM_REELS,
+            "Market": "",
+            "Views": 0,
+            "Likes": 100,
+            "Comments": 10,
+            "Shares": 0,
+            "Saves": 0,
+            "Metrics Unavailable": "Views, Shares, Saves",
+        }])
+        result = self.add_performance_fields(frame)
+        self.assertTrue(pd.isna(result.loc[0, "Views"]))
+        for rate in [
+            "Engagement Rate", "Likes Rate", "Comments Rate", "Shares Rate", "Saves Rate",
+        ]:
+            with self.subTest(rate=rate):
+                self.assertTrue(pd.isna(result.loc[0, rate]))
+                self.assertEqual(
+                    self.format_display_value(rate, result.loc[0, rate]),
+                    "Not available",
+                )
 
     def test_restricted_post_metrics_remain_missing_instead_of_zero(self):
         frame = pd.DataFrame([{

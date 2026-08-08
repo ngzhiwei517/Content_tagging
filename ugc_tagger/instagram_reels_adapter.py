@@ -380,6 +380,14 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         "instagramMetricsUnavailable": [
             name
             for name, top_keys, metric_keys in (
+                (
+                    "Views",
+                    (
+                        "videoPlayCount", "videoViewCount", "viewCount", "playsCount",
+                        "play_count", "ig_play_count", "view_count",
+                    ),
+                    ("play_count", "ig_play_count", "view_count"),
+                ),
                 ("Shares", ("sharesCount", "shareCount", "shares", "share_count"), ("share_count",)),
                 ("Saves", ("savesCount", "saveCount", "saves", "save_count"), ("save_count",)),
             )
@@ -460,7 +468,6 @@ def _direct_instagram_record(requested_url: str, info: Dict) -> Dict:
         "ownerUsername": username,
         "ownerFullName": _text(info.get("uploader") or info.get("channel")),
         "ownerFollowersCount": _number(info.get("channel_follower_count")),
-        "videoViewCount": _number(info.get("view_count")),
         "likesCount": _number(info.get("like_count")),
         "commentsCount": _number(info.get("comment_count")),
         "timestamp": info.get("timestamp") or info.get("upload_date") or "",
@@ -470,6 +477,11 @@ def _direct_instagram_record(requested_url: str, info: Dict) -> Dict:
         "type": "Video",
         "productType": "clips",
     }
+    # Preserve the difference between a confirmed zero and a metric Instagram
+    # did not return. The normalizer uses key presence to mark missing metrics
+    # as unavailable, so an absent view count must not be coerced to zero here.
+    if info.get("view_count") is not None:
+        raw["videoViewCount"] = _number(info.get("view_count"))
     record = normalize_instagram_record(raw, requested_url)
     record["_scrape_provider"] = "direct_yt_dlp"
     return record
@@ -504,9 +516,19 @@ def scrape_instagram_posts_direct(
         extracted = [extract_one(link) for link in requested]
 
     records = [record for record in extracted if isinstance(record, dict)]
-    fallback_links = [
-        link for link, record in zip(requested, extracted) if not isinstance(record, dict)
-    ]
+    fallback_links = []
+    for link, record in zip(requested, extracted):
+        if not isinstance(record, dict):
+            fallback_links.append(link)
+            continue
+        unavailable = {
+            _text(metric).casefold()
+            for metric in record.get("instagramMetricsUnavailable", [])
+        }
+        # Direct retrieval can return playable media while omitting Reel views.
+        # Ask the existing Apify adapter for only those partial records.
+        if "views" in unavailable:
+            fallback_links.append(link)
     return records, fallback_links
 
 

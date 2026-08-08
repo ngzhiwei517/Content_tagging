@@ -838,9 +838,52 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
         records.extend(tiktok_records)
     if instagram_links:
         direct_records, fallback_links = scrape_instagram_posts_direct(instagram_links)
-        records.extend(direct_records)
+        fallback_records: List[Dict] = []
         if fallback_links:
-            records.extend(scrape_instagram_posts(fallback_links, apify_token))
+            try:
+                fallback_records = scrape_instagram_posts(fallback_links, apify_token)
+            except Exception:
+                direct_by_id, direct_by_url = index_records(direct_records)
+                fully_missing = [
+                    link
+                    for link in fallback_links
+                    if not isinstance(
+                        match_record({"Link": link}, direct_by_id, direct_by_url),
+                        dict,
+                    )
+                ]
+                if fully_missing:
+                    raise
+
+        direct_by_id, direct_by_url = index_records(direct_records)
+        fallback_by_id, fallback_by_url = index_records(fallback_records)
+        instagram_records: List[Dict] = []
+        for link in instagram_links:
+            direct_record = match_record({"Link": link}, direct_by_id, direct_by_url)
+            fallback_record = match_record({"Link": link}, fallback_by_id, fallback_by_url)
+            fallback_unavailable = {
+                _text(metric).casefold()
+                for metric in (
+                    fallback_record.get("instagramMetricsUnavailable", [])
+                    if isinstance(fallback_record, dict)
+                    else []
+                )
+            }
+            fallback_has_views = (
+                isinstance(fallback_record, dict)
+                and not _text(fallback_record.get("error") or fallback_record.get("errorCode"))
+                and "views" not in fallback_unavailable
+            )
+            selected = (
+                fallback_record
+                if fallback_has_views
+                else direct_record
+                if isinstance(direct_record, dict)
+                else fallback_record
+            )
+            if isinstance(selected, dict):
+                instagram_records.append(selected)
+        records.extend(instagram_records)
     return records
 
 

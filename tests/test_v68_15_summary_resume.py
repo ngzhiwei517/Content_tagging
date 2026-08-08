@@ -605,6 +605,23 @@ class SummaryV6815Tests(unittest.TestCase):
         for column in ["Average Engagement Rate", "Shares Rate", "Saves Rate"]:
             self.assertIn(table[column].dtype.kind, "f")
 
+    def test_sortable_tables_preserve_missing_views_instead_of_zero(self):
+        summary = self.prepare_summary_table(
+            pd.DataFrame([{"Track": "Song", "Posts": 1, "Average Views": pd.NA}]),
+            ["Track", "Posts", "Average Views"],
+        )
+        self.assertTrue(pd.isna(summary.loc[0, "Average Views"]))
+
+        top_posts = self.prepare_top_posts(pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Creator": "creator",
+            "Views": pd.NA,
+            "Total Engagement": 100,
+            "Link": "https://www.instagram.com/reel/DExampleAbC1/",
+        }]))
+        self.assertTrue(pd.isna(top_posts.loc[0, "Views"]))
+        self.assertTrue(pd.isna(top_posts.loc[0, "Engagement Rate"]))
+
 
 if __name__ == "__main__":
     unittest.main()
