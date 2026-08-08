@@ -271,6 +271,14 @@ class CsvCompatibilityTests(unittest.TestCase):
             upload_section.count("render_uploaded_track_catalog_feedback_v68_62("),
             2,
         )
+        self.assertIn(
+            "shared_artist = render_uploaded_track_catalog_feedback_v68_62(",
+            upload_section,
+        )
+        self.assertIn(
+            "fallback_artist = render_uploaded_track_catalog_feedback_v68_62(",
+            upload_section,
+        )
         self.assertIn("shared_track,\n                        shared_artist", upload_section)
         self.assertIn("fallback_track,\n                            fallback_artist", upload_section)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)

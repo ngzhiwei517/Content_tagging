@@ -51,7 +51,12 @@ class AutoTrackDetectionTests(unittest.TestCase):
         self.assertIn("disabled=not safe_str(paste_track)", app_source)
         self.assertIn("Enter a track name before adding links to the batch.", app_source)
         self.assertIn('"Track": safe_str(paste_track)', app_source)
-        self.assertIn('"Campaign Artist": safe_str(paste_artist)', app_source)
+        self.assertIn('resolved_paste_artist = safe_str(paste_artist)', app_source)
+        self.assertIn(
+            'not resolved_paste_artist and track_status.get("status") == "matched"',
+            app_source,
+        )
+        self.assertIn('"Campaign Artist": resolved_paste_artist', app_source)
 
     def test_track_information_note_precedes_pasted_track_input_and_explains_artist_disambiguation(self):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text(

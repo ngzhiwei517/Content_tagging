@@ -1025,13 +1025,14 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
 def render_uploaded_track_catalog_feedback_v68_62(
     track: str,
     artist: str = "",
-) -> None:
-    """Confirm an uploaded file's track with the same cached Apple lookup."""
+) -> str:
+    """Confirm an uploaded track and return the manual or matched artist."""
     track = safe_str(track)
+    artist = safe_str(artist)
     if not track:
-        return
+        return artist
     lookup_value = " - ".join(
-        part for part in [safe_str(artist), track] if part
+        part for part in [artist, track] if part
     )
     with st.spinner("Checking the track name..."):
         track_status = campaign_track_catalog_status_v68_36(lookup_value)
@@ -1052,6 +1053,11 @@ def render_uploaded_track_catalog_feedback_v68_62(
             "Check the spelling. You can still continue because regional, niche, "
             "or unreleased tracks may not be listed."
         )
+    if artist:
+        return artist
+    if track_status.get("status") == "matched":
+        return safe_str(track_status.get("artist_name"))
+    return ""
 
 
 CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
@@ -4891,7 +4897,7 @@ if st.session_state.step == 2:
                             placeholder="Artist name",
                             key="shared_uploaded_campaign_artist_v68_51",
                         )
-                    render_uploaded_track_catalog_feedback_v68_62(
+                    shared_artist = render_uploaded_track_catalog_feedback_v68_62(
                         shared_track,
                         shared_artist,
                     )
@@ -4916,7 +4922,7 @@ if st.session_state.step == 2:
                                 placeholder="Artist name",
                                 key=f"uploaded_file_artist_v68_51_{file_key}",
                             )
-                        render_uploaded_track_catalog_feedback_v68_62(
+                        fallback_artist = render_uploaded_track_catalog_feedback_v68_62(
                             fallback_track,
                             fallback_artist,
                         )
@@ -5027,6 +5033,7 @@ if st.session_state.step == 2:
         campaign_track_lookup = " - ".join(
             part for part in [safe_str(paste_artist), safe_str(paste_track)] if part
         )
+        track_status: Dict[str, str] = {}
         with c1:
             if safe_str(paste_track):
                 with st.spinner("Checking the track name..."):
@@ -5048,6 +5055,9 @@ if st.session_state.step == 2:
                         "Check the spelling. You can still continue because regional, niche, "
                         "or unreleased tracks may not be listed."
                     )
+        resolved_paste_artist = safe_str(paste_artist)
+        if not resolved_paste_artist and track_status.get("status") == "matched":
+            resolved_paste_artist = safe_str(track_status.get("artist_name"))
         with c3:
             market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
             paste_market = "" if market_choice == "Other / no market" else market_choice
@@ -5078,7 +5088,7 @@ if st.session_state.step == 2:
                         # comparison while the adapter preserves platform audio
                         # metadata separately.
                         "Track": safe_str(paste_track),
-                        "Campaign Artist": safe_str(paste_artist),
+                        "Campaign Artist": resolved_paste_artist,
                         "Viral Date": "",
                         "Date": "",
                         "Creator": extract_creator(l),
