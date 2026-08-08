@@ -378,8 +378,10 @@ class SummaryV6815Tests(unittest.TestCase):
         )[0]
         self.assertIn("Fetch profile metrics", creator_section)
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
-        self.assertNotIn("scrape_creator_profile_metrics", creator_section)
-        self.assertNotIn("apify_token", creator_section)
+        self.assertIn("scrape_creator_profile_metrics", creator_section)
+        self.assertIn("instagram_fallback_targets", creator_section)
+        self.assertIn('safe_str(target.get("Platform")) == INSTAGRAM_REELS', creator_section)
+        self.assertIn('fallback_token', creator_section)
         self.assertIn("st.number_input", creator_section)
         self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
         self.assertIn('min_value=1', creator_section)

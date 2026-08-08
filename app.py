@@ -46,6 +46,7 @@ from ugc_tagger.creator_profile_enrichment import (
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
     profile_history_settings,
+    scrape_creator_profile_metrics,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -4581,6 +4582,8 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             profile_frames = []
             failed_profile_frames = []
             profile_errors = []
+            instagram_fallback_targets = []
+            instagram_direct_failures = []
             if not targets_to_fetch.empty:
                 progress_bar = st.progress(0)
                 try:
@@ -4609,12 +4612,66 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     exc,
                                 )
                                 unavailable_metrics = getattr(exc, "profile_metrics", None)
-                                if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                    failed_profile_frames.append(unavailable_metrics)
-                                profile_errors.append(safe_str(exc))
+                                if safe_str(target.get("Platform")) == INSTAGRAM_REELS:
+                                    instagram_fallback_targets.append({
+                                        "Platform": INSTAGRAM_REELS,
+                                        "Creator": safe_str(target.get("Creator")),
+                                    })
+                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                        instagram_direct_failures.append(unavailable_metrics)
+                                else:
+                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                        failed_profile_frames.append(unavailable_metrics)
+                                    profile_errors.append(safe_str(exc))
                             progress_bar.progress(
                                 position / max(len(targets_to_fetch), 1)
                             )
+                        if instagram_fallback_targets:
+                            fallback_token = (
+                                _managed_api_secret_v68_43("APIFY_TOKEN")
+                                or clean_api_secret(
+                                    st.session_state.get("apify_token", "")
+                                    or st.session_state.get("apify_token_input_v52", "")
+                                    or st.session_state.get("apify_token_input", "")
+                                )
+                            )
+                            if fallback_token:
+                                try:
+                                    fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
+                                        pd.DataFrame(instagram_fallback_targets),
+                                        fallback_token,
+                                        months=3,
+                                        post_limit=history_post_limit,
+                                    )
+                                    if not fallback_metrics.empty:
+                                        fallback_metrics["Profile History Mode"] = history_mode
+                                        fallback_metrics["Profile Fetched At"] = datetime.now(
+                                            timezone.utc
+                                        ).isoformat()
+                                        fallback_unavailable = fallback_metrics[
+                                            fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                        ]
+                                        fallback_successful = fallback_metrics[
+                                            ~fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                        ]
+                                        if not fallback_successful.empty:
+                                            profile_frames.append(fallback_successful)
+                                        if not fallback_unavailable.empty:
+                                            failed_profile_frames.append(fallback_unavailable)
+                                    else:
+                                        failed_profile_frames.extend(instagram_direct_failures)
+                                    profile_errors.extend(fallback_errors)
+                                except Exception:
+                                    failed_profile_frames.extend(instagram_direct_failures)
+                                    profile_errors.append(
+                                        "Instagram profile fallback could not be completed in this run."
+                                    )
+                            else:
+                                failed_profile_frames.extend(instagram_direct_failures)
+                                profile_errors.append(
+                                    "Some Instagram profiles could not be retrieved anonymously. "
+                                    "Configure the existing Apify token to use the fallback."
+                                )
                 finally:
                     progress_bar.empty()
 
