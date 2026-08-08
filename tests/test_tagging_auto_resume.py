@@ -348,10 +348,7 @@ class AutoResumeQueryTests(unittest.TestCase):
             step_four.index("_tagging_active_job_matches_v68_55("),
             step_four.index("try_acquire_execution("),
         )
-        self.assertIn(
-            'disabled=bool(\n                st.session_state.get("tagging_job_active_v68_43", False)',
-            step_four,
-        )
+        self.assertNotIn('"Analysis model (optional)"', step_four)
         runner = APP_SOURCE.split(
             "def _run_checkpointed_tag_every_link_v68_43",
             1,

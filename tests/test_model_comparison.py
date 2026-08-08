@@ -182,9 +182,10 @@ class ModelComparisonTests(unittest.TestCase):
             tagged = tag_candidates(candidates, records, "key", "token")
         self.assertFalse(bool(tagged.loc[0, "Gemini Called"]))
 
-    def test_ui_and_qa_export_expose_comparison_metadata(self):
+    def test_ui_hides_model_selector_while_qa_export_keeps_model_metadata(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn('"Analysis model (optional)"', source)
+        self.assertNotIn('"Analysis model (optional)"', source)
+        self.assertNotIn('"Gemini model for this run"', source)
         self.assertNotIn("gemini-3.1-pro-preview", source)
         self.assertIn('"Gemini Model", "Gemini Called", "Comparison Run ID", "Run Started UTC", "Run Elapsed Seconds"', source)
         self.assertIn('f"review_qa_report_{export_model_slug}.xlsx"', source)

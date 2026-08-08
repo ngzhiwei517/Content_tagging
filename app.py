@@ -49,7 +49,6 @@ from ugc_tagger.creator_profile_enrichment import (
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
-    GEMINI_MODEL_OPTIONS,
     gemini_model_label,
     gemini_model_slug,
     normalize_gemini_model,
@@ -5485,20 +5484,6 @@ elif st.session_state.step == 4:
         ("Selection", st.session_state.get("selection_mode", "Top posts"), "Method"),
     ]), unsafe_allow_html=True)
     st.markdown(render_table(selected, max_rows=10, cols=["Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
-    with st.expander("Analysis model (optional)", expanded=False):
-        st.selectbox(
-            "Gemini model for this run",
-            options=list(GEMINI_MODEL_OPTIONS.keys()),
-            format_func=gemini_model_label,
-            key="qa_gemini_model_v68_41_4",
-            disabled=bool(
-                st.session_state.get("tagging_job_active_v68_43", False)
-            ),
-            help="3.1 Flash-Lite is recommended for routine batches. 3.5 Flash is slower and is available for smaller ambiguous batches.",
-        )
-        st.caption(
-            "The recommended model is faster. The slower option may improve a small number of ambiguous comedy or motion cases."
-        )
     # Keep the same escalation path for either approved model. The active
     # backend only reaches full-video analysis when cover, 3-frame and 9-frame
     # evidence remain unresolved.
