@@ -4788,6 +4788,7 @@ if st.session_state.step == 2:
         summary_rows = []
         errors = []
         if files:
+            missing_track_files = []
             with st.expander("Confirm details for uploaded files", expanded=True):
                 apply_shared_campaign = True
                 if len(files) > 1:
@@ -4822,7 +4823,7 @@ if st.session_state.step == 2:
                     shared_track_col, shared_artist_col = st.columns(2)
                     with shared_track_col:
                         shared_track = st.text_input(
-                            "Track name (optional)",
+                            "Track name",
                             placeholder="Track name",
                             key="shared_uploaded_campaign_track_v68_51",
                         )
@@ -4843,7 +4844,7 @@ if st.session_state.step == 2:
                         file_track_col, file_artist_col = st.columns(2)
                         with file_track_col:
                             fallback_track = st.text_input(
-                                "Track name (optional)",
+                                "Track name",
                                 placeholder="Track name",
                                 key=f"uploaded_file_track_v68_51_{file_key}",
                             )
@@ -4853,6 +4854,7 @@ if st.session_state.step == 2:
                                 placeholder="Artist name",
                                 key=f"uploaded_file_artist_v68_51_{file_key}",
                             )
+                    fallback_track = safe_str(fallback_track)
                     try:
                         df = read_any_table(f)
                         detected_cols = detect_columns(df)
@@ -4890,6 +4892,8 @@ if st.session_state.step == 2:
                             fallback_track=fallback_track,
                             fallback_artist=fallback_artist,
                         )
+                        if not std.empty and not fallback_track:
+                            missing_track_files.append(f.name)
                         parsed_frames.append(std)
                         platforms = sorted([
                             p for p in std.get("Platform", pd.Series(dtype=str)).fillna("").unique().tolist()
@@ -4917,7 +4921,14 @@ if st.session_state.step == 2:
                 st.markdown("<div class='warn-note'>" + "<br>".join(map(esc, errors)) + "</div>", unsafe_allow_html=True)
             combined_upload = pd.concat(parsed_frames, ignore_index=True) if parsed_frames else pd.DataFrame()
             if not combined_upload.empty:
-                if st.button("Add uploaded rows to batch", type="primary", width="stretch"):
+                if missing_track_files:
+                    st.caption("Enter a track name for each uploaded file before adding it to the batch.")
+                if st.button(
+                    "Add uploaded rows to batch",
+                    type="primary",
+                    width="stretch",
+                    disabled=bool(missing_track_files),
+                ):
                     added, skipped = append_to_batch(combined_upload)
                     st.session_state.last_message = f"Added {added} uploaded rows. Skipped {skipped} duplicate rows."
                     st.rerun()
@@ -4936,9 +4947,8 @@ if st.session_state.step == 2:
         c1, c2, c3 = st.columns([1.05, 0.85, 0.75])
         with c1:
             paste_track = st.text_input(
-                "Campaign track / sound name (optional)",
+                "Track name",
                 placeholder="Song title",
-                help="Enter the song title. If left blank, the app will use the detected platform audio name.",
                 key="pasted_campaign_track_v68_39",
             )
         with c2:
@@ -4978,7 +4988,14 @@ if st.session_state.step == 2:
         links = parse_links(link_text)
         market_label = paste_market if paste_market else "Other"
         st.markdown(f"<div class='pill-row'><span class='pill green'>Links detected: {len(links)}</span><span class='pill blue'>Market: {esc(market_label)}</span></div>", unsafe_allow_html=True)
-        if st.button("Add pasted links to batch", type="primary", width="stretch"):
+        if not safe_str(paste_track):
+            st.caption("Enter a track name before adding links to the batch.")
+        if st.button(
+            "Add pasted links to batch",
+            type="primary",
+            width="stretch",
+            disabled=not safe_str(paste_track),
+        ):
             if not links:
                 st.warning("Paste at least one valid TikTok or Instagram post link first.")
             else:
@@ -4991,9 +5008,9 @@ if st.session_state.step == 2:
                         "Input Type": "Pasted",
                         "Link": l,
                         "Market": paste_market,
-                        # Keep the user-entered campaign track for audio-version
-                        # comparison. When blank, the adapter falls back to the
-                        # scraped platform music metadata during tagging.
+                        # Keep the required user-entered track for audio-version
+                        # comparison while the adapter preserves platform audio
+                        # metadata separately.
                         "Track": safe_str(paste_track),
                         "Campaign Artist": safe_str(paste_artist),
                         "Viral Date": "",
