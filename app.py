@@ -4326,9 +4326,19 @@ def prepare_sortable_summary_table_v68_46(
                 table[column].astype(str).str.replace(",", "", regex=False),
                 errors="coerce",
             )
-            table[column] = (
-                numeric.astype("Int64") if numeric.isna().any() else numeric.astype("int64")
-            )
+            has_fractional_values = numeric.dropna().map(
+                lambda value: not float(value).is_integer()
+            ).any()
+            if has_fractional_values:
+                # Average metrics can be fractional. Keep them numeric for
+                # Streamlit sorting instead of forcing an unsafe Int64 cast.
+                table[column] = numeric.astype("float64")
+            else:
+                table[column] = (
+                    numeric.astype("Int64")
+                    if numeric.isna().any()
+                    else numeric.astype("int64")
+                )
         elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
             table[column] = pd.to_numeric(
                 table[column].astype(str).str.replace("%", "", regex=False),

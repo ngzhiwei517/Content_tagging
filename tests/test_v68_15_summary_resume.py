@@ -607,10 +607,15 @@ class SummaryV6815Tests(unittest.TestCase):
 
     def test_sortable_tables_preserve_missing_views_instead_of_zero(self):
         summary = self.prepare_summary_table(
-            pd.DataFrame([{"Track": "Song", "Posts": 1, "Average Views": pd.NA}]),
+            pd.DataFrame([
+                {"Track": "Song A", "Posts": 1, "Average Views": 12.5},
+                {"Track": "Song B", "Posts": 1, "Average Views": pd.NA},
+            ]),
             ["Track", "Posts", "Average Views"],
         )
-        self.assertTrue(pd.isna(summary.loc[0, "Average Views"]))
+        self.assertEqual(summary.loc[0, "Average Views"], 12.5)
+        self.assertTrue(pd.isna(summary.loc[1, "Average Views"]))
+        self.assertEqual(summary["Average Views"].dtype.kind, "f")
 
         top_posts = self.prepare_top_posts(pd.DataFrame([{
             "Platform": "Instagram Reels",
