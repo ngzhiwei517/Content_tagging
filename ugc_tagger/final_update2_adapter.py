@@ -31,6 +31,7 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
+from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
 
 
 # Keep the runtime version beside the UI/backend schema boundary.  Importing
@@ -462,6 +463,28 @@ def _creator_followers(record: Dict) -> int:
     return _number(author.get("fans") or author.get("followers") or author.get("followerCount"))
 
 
+def _creator_handle_from_post_url(url: str) -> str:
+    match = re.search(r"tiktok\.com/@([^/?#]+)", _text(url), flags=re.IGNORECASE)
+    return match.group(1).strip().lstrip("@") if match else ""
+
+
+def _resolved_creator_handle(original: Dict, tagged: Dict) -> str:
+    """Prefer a public username and never display TikTok's numeric account ID."""
+    link_handle = _creator_handle_from_post_url(
+        tagged.get("tiktok_url") or original.get("Link")
+    )
+    for value in (
+        tagged.get("creator_handle"),
+        tagged.get("creator"),
+        original.get("Creator"),
+        link_handle,
+    ):
+        candidate = _text(value).lstrip("@")
+        if candidate and not candidate.isdigit() and candidate not in {"—", "-"}:
+            return candidate
+    return link_handle
+
+
 def _record_music_name(record: Dict) -> str:
     """Return TikTok's scraped sound title without requiring user input."""
     music = record.get("musicMeta") if isinstance(record.get("musicMeta"), dict) else {}
@@ -625,7 +648,7 @@ def _to_ui_row(original, tagged, raw_record: Dict) -> Dict:
         ),
         "Original Sound": _text(original_dict.get("Original Sound")) or music_name,
         "Source": _text(original_dict.get("Source")) or _text(tagged_dict.get("source_file")),
-        "Creator": _text(tagged_dict.get("creator_handle")) or _text(tagged_dict.get("creator")) or _text(original_dict.get("Creator")),
+        "Creator": _resolved_creator_handle(original_dict, tagged_dict),
         "Creator Display": _text(tagged_dict.get("creator_display")),
         "Caption": _text(tagged_dict.get("caption")) or _text(original_dict.get("Caption")),
         "Followers": _creator_followers(raw_record) or _number(original_dict.get("Followers")),
@@ -760,7 +783,7 @@ MAX_APIFY_POSTS_PER_REQUEST = 25
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
-    """Route each supported post URL to its platform-specific Apify adapter."""
+    """Use direct TikTok retrieval first, with platform adapters as fallback."""
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
     if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
@@ -785,7 +808,12 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
             resolved_links = [resolve_tiktok_short_url(link) for link in tiktok_links]
         tiktok_requests = list(zip(tiktok_links, resolved_links))
         actor_links = [resolved for _, resolved in tiktok_requests]
-        tiktok_records = list(backend.run_apify_tiktok_scraper_api(actor_links, apify_token))
+        direct_records, fallback_links = scrape_tiktok_posts_direct(actor_links)
+        tiktok_records = list(direct_records)
+        if fallback_links:
+            tiktok_records.extend(
+                backend.run_apify_tiktok_scraper_api(fallback_links, apify_token)
+            )
         for record in tiktok_records:
             if isinstance(record, dict):
                 record.setdefault("_platform", TIKTOK)

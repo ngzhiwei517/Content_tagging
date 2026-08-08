@@ -27,6 +27,9 @@ class ApifyBatchLimitTests(unittest.TestCase):
     def test_twenty_five_posts_are_allowed(self):
         backend = _Backend()
         with patch(
+            "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
+            return_value=([], self.links(MAX_APIFY_POSTS_PER_REQUEST)),
+        ), patch(
             "ugc_tagger.final_update2_adapter.load_backend",
             return_value=backend,
         ):
@@ -37,6 +40,9 @@ class ApifyBatchLimitTests(unittest.TestCase):
     def test_twenty_six_posts_are_rejected_before_apify_is_called(self):
         backend = _Backend()
         with patch(
+            "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
+            return_value=([], self.links(MAX_APIFY_POSTS_PER_REQUEST + 1)),
+        ), patch(
             "ugc_tagger.final_update2_adapter.load_backend",
             return_value=backend,
         ), self.assertRaisesRegex(ValueError, "APIFY_BATCH_LIMIT_EXCEEDED"):

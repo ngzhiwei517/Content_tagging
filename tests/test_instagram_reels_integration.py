@@ -217,6 +217,9 @@ class TikTokShortLinkTests(unittest.TestCase):
             "ugc_tagger.final_update2_adapter.load_backend",
             return_value=fake_backend,
         ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
+            return_value=([], [self.CANONICAL_URL]),
+        ), patch(
             "ugc_tagger.final_update2_adapter.resolve_tiktok_short_url",
             return_value=self.CANONICAL_URL,
         ):
@@ -434,6 +437,9 @@ class InstagramScrapeTests(unittest.TestCase):
             ]
         )
         with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=fake_backend), patch(
+            "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
+            return_value=([], [tiktok_url]),
+        ), patch(
             "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
             return_value=[normalize_instagram_record(instagram_video_record(), VIDEO_URL)],
         ) as ig_scrape:
