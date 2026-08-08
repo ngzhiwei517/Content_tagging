@@ -45,6 +45,7 @@ from ugc_tagger.creator_profile_enrichment import (
     creator_key,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    instagram_profile_requires_fallback,
     profile_history_settings,
     scrape_creator_profile_metrics,
 )
@@ -1740,6 +1741,58 @@ def add_performance_fields(df: pd.DataFrame) -> pd.DataFrame:
         return existing if existing and existing.lower() != "unknown" else "Unknown"
 
     out["KOL Size"] = out.apply(resolved_kol_size, axis=1)
+    return out
+
+
+def apply_profile_followers_v68_64(
+    rows: pd.DataFrame,
+    profile_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """Backfill zero batch followers from successfully fetched profile metrics."""
+    if not isinstance(rows, pd.DataFrame) or rows.empty:
+        return rows
+    if not isinstance(profile_metrics, pd.DataFrame) or profile_metrics.empty:
+        return rows
+    required = {"Platform", "Creator Key", "Current Followers"}
+    if not required.issubset(profile_metrics.columns):
+        return rows
+
+    out = rows.copy()
+    if "Platform" not in out.columns or "Creator" not in out.columns:
+        return out
+    if "Followers" not in out.columns:
+        out["Followers"] = 0
+    if "KOL Size" not in out.columns:
+        out["KOL Size"] = ""
+
+    lookup_rows = profile_metrics.copy()
+    lookup_rows["Current Followers"] = pd.to_numeric(
+        lookup_rows["Current Followers"], errors="coerce"
+    ).fillna(0)
+    lookup_rows = lookup_rows[lookup_rows["Current Followers"].gt(0)].drop_duplicates(
+        ["Platform", "Creator Key"], keep="last"
+    )
+    follower_lookup = {
+        (safe_str(platform), safe_str(key)): clean_num(followers)
+        for platform, key, followers in zip(
+            lookup_rows["Platform"],
+            lookup_rows["Creator Key"],
+            lookup_rows["Current Followers"],
+        )
+    }
+    for index, row in out.iterrows():
+        if clean_num(row.get("Followers")) > 0:
+            continue
+        followers = follower_lookup.get(
+            (safe_str(row.get("Platform")), creator_key(row.get("Creator"))),
+            0,
+        )
+        if followers <= 0:
+            continue
+        out.at[index, "Followers"] = followers
+        calculated_kol = kol_size_for_market(followers, row.get("Market"))
+        if calculated_kol != "Unknown":
+            out.at[index, "KOL Size"] = calculated_kol
     return out
 
 
@@ -4595,15 +4648,24 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             targets_to_fetch.iterrows(), start=1
                         ):
                             try:
-                                profile_frames.append(
-                                    direct_creator_profile_metrics_v68_58(
-                                        safe_str(target.get("Platform")),
-                                        safe_str(target.get("Creator")),
-                                        history_mode=history_mode,
-                                        months=3,
-                                        post_limit=history_post_limit,
-                                    )
+                                direct_metrics = direct_creator_profile_metrics_v68_58(
+                                    safe_str(target.get("Platform")),
+                                    safe_str(target.get("Creator")),
+                                    history_mode=history_mode,
+                                    months=3,
+                                    post_limit=history_post_limit,
                                 )
+                                if (
+                                    safe_str(target.get("Platform")) == INSTAGRAM_REELS
+                                    and instagram_profile_requires_fallback(direct_metrics)
+                                ):
+                                    instagram_fallback_targets.append({
+                                        "Platform": INSTAGRAM_REELS,
+                                        "Creator": safe_str(target.get("Creator")),
+                                    })
+                                    instagram_direct_failures.append(direct_metrics)
+                                else:
+                                    profile_frames.append(direct_metrics)
                             except Exception as exc:
                                 LOGGER.warning(
                                     "Direct creator profile lookup failed for %s/%s: %s",
@@ -6247,6 +6309,10 @@ elif st.session_state.step == 6:
         if col not in work.columns:
             work[col] = 0
         work[col] = work[col].map(clean_num)
+    work = apply_profile_followers_v68_64(
+        work,
+        st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame()),
+    )
     work = preserve_unavailable_metric_blanks(work)
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)

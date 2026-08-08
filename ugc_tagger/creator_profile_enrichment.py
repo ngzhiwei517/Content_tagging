@@ -991,7 +991,35 @@ def fetch_direct_creator_profile_metrics(
         metrics.loc[mask & ~has_posts, "Profile Data Status"] = (
             "No recent public posts (followers unavailable)"
         )
+    instagram_public = (
+        metrics["Platform"].eq(INSTAGRAM_REELS)
+        & metrics["Profile Data Status"].eq("Available")
+    )
+    metrics.loc[instagram_public, "Profile Data Status"] = (
+        "Available (public metrics; shares/saves unavailable)"
+    )
     return metrics, errors
+
+
+def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
+    """Return True when direct Instagram results are missing essential fields."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return True
+    required = {"Platform", "Profile Data Status", "Current Followers"}
+    if not required.issubset(metrics.columns):
+        return True
+    instagram = metrics[metrics.get("Platform", pd.Series(dtype=str)).eq(INSTAGRAM_REELS)]
+    if instagram.empty:
+        return True
+    status = instagram.get(
+        "Profile Data Status", pd.Series("", index=instagram.index, dtype=str)
+    ).fillna("").astype(str)
+    followers = pd.to_numeric(
+        instagram.get("Current Followers", 0), errors="coerce"
+    ).fillna(0)
+    incomplete_status = status.str.startswith(("Unavailable", "Partial"))
+    followers_missing = followers.le(0)
+    return bool((incomplete_status | followers_missing).any())
 
 
 def scrape_creator_profile_metrics(

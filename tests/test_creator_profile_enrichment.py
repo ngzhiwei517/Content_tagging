@@ -21,6 +21,7 @@ from ugc_tagger.creator_profile_enrichment import (
     _extract_tiktok_user_full_window,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    instagram_profile_requires_fallback,
     normalize_creator_handle,
     profile_history_settings,
     profile_scope_count,
@@ -62,6 +63,26 @@ class _FakeClient:
 
 
 class CreatorProfileEnrichmentTests(unittest.TestCase):
+    def test_instagram_profile_fallback_requires_followers_and_complete_history(self):
+        base = pd.DataFrame([{
+            "Platform": INSTAGRAM_REELS,
+            "Current Followers": 800,
+            "Profile Data Status": "Available (public metrics; shares/saves unavailable)",
+        }])
+        self.assertFalse(instagram_profile_requires_fallback(base))
+
+        no_recent = base.copy()
+        no_recent["Profile Data Status"] = "No recent public posts"
+        self.assertFalse(instagram_profile_requires_fallback(no_recent))
+
+        missing_followers = base.copy()
+        missing_followers["Current Followers"] = 0
+        self.assertTrue(instagram_profile_requires_fallback(missing_followers))
+
+        partial = base.copy()
+        partial["Profile Data Status"] = "Partial (full history may be incomplete)"
+        self.assertTrue(instagram_profile_requires_fallback(partial))
+
     def test_instagram_profile_extractor_is_metadata_only_and_stops_at_cutoff(self):
         posts = [
             types.SimpleNamespace(
@@ -358,7 +379,10 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         status_by_creator = metrics.set_index("Profile Creator")["Profile Data Status"].to_dict()
         self.assertEqual(status_by_creator["good"], "Available")
         self.assertEqual(status_by_creator["broken"], "Unavailable")
-        self.assertEqual(status_by_creator["ig-user"], "Available")
+        self.assertEqual(
+            status_by_creator["ig-user"],
+            "Available (public metrics; shares/saves unavailable)",
+        )
         self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("good"), "Profile Posts"].iloc[0]), 1)
         self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("ig-user"), "Profile Posts"].iloc[0]), 1)
         self.assertEqual(int(metrics.loc[metrics["Profile Creator"].eq("ig-user"), "Current Followers"].iloc[0]), 800)
