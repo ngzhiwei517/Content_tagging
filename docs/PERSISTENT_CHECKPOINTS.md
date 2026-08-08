@@ -36,9 +36,9 @@ state and sanitized tagging objects. Gemini/Apify/database credentials,
 downloaded media, binary media fields and local media paths are excluded.
 Recovery IDs are private bearer identifiers and should not be shared publicly.
 
-Users normally select **Save this batch** and bookmark or copy the private link.
-The recovery ID stays inside that link. The **Open a saved batch** area accepts
-the raw ID only as a fallback when someone no longer has the full link.
+Progress is saved automatically. The private `run` value in the current browser
+URL identifies the batch and lets the app restore it after a reconnect or
+restart. Keep that URL private because anyone with it can reopen the batch.
 
 Remote checkpointing starts only after the current workflow contains at least
 one post. Opening an empty app session does not create a Supabase/Postgres row;

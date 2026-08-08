@@ -245,9 +245,9 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertIn('st.tabs(["Upload post files", "Paste post links"])', APP_SOURCE)
         self.assertIn("fallback_market=fallback_market", APP_SOURCE)
         self.assertIn('st.expander("Confirm details for uploaded files"', APP_SOURCE)
-        self.assertIn("Apply the same track and artist to all uploaded files", APP_SOURCE)
+        self.assertIn("Use the same track and artist for all files", APP_SOURCE)
         shared_toggle_block = APP_SOURCE.split(
-            '"Apply the same track and artist to all uploaded files"', 1
+            '"Use the same track and artist for all files"', 1
         )[1].split(")", 1)[0]
         self.assertIn("key=shared_campaign_toggle_key", shared_toggle_block)
         self.assertIn(
@@ -265,6 +265,12 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertIn("fallback_track=fallback_track", APP_SOURCE)
         self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)
+        self.assertIn('"Track name (optional)"', APP_SOURCE)
+        self.assertIn('"Artist (optional)"', APP_SOURCE)
+        self.assertNotIn("Add the campaign track to group all sounds", APP_SOURCE)
+        self.assertNotIn('f"Campaign track - {f.name}"', APP_SOURCE)
+        self.assertNotIn('f"Artist - {f.name} (optional)"', APP_SOURCE)
+        self.assertNotIn("Market in file:", APP_SOURCE)
         self.assertIn("links = parse_links(link_text)", APP_SOURCE)
         self.assertIn('"Platform": detected_platform', APP_SOURCE)
 

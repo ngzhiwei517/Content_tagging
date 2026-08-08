@@ -407,15 +407,15 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             APP_SOURCE,
         )
 
-    def test_latest_managed_secret_and_marketer_recovery_contract_remain(self):
+    def test_managed_secrets_and_automatic_recovery_remain_without_manual_controls(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
-        self.assertIn('"Save this batch"', APP_SOURCE)
-        self.assertIn("Copy the private link below to continue later", APP_SOURCE)
-        self.assertIn('with st.expander("Open a saved batch"', APP_SOURCE)
-        self.assertIn("If you only have a recovery ID", APP_SOURCE)
+        self.assertNotIn('key="runtime_save_batch_button_v68_44"', APP_SOURCE)
+        self.assertNotIn('with st.expander("Open a saved batch"', APP_SOURCE)
+        self.assertNotIn('key="runtime_recovery_button_v68_44"', APP_SOURCE)
+        self.assertIn("_restore_runtime_checkpoint_v68_15()", APP_SOURCE)
+        self.assertIn("_persist_runtime_checkpoint_v68_15()", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)
-        self.assertIn("if _runtime_checkpoint_has_posts_v68_44(st.session_state):", APP_SOURCE)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', APP_SOURCE)
 
     def test_save_link_hides_recovery_id_inside_the_url(self):
