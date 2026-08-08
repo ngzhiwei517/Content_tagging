@@ -31,6 +31,7 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
+from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
 
 
 # Keep the runtime version beside the UI/backend schema boundary.  Importing
@@ -760,7 +761,7 @@ MAX_APIFY_POSTS_PER_REQUEST = 25
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
-    """Route each supported post URL to its platform-specific Apify adapter."""
+    """Use direct TikTok retrieval first, with platform adapters as fallback."""
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
     if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
@@ -785,7 +786,12 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
             resolved_links = [resolve_tiktok_short_url(link) for link in tiktok_links]
         tiktok_requests = list(zip(tiktok_links, resolved_links))
         actor_links = [resolved for _, resolved in tiktok_requests]
-        tiktok_records = list(backend.run_apify_tiktok_scraper_api(actor_links, apify_token))
+        direct_records, fallback_links = scrape_tiktok_posts_direct(actor_links)
+        tiktok_records = list(direct_records)
+        if fallback_links:
+            tiktok_records.extend(
+                backend.run_apify_tiktok_scraper_api(fallback_links, apify_token)
+            )
         for record in tiktok_records:
             if isinstance(record, dict):
                 record.setdefault("_platform", TIKTOK)

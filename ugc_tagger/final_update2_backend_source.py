@@ -1252,6 +1252,11 @@ def download_image_bytes(url, apify_token):
     headers = {}
     if 'api.apify.com' in url:
         headers = {'Authorization': f'Bearer {apify_token}'}
+    elif 'tiktok' in str(url).lower():
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': 'https://www.tiktok.com/',
+        }
     r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
     return r.content
@@ -1260,6 +1265,28 @@ def download_video(video_url, output_path, apify_token):
     # Clockworks media can require the Apify bearer token. Instagram's actor
     # returns a direct CDN URL, where an unrelated Authorization header can be
     # rejected by the CDN.
+    if 'tiktok.com' in str(video_url).lower():
+        try:
+            import yt_dlp
+        except ImportError as exc:
+            raise RuntimeError('Missing dependency: install yt-dlp.') from exc
+        options = {
+            'quiet': True,
+            'no_warnings': True,
+            'noprogress': True,
+            'noplaylist': True,
+            'outtmpl': output_path,
+            'format': 'worst[height>=360]/best[height<=720]/worst',
+            'socket_timeout': 45,
+            'retries': 1,
+            'extractor_retries': 1,
+        }
+        with yt_dlp.YoutubeDL(options) as downloader:
+            downloader.extract_info(video_url, download=True)
+        if not os.path.exists(output_path):
+            raise RuntimeError('Direct TikTok media download did not produce a file.')
+        return output_path
+
     headers = {'Authorization': f'Bearer {apify_token}'} if 'api.apify.com' in str(video_url) else {}
     r = requests.get(video_url, headers=headers, timeout=90)
     r.raise_for_status()

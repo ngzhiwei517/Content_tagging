@@ -3281,8 +3281,8 @@ def _run_checkpointed_tag_every_link_v68_43(
                 if is_supported_link(row.get("Link"))
             ]
             status.write(
-                f"Collecting public post data for {len(links):,} post(s) from "
-                "Apify, then saving it before continuing..."
+                f"Collecting public data for {len(links):,} post(s) using "
+                "direct retrieval first, with Apify fallback..."
             )
             new_records = final_update2_scrape_links(links, apify_token)
             new_records = list(new_records or [])
@@ -3325,7 +3325,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 store.mark_continuation_ready(manifest)
                 return None
         else:
-            status.write("Reusing the saved Apify result for this chunk.")
+            status.write("Reusing the saved public post data for this chunk.")
 
         def on_result(input_position: int, tagged_row: Dict, tier: str):
             chunk_position = remaining_positions[int(input_position)]
@@ -3587,7 +3587,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     while not pending.empty:
         links = [safe_str(link) for link in pending["Link"].tolist() if is_supported_link(link)]
         status.markdown(
-            f"<div class='good-note'>Scraping and tagging {len(links)} post(s) with {esc(gemini_model_label(comparison_model))}...</div>",
+            f"<div class='good-note'>Collecting and tagging {len(links)} post(s) with {esc(gemini_model_label(comparison_model))}...</div>",
             unsafe_allow_html=True,
         )
         try:
