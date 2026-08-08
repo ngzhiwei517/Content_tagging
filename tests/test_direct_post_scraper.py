@@ -28,6 +28,7 @@ def _video_info(url):
         "view_count": 123,
         "like_count": 12,
         "comment_count": 3,
+        "save_count": 7,
         "duration": 9,
         "thumbnail": "https://cdn.example/cover.jpg",
     }
@@ -48,6 +49,7 @@ class DirectPostScraperTests(unittest.TestCase):
         self.assertEqual(records[0]["_scrape_provider"], "direct_yt_dlp")
         self.assertEqual(records[0]["mediaUrls"], [link])
         self.assertEqual(records[0]["playCount"], 123)
+        self.assertEqual(records[0]["collectCount"], 7)
         self.assertEqual(records[0]["videoMeta.duration"], 9)
         self.assertEqual(records[0]["authorMeta.name"], "creator")
 

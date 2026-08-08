@@ -104,7 +104,7 @@ def _direct_record(requested_url: str, info: Dict) -> Dict:
         "diggCount": _number(info.get("like_count")),
         "commentCount": _number(info.get("comment_count")),
         "shareCount": _number(info.get("repost_count")),
-        "collectCount": 0,
+        "collectCount": _number(info.get("save_count")),
         "authorMeta": {
             "name": uploader_id,
             "nickName": display_name,
