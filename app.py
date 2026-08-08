@@ -4759,27 +4759,6 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         unsafe_allow_html=True,
     )
 
-if _runtime_checkpoint_has_posts_v68_44(st.session_state):
-    if st.button(
-        "Save this batch",
-        icon=":material/bookmark:",
-        key="runtime_save_batch_button_v68_44",
-    ):
-        _show_runtime_save_dialog_v68_44()
-
-with st.expander("Open a saved batch", expanded=False):
-    st.caption("Normally, just open your saved link. If you only have a recovery ID, paste it here.")
-    recovery_id_input = st.text_input(
-        "Recovery ID",
-        placeholder="Paste a 32-character recovery ID",
-        key="runtime_recovery_input_v68_44",
-    )
-    if st.button("Open saved batch", key="runtime_recovery_button_v68_44"):
-        if _request_runtime_recovery_v68_44(recovery_id_input):
-            st.rerun()
-        else:
-            st.error("No saved batch was found for that recovery ID.")
-
 # STEP 2: Add posts
 if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
@@ -4810,10 +4789,6 @@ if st.session_state.step == 2:
         errors = []
         if files:
             with st.expander("Confirm details for uploaded files", expanded=True):
-                st.caption(
-                    "Add the campaign track to group all sounds from a file into one campaign summary. "
-                    "Original sound names remain available in Sound Breakdown."
-                )
                 apply_shared_campaign = True
                 if len(files) > 1:
                     shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"
@@ -4838,7 +4813,7 @@ if st.session_state.step == 2:
                     elif shared_campaign_toggle_key not in st.session_state:
                         st.session_state[shared_campaign_toggle_key] = False
                     apply_shared_campaign = st.toggle(
-                        "Apply the same track and artist to all uploaded files",
+                        "Use the same track and artist for all files",
                         key=shared_campaign_toggle_key,
                     )
                 shared_track = ""
@@ -4847,19 +4822,16 @@ if st.session_state.step == 2:
                     shared_track_col, shared_artist_col = st.columns(2)
                     with shared_track_col:
                         shared_track = st.text_input(
-                            "Campaign track / sound name (recommended)",
-                            placeholder="e.g. Hate That I Made You Love Me",
+                            "Track name (optional)",
+                            placeholder="Track name",
                             key="shared_uploaded_campaign_track_v68_51",
-                            help="Groups every original sound in the selected file or files into one campaign.",
                         )
                     with shared_artist_col:
                         shared_artist = st.text_input(
-                            "Artist name (optional)",
-                            placeholder="e.g. Ariana Grande",
+                            "Artist (optional)",
+                            placeholder="Artist name",
                             key="shared_uploaded_campaign_artist_v68_51",
-                            help="Useful when different artists have tracks with the same title.",
                         )
-                st.caption("Markets in each file are kept. Otherwise, the app detects prefixes such as [TH] or [SG].")
                 for f in files:
                     file_key = hashlib.sha1(
                         f"{f.name}:{len(f.getvalue())}".encode("utf-8")
@@ -4871,13 +4843,13 @@ if st.session_state.step == 2:
                         file_track_col, file_artist_col = st.columns(2)
                         with file_track_col:
                             fallback_track = st.text_input(
-                                f"Campaign track - {f.name}",
+                                "Track name (optional)",
                                 placeholder="Track name",
                                 key=f"uploaded_file_track_v68_51_{file_key}",
                             )
                         with file_artist_col:
                             fallback_artist = st.text_input(
-                                f"Artist - {f.name} (optional)",
+                                "Artist (optional)",
                                 placeholder="Artist name",
                                 key=f"uploaded_file_artist_v68_51_{file_key}",
                             )
@@ -4894,13 +4866,11 @@ if st.session_state.step == 2:
 
                         fallback_market = ""
                         market_source = "From file"
-                        if explicit_markets:
-                            st.caption(f"{f.name} — Market in file: {', '.join(explicit_markets)}")
-                        else:
+                        if not explicit_markets:
                             filename_market = infer_market_from_filename(f.name)
                             default_choice = filename_market or "Other / no market"
                             market_choice = st.selectbox(
-                                f.name,
+                                "Market",
                                 MARKET_OPTIONS,
                                 index=MARKET_OPTIONS.index(default_choice),
                                 key=f"uploaded_file_market_v68_45_{file_key}",
