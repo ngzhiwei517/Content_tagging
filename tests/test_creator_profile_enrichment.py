@@ -10,6 +10,7 @@ from ugc_tagger.creator_profile_enrichment import (
     DEFAULT_PROFILE_HISTORY_MODE,
     DEFAULT_PROFILE_POST_LIMIT,
     FULL_PROFILE_POST_CEILING,
+    INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
     INSTAGRAM_PROFILE_ACTOR_ID,
     PROFILE_HISTORY_FULL,
     PROFILE_HISTORY_LATEST,
@@ -153,6 +154,7 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             ("Latest 20 (fast)", "Full 3 months"),
         )
         self.assertEqual(FULL_PROFILE_POST_CEILING, 2000)
+        self.assertEqual(INSTAGRAM_APIFY_FALLBACK_POST_LIMIT, 20)
         self.assertEqual(profile_history_settings(PROFILE_HISTORY_LATEST, 999), (PROFILE_HISTORY_LATEST, 20))
         self.assertEqual(profile_history_settings(PROFILE_HISTORY_FULL, 1), (PROFILE_HISTORY_FULL, 2000))
         self.assertEqual(profile_history_settings("unexpected", 7), (PROFILE_HISTORY_LATEST, 7))
@@ -237,6 +239,32 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         )
         self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
         self.assertEqual(instagram_posts_input["resultsLimit"], 20)
+
+    def test_instagram_apify_fallback_stays_at_twenty_for_full_history_request(self):
+        client = _FakeClient({
+            f"{INSTAGRAM_PROFILE_ACTOR_ID}:posts": [],
+            f"{INSTAGRAM_PROFILE_ACTOR_ID}:details": [],
+        })
+
+        scrape_creator_profile_metrics(
+            [{"Platform": INSTAGRAM_REELS, "Creator": "alice"}],
+            "test-token",
+            client=client,
+            months=3,
+            post_limit=FULL_PROFILE_POST_CEILING,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        instagram_posts_input = next(
+            run_input for actor_id, run_input in client.calls
+            if actor_id == INSTAGRAM_PROFILE_ACTOR_ID
+            and run_input.get("resultsType") == "posts"
+        )
+        self.assertEqual(
+            instagram_posts_input["resultsLimit"],
+            INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
+        )
+        self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
 
     def test_missing_token_is_rejected_without_a_client(self):
         with self.assertRaisesRegex(RuntimeError, "Missing Apify token"):

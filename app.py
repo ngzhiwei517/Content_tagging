@@ -41,6 +41,7 @@ from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.creator_profile_enrichment import (
     DEFAULT_PROFILE_HISTORY_MODE,
     DEFAULT_PROFILE_POST_LIMIT,
+    INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
     PROFILE_HISTORY_FULL,
     creator_key,
     creator_profile_url,
@@ -4738,7 +4739,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         pd.DataFrame(instagram_fallback_targets),
                                         fallback_token,
                                         months=3,
-                                        post_limit=history_post_limit,
+                                        post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
                                     )
                                     if not fallback_metrics.empty:
                                         fallback_metrics["Profile History Mode"] = history_mode
@@ -4750,8 +4751,15 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         ]
                                         fallback_successful = fallback_metrics[
                                             ~fallback_metrics["Profile Data Status"].eq("Unavailable")
-                                        ]
+                                        ].copy()
                                         if not fallback_successful.empty:
+                                            available_fallback = fallback_successful[
+                                                "Profile Data Status"
+                                            ].astype(str).str.startswith("Available")
+                                            fallback_successful.loc[
+                                                available_fallback,
+                                                "Profile Data Status",
+                                            ] = "Available (Apify fallback: latest 20 posts)"
                                             profile_frames.append(fallback_successful)
                                         if not fallback_unavailable.empty:
                                             failed_profile_frames.append(fallback_unavailable)
