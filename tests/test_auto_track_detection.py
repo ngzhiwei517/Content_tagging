@@ -42,12 +42,14 @@ class AutoTrackDetectionTests(unittest.TestCase):
             "Detected song",
         )
 
-    def test_pasted_link_ui_keeps_manual_campaign_track_override(self):
+    def test_pasted_link_ui_requires_manual_track_name(self):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"Campaign track / sound name (optional)"', app_source)
+        self.assertIn('paste_track = st.text_input(\n                "Track name"', app_source)
         self.assertIn('"Artist name (optional)"', app_source)
+        self.assertIn("disabled=not safe_str(paste_track)", app_source)
+        self.assertIn("Enter a track name before adding links to the batch.", app_source)
         self.assertIn('"Track": safe_str(paste_track)', app_source)
         self.assertIn('"Campaign Artist": safe_str(paste_artist)', app_source)
 
@@ -58,7 +60,7 @@ class AutoTrackDetectionTests(unittest.TestCase):
         paste_section = app_source[app_source.index("with paste_tab:"):]
         self.assertLess(
             paste_section.index('st.info(drama_audio_note'),
-            paste_section.index('"Campaign track / sound name (optional)"'),
+            paste_section.index('paste_track = st.text_input(\n                "Track name"'),
         )
         self.assertIn("fill in the optional Artist field", paste_section)
         self.assertIn("campaign_track_lookup", paste_section)

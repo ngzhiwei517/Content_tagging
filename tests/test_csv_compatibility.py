@@ -265,8 +265,15 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertIn("fallback_track=fallback_track", APP_SOURCE)
         self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
         self.assertIn('key=f"uploaded_file_market_v68_45_', APP_SOURCE)
-        self.assertIn('"Track name (optional)"', APP_SOURCE)
+        self.assertIn('"Track name"', APP_SOURCE)
         self.assertIn('"Artist (optional)"', APP_SOURCE)
+        self.assertNotIn('"Track name (optional)"', APP_SOURCE)
+        self.assertIn("missing_track_files = []", APP_SOURCE)
+        self.assertIn("disabled=bool(missing_track_files)", APP_SOURCE)
+        self.assertIn(
+            "Enter a track name for each uploaded file before adding it to the batch.",
+            APP_SOURCE,
+        )
         self.assertNotIn("Add the campaign track to group all sounds", APP_SOURCE)
         self.assertNotIn('f"Campaign track - {f.name}"', APP_SOURCE)
         self.assertNotIn('f"Artist - {f.name} (optional)"', APP_SOURCE)
