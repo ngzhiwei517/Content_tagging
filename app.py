@@ -2254,7 +2254,7 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
 
 
 def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
-    """Extract campaign track and artist from common Instagram export names.
+    """Extract campaign track and artist from common platform export names.
 
     Supported example:
     ``2026-07-20_TheOneThatGotAway_KatyPerry_posts_instagram (1).csv``.
@@ -2266,7 +2266,7 @@ def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
     stem = re.sub(r"\.(?:csv|xlsx?|xls)$", "", basename, flags=re.I)
     stem = re.sub(r"\s*\(\d+\)$", "", stem)
     match = re.match(
-        r"^\d{4}-\d{1,2}-\d{1,2}_(.+)_posts_instagram$",
+        r"^\d{4}-\d{1,2}-\d{1,2}_(.+)_posts_(?:instagram|tiktok)$",
         stem,
         flags=re.I,
     )
@@ -2282,6 +2282,33 @@ def instagram_export_campaign_context(source_name: str) -> Tuple[str, str]:
         return " ".join(text.split())
 
     return humanize(track_token), humanize(artist_token)
+
+
+def infer_track_from_filename(source_name: str) -> str:
+    """Return a conservative, editable track suggestion from a filename."""
+    export_track, _export_artist = instagram_export_campaign_context(source_name)
+    if export_track:
+        return export_track
+
+    basename = re.split(r"[\\/]", safe_str(source_name))[-1]
+    stem = re.sub(r"\.(?:csv|xlsx?|xls)$", "", basename, flags=re.I)
+    stem = re.sub(r"\s*\(\d+\)$", "", stem)
+    stem = re.sub(r"^\s*[\[(][^\])]+[\])]\s*", "", stem)
+    stem = re.sub(r"^\d{4}[-_.]\d{1,2}[-_.]\d{1,2}[_\s-]*", "", stem)
+    parts = [part.strip() for part in re.split(r"\s+-\s+", stem) if part.strip()]
+    if len(parts) < 2:
+        return ""
+
+    metadata_pattern = re.compile(
+        r"\b(?:post\s*data|posts?|export|report|dataset|instagram|tiktok)\b",
+        flags=re.I,
+    )
+    if metadata_pattern.search(parts[-1]):
+        candidate = parts[-2] if len(parts) >= 3 else parts[0]
+    else:
+        # The common human-readable convention is ``Artist - Track``.
+        candidate = parts[1]
+    return " ".join(candidate.split())
 
 
 def is_opaque_instagram_sound_id(value) -> bool:
@@ -5016,17 +5043,38 @@ if st.session_state.step == 2:
         if files:
             missing_track_files = []
             with st.expander("Confirm details for uploaded files", expanded=True):
+                uploaded_files_signature = tuple(
+                    (
+                        safe_str(getattr(uploaded_file, "file_id", "")),
+                        safe_str(uploaded_file.name),
+                        int(getattr(uploaded_file, "size", 0) or 0),
+                    )
+                    for uploaded_file in files
+                )
+                inferred_tracks = [
+                    infer_track_from_filename(uploaded_file.name)
+                    for uploaded_file in files
+                ]
+                unique_inferred_tracks = list(dict.fromkeys(
+                    track for track in inferred_tracks if track
+                ))
+                track_prefill_signature_key = "uploaded_track_prefill_signature_v68_63"
+                if (
+                    st.session_state.get(track_prefill_signature_key)
+                    != uploaded_files_signature
+                ):
+                    # Prefill once for each newly selected file set. Subsequent
+                    # reruns preserve any correction typed by the user.
+                    st.session_state[track_prefill_signature_key] = uploaded_files_signature
+                    st.session_state["shared_uploaded_campaign_track_v68_51"] = (
+                        unique_inferred_tracks[0]
+                        if len(unique_inferred_tracks) == 1
+                        else ""
+                    )
+                    st.session_state["shared_uploaded_campaign_artist_v68_51"] = ""
                 apply_shared_campaign = True
                 if len(files) > 1:
                     shared_campaign_toggle_key = "apply_shared_uploaded_campaign_v68_52"
-                    uploaded_files_signature = tuple(
-                        (
-                            safe_str(getattr(uploaded_file, "file_id", "")),
-                            safe_str(uploaded_file.name),
-                            int(getattr(uploaded_file, "size", 0) or 0),
-                        )
-                        for uploaded_file in files
-                    )
                     signature_state_key = "uploaded_campaign_files_signature_v68_52"
                     if (
                         st.session_state.get(signature_state_key)
@@ -5052,6 +5100,7 @@ if st.session_state.step == 2:
                             "Track name",
                             placeholder="Track name",
                             key="shared_uploaded_campaign_track_v68_51",
+                            help="Detected from the filename when possible. Change it if needed.",
                         )
                     with shared_artist_col:
                         shared_artist = st.text_input(
@@ -5071,12 +5120,18 @@ if st.session_state.step == 2:
                     fallback_artist = safe_str(shared_artist)
                     if not apply_shared_campaign:
                         st.markdown(f"**{esc(f.name)}**")
+                        file_track_key = f"uploaded_file_track_v68_51_{file_key}"
+                        if file_track_key not in st.session_state:
+                            st.session_state[file_track_key] = infer_track_from_filename(
+                                f.name
+                            )
                         file_track_col, file_artist_col = st.columns(2)
                         with file_track_col:
                             fallback_track = st.text_input(
                                 "Track name",
                                 placeholder="Track name",
-                                key=f"uploaded_file_track_v68_51_{file_key}",
+                                key=file_track_key,
+                                help="Detected from the filename when possible. Change it if needed.",
                             )
                         with file_artist_col:
                             fallback_artist = st.text_input(

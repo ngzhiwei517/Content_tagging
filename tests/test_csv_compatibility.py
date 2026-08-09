@@ -94,6 +94,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "detect_col",
             "detect_columns",
             "instagram_export_campaign_context",
+            "infer_track_from_filename",
             "is_opaque_instagram_sound_id",
             "coalesce_duplicate_batch_rows",
         ]:
@@ -117,6 +118,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.display_market = staticmethod(namespace["display_market"])
         cls.normalize_market = staticmethod(namespace["normalize_market"])
         cls.infer_market_from_filename = staticmethod(namespace["infer_market_from_filename"])
+        cls.infer_track_from_filename = staticmethod(namespace["infer_track_from_filename"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
         cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
         cls.format_display_value = staticmethod(namespace["format_display_value"])
@@ -181,6 +183,35 @@ class CsvCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(self.infer_market_from_filename("(Malaysia) campaign.xlsx"), "MY")
         self.assertEqual(self.infer_market_from_filename("campaign.csv"), "")
+
+    def test_human_readable_filename_prefills_track(self):
+        self.assertEqual(
+            self.infer_track_from_filename(
+                "[MY] Justin Bieber - Love Yourself - Oct 2025 Post Data.csv"
+            ),
+            "Love Yourself",
+        )
+        self.assertEqual(
+            self.infer_track_from_filename("[TH] Justin Bieber - Love Yourself.csv"),
+            "Love Yourself",
+        )
+
+    def test_platform_export_filename_prefills_track(self):
+        self.assertEqual(
+            self.infer_track_from_filename(
+                "2026-07-31_HateThatIMadeYouLoveMe_ArianaGrande_posts_tiktok.csv"
+            ),
+            "Hate That I Made You Love Me",
+        )
+        self.assertEqual(
+            self.infer_track_from_filename(
+                "2026-08-7_TheOneThatGotAway_KatyPerry_posts_instagram.csv"
+            ),
+            "The One That Got Away",
+        )
+
+    def test_ambiguous_filename_does_not_guess_track(self):
+        self.assertEqual(self.infer_track_from_filename("campaign.csv"), "")
 
     def test_file_market_fallback_fills_missing_market(self):
         text = (
@@ -273,6 +304,10 @@ class CsvCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("fallback_track=fallback_track", APP_SOURCE)
         self.assertIn("fallback_artist=fallback_artist", APP_SOURCE)
+        self.assertIn("infer_track_from_filename(uploaded_file.name)", APP_SOURCE)
+        self.assertIn("infer_track_from_filename(\n                                f.name", APP_SOURCE)
+        self.assertIn("uploaded_track_prefill_signature_v68_63", APP_SOURCE)
+        self.assertIn("Detected from the filename when possible. Change it if needed.", APP_SOURCE)
         upload_section = APP_SOURCE.split("with add_tab:", 1)[1].split(
             "with paste_tab:", 1
         )[0]
