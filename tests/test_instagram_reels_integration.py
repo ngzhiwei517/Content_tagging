@@ -497,6 +497,50 @@ class InstagramScrapeTests(unittest.TestCase):
         self.assertEqual(records[0]["playCount"], 5000)
         apify_scrape.assert_called_once_with([VIDEO_URL], "token")
 
+    def test_adapter_reuses_uploaded_views_without_apify_for_partial_direct_record(self):
+        direct_raw = instagram_video_record()
+        direct_raw.pop("videoPlayCount")
+        direct_record = normalize_instagram_record(direct_raw, VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([direct_record], [VIDEO_URL]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts"
+        ) as apify_scrape:
+            records = scrape_links(
+                [VIDEO_URL],
+                "token",
+                known_instagram_views={normalize_post_url(VIDEO_URL): 4321},
+            )
+        self.assertEqual(records, [direct_record])
+        self.assertEqual(records[0]["playCount"], 4321)
+        self.assertNotIn("Views", records[0]["instagramMetricsUnavailable"])
+        self.assertEqual(records[0]["_views_source"], "uploaded_file")
+        apify_scrape.assert_not_called()
+
+    def test_uploaded_views_do_not_skip_apify_when_direct_scrape_fails(self):
+        fallback_record = normalize_instagram_record(instagram_video_record(), VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([], [VIDEO_URL]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
+            return_value=[fallback_record],
+        ) as apify_scrape:
+            records = scrape_links(
+                [VIDEO_URL],
+                "token",
+                known_instagram_views={normalize_post_url(VIDEO_URL): 4321},
+            )
+        self.assertEqual(records, [fallback_record])
+        apify_scrape.assert_called_once_with([VIDEO_URL], "token")
+
     def test_adapter_keeps_partial_direct_record_when_apify_has_no_views(self):
         direct_raw = instagram_video_record()
         direct_raw.pop("videoPlayCount")

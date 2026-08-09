@@ -783,8 +783,41 @@ def enrich_review_drama(
 MAX_APIFY_POSTS_PER_REQUEST = 25
 
 
-def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
-    """Use direct TikTok retrieval first, with platform adapters as fallback."""
+def _known_instagram_view(
+    known_instagram_views: Optional[Dict[str, int]],
+    link: str,
+) -> Optional[int]:
+    """Return an explicitly supplied file view count for one Instagram URL."""
+    if not known_instagram_views:
+        return None
+    normalized = normalize_post_url(link)
+    identifier = post_identifier(link)
+    for key in (normalized, link, identifier):
+        if key and key in known_instagram_views:
+            return _number(known_instagram_views[key])
+    return None
+
+
+def _apply_known_instagram_view(record: Dict, views: int) -> Dict:
+    """Fill one direct record from uploaded metrics without changing its media."""
+    record["playCount"] = _number(views)
+    unavailable = record.get("instagramMetricsUnavailable", [])
+    if not isinstance(unavailable, list):
+        unavailable = []
+    record["instagramMetricsUnavailable"] = [
+        metric for metric in unavailable if _text(metric).casefold() != "views"
+    ]
+    record["_views_source"] = "uploaded_file"
+    return record
+
+
+def scrape_links(
+    links: List[str],
+    apify_token: str,
+    *,
+    known_instagram_views: Optional[Dict[str, int]] = None,
+) -> List[Dict]:
+    """Use direct retrieval first and avoid repeating uploaded IG view metrics."""
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
     if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
@@ -838,15 +871,30 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
         records.extend(tiktok_records)
     if instagram_links:
         direct_records, fallback_links = scrape_instagram_posts_direct(instagram_links)
+        direct_by_id, direct_by_url = index_records(direct_records)
+        paid_fallback_links: List[str] = []
+        for link in fallback_links:
+            direct_record = match_record({"Link": link}, direct_by_id, direct_by_url)
+            known_views = _known_instagram_view(known_instagram_views, link)
+            if isinstance(direct_record, dict) and known_views is not None:
+                _apply_known_instagram_view(direct_record, known_views)
+            else:
+                # A missing direct record still needs Apify for usable post/media
+                # data. A partial record needs it only when uploaded Views are
+                # unavailable too.
+                paid_fallback_links.append(link)
+
         fallback_records: List[Dict] = []
-        if fallback_links:
+        if paid_fallback_links:
             try:
-                fallback_records = scrape_instagram_posts(fallback_links, apify_token)
+                fallback_records = scrape_instagram_posts(
+                    paid_fallback_links,
+                    apify_token,
+                )
             except Exception:
-                direct_by_id, direct_by_url = index_records(direct_records)
                 fully_missing = [
                     link
-                    for link in fallback_links
+                    for link in paid_fallback_links
                     if not isinstance(
                         match_record({"Link": link}, direct_by_id, direct_by_url),
                         dict,
@@ -855,7 +903,6 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
                 if fully_missing:
                     raise
 
-        direct_by_id, direct_by_url = index_records(direct_records)
         fallback_by_id, fallback_by_url = index_records(fallback_records)
         instagram_records: List[Dict] = []
         for link in instagram_links:

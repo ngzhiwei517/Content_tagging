@@ -1665,6 +1665,31 @@ def metric_is_available(row, metric: str) -> bool:
     return safe_str(metric).strip().lower() not in unavailable
 
 
+def uploaded_instagram_views(rows) -> Dict[str, int]:
+    """Index valid Instagram Views supplied by uploaded input rows.
+
+    The availability marker distinguishes an explicit zero from the default
+    zero used when an uploaded file or pasted link did not provide Views.
+    """
+    if isinstance(rows, pd.DataFrame):
+        input_rows = [row for _, row in rows.iterrows()]
+    elif isinstance(rows, pd.Series):
+        input_rows = [rows]
+    else:
+        input_rows = list(rows or [])
+
+    known: Dict[str, int] = {}
+    for row in input_rows:
+        link = safe_str(row.get("Link"))
+        platform = safe_str(row.get("Platform")) or platform_for_url(link)
+        if platform != INSTAGRAM_REELS or not metric_is_available(row, "Views"):
+            continue
+        normalized = final_update2_normalize_url(link)
+        if normalized:
+            known[normalized] = clean_num(row.get("Views"))
+    return known
+
+
 def available_metric_rate(row, metric: str) -> float:
     """Calculate a rate, preserving unavailable platform metrics as missing."""
     if not metric_is_available(row, metric) or not metric_is_available(row, "Views"):
@@ -3413,7 +3438,11 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"Collecting public data for {len(links):,} post(s) using "
                 "direct retrieval first, with Apify fallback..."
             )
-            new_records = final_update2_scrape_links(links, apify_token)
+            new_records = final_update2_scrape_links(
+                links,
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(scrape_rows),
+            )
             new_records = list(new_records or [])
             new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
             for row in scrape_rows:
@@ -3720,7 +3749,11 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             unsafe_allow_html=True,
         )
         try:
-            records = final_update2_scrape_links(links, apify_token)
+            records = final_update2_scrape_links(
+                links,
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(pending),
+            )
             cached_records.update(final_update2_review_cache(records))
 
             def on_progress(done: int, total: int, tier: str):
@@ -3818,7 +3851,11 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
     records = [record] if isinstance(record, dict) else []
     if not records and link and apify_token:
         try:
-            records = final_update2_scrape_links([link], apify_token)
+            records = final_update2_scrape_links(
+                [link],
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(pd.DataFrame([row_dict])),
+            )
             cache.update(final_update2_review_cache(records))
             st.session_state.apify_records_by_key = cache
         except Exception as exc:
