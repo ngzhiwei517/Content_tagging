@@ -22,6 +22,7 @@ TIKTOK_PROFILE_ACTOR_ID = "clockworks/tiktok-scraper"
 INSTAGRAM_PROFILE_ACTOR_ID = "apify/instagram-scraper"
 DEFAULT_PROFILE_POST_LIMIT = 20
 FULL_PROFILE_POST_CEILING = 2000
+INSTAGRAM_APIFY_FALLBACK_POST_LIMIT = 20
 PROFILE_HISTORY_LATEST = "Latest 20 (fast)"
 PROFILE_HISTORY_FULL = "Full 3 months"
 PROFILE_HISTORY_OPTIONS = (PROFILE_HISTORY_LATEST, PROFILE_HISTORY_FULL)
@@ -1045,6 +1046,10 @@ def scrape_creator_profile_metrics(
         client = ApifyClient(apify_token)
 
     post_limit = min(max(int(post_limit), 1), 1000)
+    instagram_post_limit = min(
+        post_limit,
+        INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
+    )
     months = max(int(months), 1)
     rows: List[Dict] = []
     errors: List[str] = []
@@ -1082,7 +1087,10 @@ def scrape_creator_profile_metrics(
             items = _run_actor_items(client, INSTAGRAM_PROFILE_ACTOR_ID, {
                 "directUrls": profile_urls,
                 "resultsType": "posts",
-                "resultsLimit": post_limit,
+                # The free direct scraper may inspect the complete three-month
+                # window. Keep the paid Instagram fallback deliberately small
+                # so one blocked profile cannot consume a large Apify quota.
+                "resultsLimit": instagram_post_limit,
                 "onlyPostsNewerThan": f"{months} months",
                 "skipPinnedPosts": True,
             })

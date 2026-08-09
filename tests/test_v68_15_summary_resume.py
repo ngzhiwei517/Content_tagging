@@ -409,6 +409,11 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("profile_history_settings", creator_section)
         self.assertIn("pending_creator_profile_targets_v68_61", creator_section)
         self.assertIn("instagram_profile_requires_fallback", creator_section)
+        self.assertIn(
+            "post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT",
+            creator_section,
+        )
+        self.assertIn("Apify fallback: latest 20 posts", creator_section)
 
     def test_profile_followers_backfill_zero_batch_values_and_kol_size(self):
         rows = pd.DataFrame([{
