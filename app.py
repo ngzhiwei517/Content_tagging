@@ -1068,7 +1068,7 @@ def render_uploaded_track_catalog_feedback_v68_62(
 
 
 CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
-MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65 = 5
+FREE_FOLLOWER_LOOKUP_BATCH_SIZE_V68_68 = 5
 
 
 def creator_profile_direct_failed_v68_66(
@@ -1906,6 +1906,20 @@ def missing_tiktok_follower_targets_v68_65(rows: pd.DataFrame) -> pd.DataFrame:
     return targets.drop_duplicates(
         ["Platform", "Creator Key"], keep="first"
     ).reset_index(drop=True)
+
+
+def tiktok_follower_lookup_batches_v68_68(
+    targets: pd.DataFrame,
+    batch_size: int = FREE_FOLLOWER_LOOKUP_BATCH_SIZE_V68_68,
+) -> List[pd.DataFrame]:
+    """Split pending follower lookups into small internal request batches."""
+    if not isinstance(targets, pd.DataFrame) or targets.empty:
+        return []
+    size = max(1, int(batch_size))
+    return [
+        targets.iloc[start:start + size].copy()
+        for start in range(0, len(targets), size)
+    ]
 
 
 def format_display_value(col: str, val) -> str:
@@ -7262,7 +7276,7 @@ elif st.session_state.step == 6:
                 st.caption(
                     f"{len(missing_follower_targets):,} unique creator"
                     f"{'s' if len(missing_follower_targets) != 1 else ''} can be checked "
-                    "from public TikTok profiles, five at a time. No Apify credits are used."
+                    "from public TikTok profiles in one run. No Apify credits are used."
                 )
             with follower_action_col:
                 fill_followers_clicked = st.button(
@@ -7272,67 +7286,69 @@ elif st.session_state.step == 6:
                     key="fill_missing_tiktok_followers_v68_65",
                 )
             if fill_followers_clicked:
-                targets_to_check = pending_follower_targets.head(
-                    MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65
+                target_batches = tiktok_follower_lookup_batches_v68_68(
+                    pending_follower_targets,
                 )
+                total_targets = len(pending_follower_targets)
+                processed_targets = 0
                 successful_followers = 0
                 filled_rows = 0
                 failed_followers = 0
                 progress_bar = st.progress(0)
                 try:
-                    for position, (_, target) in enumerate(
-                        targets_to_check.iterrows(), start=1
-                    ):
-                        try:
-                            followers = direct_tiktok_profile_followers_v68_65(
-                                safe_str(target.get("Creator Key")),
-                                safe_str(target.get("Link")),
-                            )
-                            if followers > 0:
-                                follower_metrics = pd.DataFrame([{
-                                    "Platform": TIKTOK,
-                                    "Creator Key": safe_str(target.get("Creator Key")),
-                                    "Current Followers": followers,
-                                }])
-                                before_missing = work["Followers"].map(clean_num).le(0)
-                                st.session_state.tagged_df = apply_profile_followers_v68_64(
-                                    st.session_state.tagged_df,
-                                    follower_metrics,
+                    for target_batch in target_batches:
+                        for _, target in target_batch.iterrows():
+                            try:
+                                followers = direct_tiktok_profile_followers_v68_65(
+                                    safe_str(target.get("Creator Key")),
+                                    safe_str(target.get("Link")),
                                 )
-                                qa_all_rows = apply_profile_followers_v68_64(
-                                    qa_all_rows,
-                                    follower_metrics,
+                                if followers > 0:
+                                    follower_metrics = pd.DataFrame([{
+                                        "Platform": TIKTOK,
+                                        "Creator Key": safe_str(target.get("Creator Key")),
+                                        "Current Followers": followers,
+                                    }])
+                                    before_missing = work["Followers"].map(clean_num).le(0)
+                                    st.session_state.tagged_df = apply_profile_followers_v68_64(
+                                        st.session_state.tagged_df,
+                                        follower_metrics,
+                                    )
+                                    qa_all_rows = apply_profile_followers_v68_64(
+                                        qa_all_rows,
+                                        follower_metrics,
+                                    )
+                                    work = apply_profile_followers_v68_64(
+                                        work,
+                                        follower_metrics,
+                                    )
+                                    successful_followers += 1
+                                    filled_rows += int(
+                                        (
+                                            before_missing
+                                            & work["Followers"].map(clean_num).gt(0)
+                                        ).sum()
+                                    )
+                                else:
+                                    failed_followers += 1
+                            except Exception as exc:
+                                LOGGER.warning(
+                                    "Free TikTok follower lookup failed for %s: %s",
+                                    safe_str(target.get("Creator")),
+                                    exc,
                                 )
-                                work = apply_profile_followers_v68_64(
-                                    work,
-                                    follower_metrics,
-                                )
-                                successful_followers += 1
-                                filled_rows += int(
-                                    (
-                                        before_missing
-                                        & work["Followers"].map(clean_num).gt(0)
-                                    ).sum()
-                                )
-                            else:
                                 failed_followers += 1
-                        except Exception as exc:
-                            LOGGER.warning(
-                                "Free TikTok follower lookup failed for %s: %s",
-                                safe_str(target.get("Creator")),
-                                exc,
+                            attempted_follower_keys.add(
+                                safe_str(target.get("Creator Key"))
                             )
-                            failed_followers += 1
-                        attempted_follower_keys.add(
-                            safe_str(target.get("Creator Key"))
-                        )
-                        st.session_state.tiktok_follower_attempted_keys_v68_65 = sorted(
-                            attempted_follower_keys
-                        )
-                        _persist_runtime_checkpoint_v68_15()
-                        progress_bar.progress(
-                            position / max(len(targets_to_check), 1)
-                        )
+                            st.session_state.tiktok_follower_attempted_keys_v68_65 = sorted(
+                                attempted_follower_keys
+                            )
+                            _persist_runtime_checkpoint_v68_15()
+                            processed_targets += 1
+                            progress_bar.progress(
+                                processed_targets / max(total_targets, 1)
+                            )
                 finally:
                     progress_bar.empty()
 
@@ -7350,19 +7366,12 @@ elif st.session_state.step == 6:
                         "Those existing values were kept."
                     )
                 remaining_targets = missing_tiktok_follower_targets_v68_65(work)
-                remaining_unchecked = remaining_targets[
-                    ~remaining_targets["Creator Key"].isin(attempted_follower_keys)
-                ]
-                remaining_count = len(remaining_unchecked)
+                remaining_count = len(remaining_targets)
                 if remaining_count:
                     st.info(
-                        f"{remaining_count:,} more creator"
-                        f"{'s' if remaining_count != 1 else ''} can be checked on the next click."
-                    )
-                elif failed_followers:
-                    st.info(
-                        "All missing public profiles were checked once. Click again to retry "
-                        "profiles that were temporarily unavailable."
+                        f"{remaining_count:,} creator profile"
+                        f"{'s remain' if remaining_count != 1 else ' remains'} unavailable. "
+                        "Click again only if you want to retry those profiles."
                     )
     work = preserve_unavailable_metric_blanks(work)
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
