@@ -110,6 +110,9 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.pending_profile_targets = staticmethod(
             load_function("pending_creator_profile_targets_v68_61", namespace)
         )
+        cls.creator_profile_direct_failed = staticmethod(
+            load_function("creator_profile_direct_failed_v68_66", namespace)
+        )
         cls.creative_type_chart_data = staticmethod(
             load_function("prepare_creative_type_chart_data_v68_49", namespace)
         )
@@ -390,7 +393,9 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("profile_fallback_targets", creator_section)
         self.assertIn("direct_fallback_frames", creator_section)
         self.assertIn("target_platform in {TIKTOK, INSTAGRAM_REELS}", creator_section)
-        self.assertIn('fallback_token', creator_section)
+        self.assertIn("fallback_token", creator_section)
+        self.assertNotIn("Use Apify for", creator_section)
+        self.assertNotIn("Paid fallback profiles", creator_section)
         self.assertIn("st.number_input", creator_section)
         self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
         self.assertIn('min_value=1', creator_section)
@@ -413,13 +418,50 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn('"Creator Profile"', creator_section)
         self.assertIn("profile_history_settings", creator_section)
         self.assertIn("pending_creator_profile_targets_v68_61", creator_section)
-        self.assertIn("instagram_profile_requires_fallback", creator_section)
-        self.assertIn("tiktok_profile_requires_fallback", creator_section)
+        self.assertIn("creator_profile_direct_failed_v68_66", creator_section)
+        self.assertGreaterEqual(
+            creator_section.count("creator_profile_direct_failed_v68_66("), 2
+        )
         self.assertIn(
             "post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT",
             creator_section,
         )
         self.assertIn("Apify fallback: latest 20 posts", creator_section)
+        self.assertIn("if profile_fallback_targets:", creator_section)
+        direct_lookup_position = creator_section.index(
+            "direct_creator_profile_metrics_v68_58("
+        )
+        paid_gate_position = creator_section.index("if profile_fallback_targets:")
+        paid_call_position = creator_section.index("scrape_creator_profile_metrics(")
+        self.assertLess(direct_lookup_position, paid_gate_position)
+        self.assertLess(paid_gate_position, paid_call_position)
+
+    def test_paid_fallback_is_not_offered_for_useful_partial_direct_history(self):
+        partial = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Profile Data Status": "Partial (safety limit reached)",
+        }])
+        unavailable = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Profile Data Status": "Unavailable",
+        }])
+        available = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Profile Data Status": "Available",
+        }])
+
+        self.assertFalse(
+            self.creator_profile_direct_failed(partial, "Instagram Reels")
+        )
+        self.assertFalse(
+            self.creator_profile_direct_failed(available, "Instagram Reels")
+        )
+        self.assertTrue(
+            self.creator_profile_direct_failed(unavailable, "Instagram Reels")
+        )
+        self.assertTrue(
+            self.creator_profile_direct_failed(pd.DataFrame(), "Instagram Reels")
+        )
 
     def test_profile_followers_backfill_zero_batch_values_and_kol_size(self):
         rows = pd.DataFrame([{
