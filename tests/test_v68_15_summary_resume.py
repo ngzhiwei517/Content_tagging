@@ -384,13 +384,13 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertAlmostEqual(float(summary.loc[0, "Average Engagement Rate"]), 80 / 3)
 
     def test_creator_section_exposes_optional_profile_enrichment_and_links(self):
-        creator_section = APP_SOURCE.split("def render_top_creator_performance_v68_47", 1)[1].split(
+        creator_section = APP_SOURCE.split("def _fetch_creator_profile_wave_v68_67", 1)[1].split(
             "def bar_list", 1
         )[0]
         self.assertIn("Fetch profile metrics", creator_section)
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
         self.assertIn("scrape_creator_profile_metrics", creator_section)
-        self.assertIn("profile_fallback_targets", creator_section)
+        self.assertIn("fallback_targets", creator_section)
         self.assertIn("direct_fallback_frames", creator_section)
         self.assertIn("target_platform in {TIKTOK, INSTAGRAM_REELS}", creator_section)
         self.assertIn("fallback_token", creator_section)
@@ -429,14 +429,20 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn(
             "reconcile_creator_profile_fallback_metrics(", creator_section
         )
-        self.assertIn("if profile_fallback_targets:", creator_section)
+        self.assertIn("if fallback_targets:", creator_section)
         direct_lookup_position = creator_section.index(
             "direct_creator_profile_metrics_v68_58("
         )
-        paid_gate_position = creator_section.index("if profile_fallback_targets:")
+        identity_recovery_position = creator_section.index(
+            "current_tiktok_creator_handle_v68_67("
+        )
+        paid_gate_position = creator_section.index("if fallback_targets:")
         paid_call_position = creator_section.index("scrape_creator_profile_metrics(")
+        self.assertLess(direct_lookup_position, identity_recovery_position)
+        self.assertLess(identity_recovery_position, paid_gate_position)
         self.assertLess(direct_lookup_position, paid_gate_position)
         self.assertLess(paid_gate_position, paid_call_position)
+        self.assertIn("_next_creator_profile_wave_v68_67(", creator_section)
 
     def test_paid_fallback_is_not_offered_for_useful_partial_direct_history(self):
         partial = pd.DataFrame([{

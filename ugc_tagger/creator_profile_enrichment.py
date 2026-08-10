@@ -563,6 +563,72 @@ def _extract_tiktok_post_identity(post_url: str) -> Dict:
     return info if isinstance(info, dict) else {}
 
 
+def resolve_tiktok_creator_handle(
+    creator,
+    representative_post_url: str,
+    *,
+    post_extractor: Optional[Callable[[str], Dict]] = None,
+) -> str:
+    """Resolve a renamed TikTok creator from one of their live post URLs.
+
+    The post URL is already associated with the ranked creator in the current
+    batch.  Only a public username returned by the live post extractor is
+    accepted; numeric account IDs and display names containing spaces are
+    rejected.  No media is downloaded.
+    """
+    original = normalize_creator_handle(creator)
+    post_url = _text(representative_post_url)
+    if not post_url:
+        raise RuntimeError("A representative TikTok post URL is required.")
+    extract_post_identity = post_extractor or _extract_tiktok_post_identity
+    try:
+        info = extract_post_identity(post_url)
+    except Exception as exc:
+        raise RuntimeError("TikTok post identity could not be retrieved.") from exc
+    if not isinstance(info, dict):
+        raise RuntimeError("TikTok post identity was not available.")
+
+    author_meta = info.get("authorMeta")
+    if not isinstance(author_meta, dict):
+        author_meta = {}
+    author = info.get("author")
+    if not isinstance(author, dict):
+        author = {}
+
+    url_candidates = [
+        info.get("uploader_url"),
+        info.get("channel_url"),
+        info.get("webpage_url"),
+        info.get("original_url"),
+    ]
+    candidates = [
+        info.get("uploader_id"),
+        author_meta.get("name"),
+        author_meta.get("uniqueId"),
+        author.get("uniqueId"),
+        author.get("username"),
+    ]
+    for value in url_candidates:
+        match = re.search(r"tiktok\.com/@([^/?#]+)", _text(value), re.IGNORECASE)
+        if match:
+            candidates.append(match.group(1))
+    # ``uploader`` and ``channel`` are last because yt-dlp may use a display
+    # name there. The strict username pattern prevents accepting that label.
+    candidates.extend([info.get("uploader"), info.get("channel")])
+
+    for value in candidates:
+        candidate = normalize_creator_handle(value)
+        if (
+            candidate
+            and not candidate.isdigit()
+            and re.fullmatch(r"[A-Za-z0-9._]{2,30}", candidate)
+        ):
+            return candidate
+    if original:
+        raise RuntimeError(f"TikTok did not return a current username for @{original}.")
+    raise RuntimeError("TikTok did not return a current username.")
+
+
 def _tiktok_profile_stats_followers(
     payload: Dict,
     *,
