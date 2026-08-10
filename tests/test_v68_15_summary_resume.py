@@ -106,6 +106,10 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.missing_tiktok_follower_targets = staticmethod(
             load_function("missing_tiktok_follower_targets_v68_65", namespace)
         )
+        namespace["FREE_FOLLOWER_LOOKUP_BATCH_SIZE_V68_68"] = 5
+        cls.tiktok_follower_lookup_batches = staticmethod(
+            load_function("tiktok_follower_lookup_batches_v68_68", namespace)
+        )
         namespace["CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61"] = 6 * 60 * 60
         cls.pending_profile_targets = staticmethod(
             load_function("pending_creator_profile_targets_v68_61", namespace)
@@ -567,7 +571,9 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         self.assertIn("Fill missing followers", APP_SOURCE)
         self.assertIn("No Apify credits are used", APP_SOURCE)
-        self.assertIn("MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65 = 5", APP_SOURCE)
+        self.assertIn("FREE_FOLLOWER_LOOKUP_BATCH_SIZE_V68_68 = 5", APP_SOURCE)
+        self.assertIn("for target_batch in target_batches", APP_SOURCE)
+        self.assertNotIn("pending_follower_targets.head(", APP_SOURCE)
         self.assertIn("_persist_runtime_checkpoint_v68_15()", APP_SOURCE)
         cache_section = APP_SOURCE.split(
             "def direct_tiktok_profile_followers_v68_65", 1
@@ -579,6 +585,20 @@ class SummaryV6815Tests(unittest.TestCase):
         )[1].split("def normalize_url_v68_15", 1)[0]
         self.assertIn("history_mode: str = DEFAULT_PROFILE_HISTORY_MODE", cache_section)
         self.assertIn("history_mode=history_mode", cache_section)
+
+    def test_missing_follower_lookup_batches_cover_every_pending_creator(self):
+        targets = pd.DataFrame([
+            {"Creator Key": f"creator-{index}"}
+            for index in range(8)
+        ])
+
+        batches = self.tiktok_follower_lookup_batches(targets)
+
+        self.assertEqual([len(batch) for batch in batches], [5, 3])
+        self.assertEqual(
+            pd.concat(batches, ignore_index=True)["Creator Key"].tolist(),
+            targets["Creator Key"].tolist(),
+        )
 
     def test_profile_enrichment_fetches_only_additional_creators(self):
         fetched_at = pd.Timestamp.now(tz="UTC").isoformat()
