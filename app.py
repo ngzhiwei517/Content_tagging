@@ -49,6 +49,7 @@ from ugc_tagger.creator_profile_enrichment import (
     fetch_tiktok_profile_followers,
     profile_history_settings,
     reconcile_creator_profile_fallback_metrics,
+    resolve_tiktok_creator_handle,
     scrape_creator_profile_metrics,
 )
 from ugc_tagger.model_comparison import (
@@ -948,6 +949,7 @@ DEFAULT_STATE = {
     # excluded from restart checkpoints and never contain API tokens or media.
     "creator_profile_metrics_v68_51": pd.DataFrame(),
     "creator_profile_updated_at_v68_51": "",
+    "creator_profile_aliases_v68_67": {},
     "tiktok_follower_attempted_keys_v68_65": [],
 }
 for k, v in DEFAULT_STATE.items():
@@ -1160,6 +1162,22 @@ def direct_tiktok_profile_followers_v68_65(
     if followers < 0:
         raise RuntimeError("TikTok returned an invalid follower count.")
     return followers
+
+
+@st.cache_data(
+    ttl=CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61,
+    max_entries=500,
+    show_spinner=False,
+)
+def current_tiktok_creator_handle_v68_67(
+    original_creator_key: str,
+    representative_post_url: str,
+) -> str:
+    """Cache a verified current username resolved from one live batch post."""
+    return resolve_tiktok_creator_handle(
+        original_creator_key,
+        representative_post_url,
+    )
 
 
 RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
@@ -5087,6 +5105,344 @@ def pending_creator_profile_targets_v68_61(
     return pending.loc[needs_fetch].reset_index(drop=True)
 
 
+def _creator_profile_alias_id_v68_67(platform, creator) -> str:
+    return f"{safe_str(platform).casefold()}|{creator_key(creator)}"
+
+
+def _apply_creator_profile_aliases_v68_67(
+    targets: pd.DataFrame,
+    aliases: Dict[str, str],
+) -> pd.DataFrame:
+    """Apply verified renamed-account aliases while retaining stable rank IDs."""
+    if not isinstance(targets, pd.DataFrame) or targets.empty:
+        return pd.DataFrame(columns=getattr(targets, "columns", []))
+    resolved = targets.copy()
+    if "Original Creator" not in resolved.columns:
+        resolved["Original Creator"] = resolved.get(
+            "Creator", pd.Series("", index=resolved.index, dtype=str)
+        ).map(safe_str)
+    if "Original Creator Key" not in resolved.columns:
+        resolved["Original Creator Key"] = resolved["Original Creator"].map(creator_key)
+    if "Original Target ID" not in resolved.columns:
+        resolved["Original Target ID"] = [
+            _creator_profile_alias_id_v68_67(platform, key)
+            for platform, key in zip(
+                resolved.get("Platform", pd.Series("", index=resolved.index)),
+                resolved["Original Creator Key"],
+            )
+        ]
+
+    resolved["Creator"] = [
+        safe_str(
+            aliases.get(
+                _creator_profile_alias_id_v68_67(platform, original_key),
+                original_creator,
+            )
+        )
+        for platform, original_key, original_creator in zip(
+            resolved.get("Platform", pd.Series("", index=resolved.index)),
+            resolved["Original Creator Key"],
+            resolved["Original Creator"],
+        )
+    ]
+    resolved["Creator Key"] = resolved["Creator"].map(creator_key)
+    return resolved
+
+
+def _creator_profile_target_candidates_v68_67(
+    creator_table: pd.DataFrame,
+    filtered: pd.DataFrame,
+    aliases: Dict[str, str],
+) -> pd.DataFrame:
+    """Attach one ranked creator's representative post for identity recovery."""
+    if not isinstance(creator_table, pd.DataFrame) or creator_table.empty:
+        return pd.DataFrame(
+            columns=[
+                "Platform", "Creator", "Creator Key", "Original Creator",
+                "Original Creator Key", "Original Target ID",
+                "Representative Post URL", "Rank Position",
+            ]
+        )
+    targets = creator_table[["Platform", "Creator"]].copy()
+    targets["Original Creator"] = targets["Creator"].map(safe_str)
+    targets["Original Creator Key"] = targets["Original Creator"].map(creator_key)
+    targets = targets[targets["Original Creator Key"].ne("")].drop_duplicates(
+        ["Platform", "Original Creator Key"], keep="first"
+    )
+
+    post_links = pd.DataFrame(
+        columns=["Platform", "Original Creator Key", "Representative Post URL"]
+    )
+    if isinstance(filtered, pd.DataFrame) and not filtered.empty:
+        source = filtered.copy()
+        source["Platform"] = source.get(
+            "Platform", pd.Series(TIKTOK, index=source.index)
+        ).map(lambda value: display_empty(value, TIKTOK))
+        source["Original Creator Key"] = source.get(
+            "Creator", pd.Series("", index=source.index, dtype=str)
+        ).map(creator_key)
+        source["Representative Post URL"] = source.get(
+            "Link", pd.Series("", index=source.index, dtype=str)
+        ).map(safe_str)
+        source = source[
+            source["Original Creator Key"].ne("")
+            & source["Representative Post URL"].ne("")
+        ]
+        if not source.empty:
+            post_links = source[
+                ["Platform", "Original Creator Key", "Representative Post URL"]
+            ].drop_duplicates(["Platform", "Original Creator Key"], keep="first")
+    targets = targets.merge(
+        post_links,
+        on=["Platform", "Original Creator Key"],
+        how="left",
+    )
+    targets["Representative Post URL"] = targets[
+        "Representative Post URL"
+    ].fillna("").map(safe_str)
+    targets["Original Target ID"] = [
+        _creator_profile_alias_id_v68_67(platform, key)
+        for platform, key in zip(targets["Platform"], targets["Original Creator Key"])
+    ]
+    targets["Rank Position"] = range(1, len(targets) + 1)
+    targets = _apply_creator_profile_aliases_v68_67(targets, aliases)
+    return targets.drop_duplicates(["Platform", "Creator Key"], keep="first").reset_index(
+        drop=True
+    )
+
+
+def _profile_metrics_available_keys_v68_67(
+    metrics: pd.DataFrame,
+    history_mode: str,
+) -> set:
+    """Return profile identities with usable recent-post performance metrics."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return set()
+    required = {"Platform", "Creator Key", "Profile Data Status", "Profile Posts"}
+    if not required.issubset(metrics.columns):
+        return set()
+    available = metrics.copy()
+    if "Profile History Mode" in available.columns:
+        available = available[available["Profile History Mode"].eq(history_mode)]
+    status = available["Profile Data Status"].fillna("").astype(str).str.strip()
+    posts = pd.to_numeric(available["Profile Posts"], errors="coerce").fillna(0)
+    available = available[
+        status.ne("")
+        & ~status.str.startswith("Unavailable")
+        & posts.gt(0)
+    ]
+    return {
+        (safe_str(platform), safe_str(key))
+        for platform, key in zip(available["Platform"], available["Creator Key"])
+        if safe_str(key)
+    }
+
+
+def _profile_available_target_count_v68_67(
+    targets: pd.DataFrame,
+    metrics: pd.DataFrame,
+    history_mode: str,
+) -> int:
+    available_keys = _profile_metrics_available_keys_v68_67(metrics, history_mode)
+    if not available_keys or not isinstance(targets, pd.DataFrame) or targets.empty:
+        return 0
+    identities = {
+        (safe_str(platform), safe_str(key))
+        for platform, key in zip(targets["Platform"], targets["Creator Key"])
+        if safe_str(key)
+    }
+    return len(identities & available_keys)
+
+
+def _next_creator_profile_wave_v68_67(
+    ranked_targets: pd.DataFrame,
+    processed_target_ids: set,
+    combined_metrics: pd.DataFrame,
+    target_count: int,
+    history_mode: str,
+) -> Tuple[pd.DataFrame, int]:
+    """Select only enough next-ranked creators to fill the available deficit."""
+    processed = ranked_targets[
+        ranked_targets.get(
+            "Original Target ID", pd.Series("", index=ranked_targets.index)
+        ).isin(processed_target_ids)
+    ]
+    available_count = _profile_available_target_count_v68_67(
+        processed,
+        combined_metrics,
+        history_mode,
+    )
+    deficit = max(0, int(target_count) - available_count)
+    if deficit <= 0:
+        return ranked_targets.iloc[0:0].copy(), available_count
+    remaining = ranked_targets[
+        ~ranked_targets.get(
+            "Original Target ID", pd.Series("", index=ranked_targets.index)
+        ).isin(processed_target_ids)
+    ]
+    return remaining.head(deficit).copy().reset_index(drop=True), available_count
+
+
+def _fetch_creator_profile_wave_v68_67(
+    targets: pd.DataFrame,
+    *,
+    history_mode: str,
+    history_post_limit: int,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], Dict[str, str]]:
+    """Fetch one bounded ranked wave, recovering renamed TikTok creators first."""
+    profile_frames: List[pd.DataFrame] = []
+    failed_profile_frames: List[pd.DataFrame] = []
+    profile_errors: List[str] = []
+    fallback_targets: List[Dict[str, str]] = []
+    direct_fallback_frames: List[pd.DataFrame] = []
+    alias_updates: Dict[str, str] = {}
+
+    def direct_result(platform: str, creator: str) -> Tuple[pd.DataFrame, Optional[Exception]]:
+        try:
+            return direct_creator_profile_metrics_v68_58(
+                platform,
+                creator,
+                history_mode=history_mode,
+                months=3,
+                post_limit=history_post_limit,
+            ), None
+        except Exception as exc:
+            metrics = getattr(exc, "profile_metrics", None)
+            if not isinstance(metrics, pd.DataFrame):
+                metrics = pd.DataFrame()
+            return metrics, exc
+
+    total = len(targets)
+    for position, (_, target) in enumerate(targets.iterrows(), start=1):
+        target_platform = safe_str(target.get("Platform"))
+        target_creator = safe_str(target.get("Creator"))
+        direct_metrics, direct_error = direct_result(target_platform, target_creator)
+        requires_fallback = creator_profile_direct_failed_v68_66(
+            direct_metrics,
+            target_platform,
+        )
+
+        # A post ID remains stable after a TikTok username change. Resolve the
+        # live post before paying for a fallback against the stale profile URL.
+        if requires_fallback and target_platform == TIKTOK:
+            representative_post_url = safe_str(target.get("Representative Post URL"))
+            if representative_post_url:
+                try:
+                    current_creator = current_tiktok_creator_handle_v68_67(
+                        safe_str(target.get("Original Creator Key") or target_creator),
+                        representative_post_url,
+                    )
+                except Exception:
+                    current_creator = ""
+                if (
+                    current_creator
+                    and creator_key(current_creator) != creator_key(target_creator)
+                ):
+                    alias_updates[
+                        safe_str(target.get("Original Target ID"))
+                        or _creator_profile_alias_id_v68_67(
+                            target_platform,
+                            target.get("Original Creator Key") or target_creator,
+                        )
+                    ] = current_creator
+                    target_creator = current_creator
+                    direct_metrics, direct_error = direct_result(
+                        target_platform,
+                        target_creator,
+                    )
+                    requires_fallback = creator_profile_direct_failed_v68_66(
+                        direct_metrics,
+                        target_platform,
+                    )
+
+        if requires_fallback and target_platform in {TIKTOK, INSTAGRAM_REELS}:
+            fallback_targets.append({
+                "Platform": target_platform,
+                "Creator": target_creator,
+            })
+            if isinstance(direct_metrics, pd.DataFrame) and not direct_metrics.empty:
+                direct_fallback_frames.append(direct_metrics)
+        elif isinstance(direct_metrics, pd.DataFrame) and not direct_metrics.empty:
+            profile_frames.append(direct_metrics)
+        else:
+            if isinstance(direct_metrics, pd.DataFrame) and not direct_metrics.empty:
+                failed_profile_frames.append(direct_metrics)
+            if direct_error is not None:
+                profile_errors.append(safe_str(direct_error))
+        if on_progress is not None:
+            on_progress(position, max(total, 1))
+
+    if fallback_targets:
+        fallback_token = (
+            _managed_api_secret_v68_43("APIFY_TOKEN")
+            or clean_api_secret(
+                st.session_state.get("apify_token", "")
+                or st.session_state.get("apify_token_input_v52", "")
+                or st.session_state.get("apify_token_input", "")
+            )
+        )
+        if fallback_token:
+            try:
+                fallback_frame = pd.DataFrame(fallback_targets).drop_duplicates(
+                    ["Platform", "Creator"], keep="first"
+                )
+                fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
+                    fallback_frame,
+                    fallback_token,
+                    months=3,
+                    post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
+                )
+                if not fallback_metrics.empty:
+                    fallback_metrics["Profile History Mode"] = history_mode
+                    fallback_metrics["Profile Fetched At"] = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                direct_fallback_metrics = (
+                    pd.concat(direct_fallback_frames, ignore_index=True)
+                    if direct_fallback_frames
+                    else pd.DataFrame()
+                )
+                # Reconciliation keeps useful direct history unless Apify
+                # returns a genuinely better metric row.
+                reconciled = reconcile_creator_profile_fallback_metrics(
+                    direct_fallback_metrics,
+                    fallback_metrics,
+                )
+                if not reconciled.empty:
+                    statuses = reconciled["Profile Data Status"].fillna("").astype(str)
+                    successful = reconciled[~statuses.str.startswith("Unavailable")]
+                    unavailable = reconciled[statuses.str.startswith("Unavailable")]
+                    if not successful.empty:
+                        profile_frames.append(successful)
+                    if not unavailable.empty:
+                        failed_profile_frames.append(unavailable)
+                profile_errors.extend(fallback_errors)
+            except Exception:
+                failed_profile_frames.extend(direct_fallback_frames)
+                profile_errors.append(
+                    "Profile fallback could not be completed in this run."
+                )
+        else:
+            failed_profile_frames.extend(direct_fallback_frames)
+            profile_errors.append(
+                "Some creator profiles could not be retrieved directly. "
+                "Configure the existing Apify token to use the fallback."
+            )
+
+    successful_metrics = (
+        pd.concat(profile_frames, ignore_index=True)
+        if profile_frames
+        else pd.DataFrame()
+    )
+    failed_metrics = (
+        pd.concat(failed_profile_frames, ignore_index=True)
+        if failed_profile_frames
+        else pd.DataFrame()
+    )
+    return successful_metrics, failed_metrics, profile_errors, alias_updates
+
+
 def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
     """Render campaign contribution plus optional public-profile metrics."""
     with st.container(border=True):
@@ -5098,11 +5454,16 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 unsafe_allow_html=True,
             )
             return
-        target_candidates = creator_table[["Platform", "Creator"]].copy()
-        target_candidates["Creator Key"] = target_candidates["Creator"].map(creator_key)
-        target_candidates = target_candidates[
-            target_candidates["Creator Key"].ne("")
-        ].drop_duplicates(["Platform", "Creator Key"], keep="first")
+        creator_aliases = st.session_state.get(
+            "creator_profile_aliases_v68_67", {}
+        )
+        if not isinstance(creator_aliases, dict):
+            creator_aliases = {}
+        target_candidates = _creator_profile_target_candidates_v68_67(
+            creator_table,
+            filtered,
+            creator_aliases,
+        )
 
         max_creator_count = min(100, len(target_candidates))
         default_creator_count = min(10, max_creator_count)
@@ -5140,9 +5501,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         target_count_preview = min(int(profile_count), len(target_candidates))
         if enrich_clicked:
             target_count = target_count_preview
-            targets = target_candidates.head(target_count)[
-                ["Platform", "Creator", "Creator Key"]
-            ].copy()
             existing_metrics = st.session_state.get(
                 "creator_profile_metrics_v68_51", pd.DataFrame()
             )
@@ -5150,163 +5508,121 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 existing_metrics = existing_metrics.copy()
                 if "Profile History Mode" not in existing_metrics.columns:
                     existing_metrics["Profile History Mode"] = DEFAULT_PROFILE_HISTORY_MODE
-            targets_to_fetch = pending_creator_profile_targets_v68_61(
-                targets,
-                existing_metrics,
-                history_mode,
+            combined_metrics = (
+                existing_metrics.copy()
+                if isinstance(existing_metrics, pd.DataFrame)
+                else pd.DataFrame()
             )
-            profile_frames = []
-            failed_profile_frames = []
-            profile_errors = []
-            profile_fallback_targets = []
-            direct_fallback_frames = []
-            if not targets_to_fetch.empty:
-                progress_bar = st.progress(0)
-                try:
-                    with st.spinner(
-                        f"Fetching public profile posts for {len(targets_to_fetch):,} creator"
-                        f"{'s' if len(targets_to_fetch) != 1 else ''}..."
-                    ):
-                        for position, (_, target) in enumerate(
-                            targets_to_fetch.iterrows(), start=1
-                        ):
-                            try:
-                                direct_metrics = direct_creator_profile_metrics_v68_58(
-                                    safe_str(target.get("Platform")),
-                                    safe_str(target.get("Creator")),
+            processed_target_ids = set()
+            successful_frames: List[pd.DataFrame] = []
+            failed_frames: List[pd.DataFrame] = []
+            profile_errors: List[str] = []
+            newly_checked_count = 0
+            progress_bar = st.progress(0)
+            try:
+                with st.spinner(
+                    f"Fetching up to {target_count:,} available creator profile"
+                    f"{'s' if target_count != 1 else ''}..."
+                ):
+                    while True:
+                        target_candidates = _apply_creator_profile_aliases_v68_67(
+                            target_candidates,
+                            creator_aliases,
+                        )
+                        wave, available_before = _next_creator_profile_wave_v68_67(
+                            target_candidates,
+                            processed_target_ids,
+                            combined_metrics,
+                            target_count,
+                            history_mode,
+                        )
+                        if wave.empty:
+                            break
+                        processed_target_ids.update(
+                            safe_str(value)
+                            for value in wave["Original Target ID"].tolist()
+                            if safe_str(value)
+                        )
+                        targets_to_fetch = pending_creator_profile_targets_v68_61(
+                            wave,
+                            combined_metrics,
+                            history_mode,
+                        )
+                        if not targets_to_fetch.empty:
+                            newly_checked_count += len(targets_to_fetch)
+                            wave_successful, wave_failed, wave_errors, alias_updates = (
+                                _fetch_creator_profile_wave_v68_67(
+                                    targets_to_fetch,
                                     history_mode=history_mode,
-                                    months=3,
-                                    post_limit=history_post_limit,
-                                )
-                                target_platform = safe_str(target.get("Platform"))
-                                requires_fallback = creator_profile_direct_failed_v68_66(
-                                    direct_metrics,
-                                    target_platform,
-                                )
-                                if requires_fallback:
-                                    profile_fallback_targets.append({
-                                        "Platform": target_platform,
-                                        "Creator": safe_str(target.get("Creator")),
-                                    })
-                                    direct_fallback_frames.append(direct_metrics)
-                                else:
-                                    profile_frames.append(direct_metrics)
-                            except Exception as exc:
-                                LOGGER.warning(
-                                    "Direct creator profile lookup failed for %s/%s: %s",
-                                    safe_str(target.get("Platform")),
-                                    safe_str(target.get("Creator")),
-                                    exc,
-                                )
-                                unavailable_metrics = getattr(exc, "profile_metrics", None)
-                                target_platform = safe_str(target.get("Platform"))
-                                if target_platform in {TIKTOK, INSTAGRAM_REELS}:
-                                    if creator_profile_direct_failed_v68_66(
-                                        unavailable_metrics,
-                                        target_platform,
-                                    ):
-                                        profile_fallback_targets.append({
-                                            "Platform": target_platform,
-                                            "Creator": safe_str(target.get("Creator")),
-                                        })
-                                        if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                            direct_fallback_frames.append(unavailable_metrics)
-                                    elif isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                        profile_frames.append(unavailable_metrics)
-                                else:
-                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                        failed_profile_frames.append(unavailable_metrics)
-                                    profile_errors.append(safe_str(exc))
-                            progress_bar.progress(
-                                position / max(len(targets_to_fetch), 1)
-                            )
-                        # Direct retrieval always runs first. Apify is used only
-                        # when the free result is unavailable or lacks Instagram
-                        # views, and never replaces useful direct data unless it
-                        # returns a genuinely better metric row.
-                        if profile_fallback_targets:
-                            fallback_token = (
-                                _managed_api_secret_v68_43("APIFY_TOKEN")
-                                or clean_api_secret(
-                                    st.session_state.get("apify_token", "")
-                                    or st.session_state.get("apify_token_input_v52", "")
-                                    or st.session_state.get("apify_token_input", "")
-                                )
-                            )
-                            if fallback_token:
-                                try:
-                                    fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
-                                        pd.DataFrame(profile_fallback_targets),
-                                        fallback_token,
-                                        months=3,
-                                        post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
-                                    )
-                                    if not fallback_metrics.empty:
-                                        fallback_metrics["Profile History Mode"] = history_mode
-                                        fallback_metrics["Profile Fetched At"] = datetime.now(
-                                            timezone.utc
-                                        ).isoformat()
-                                    direct_fallback_metrics = (
-                                        pd.concat(direct_fallback_frames, ignore_index=True)
-                                        if direct_fallback_frames
-                                        else pd.DataFrame()
-                                    )
-                                    reconciled_metrics = (
-                                        reconcile_creator_profile_fallback_metrics(
-                                            direct_fallback_metrics,
-                                            fallback_metrics,
+                                    history_post_limit=history_post_limit,
+                                    on_progress=lambda done, total: progress_bar.progress(
+                                        min(
+                                            (
+                                                len(processed_target_ids)
+                                                - len(wave)
+                                                + done
+                                            )
+                                            / max(len(target_candidates), 1),
+                                            1.0,
                                         )
-                                    )
-                                    if not reconciled_metrics.empty:
-                                        reconciled_status = reconciled_metrics[
-                                            "Profile Data Status"
-                                        ].fillna("").astype(str)
-                                        reconciled_unavailable = reconciled_metrics[
-                                            reconciled_status.str.startswith("Unavailable")
-                                        ]
-                                        reconciled_successful = reconciled_metrics[
-                                            ~reconciled_status.str.startswith("Unavailable")
-                                        ]
-                                        if not reconciled_successful.empty:
-                                            profile_frames.append(reconciled_successful)
-                                        if not reconciled_unavailable.empty:
-                                            failed_profile_frames.append(reconciled_unavailable)
-                                    profile_errors.extend(fallback_errors)
-                                except Exception:
-                                    failed_profile_frames.extend(direct_fallback_frames)
-                                    profile_errors.append(
-                                        "Profile fallback could not be completed in this run."
-                                    )
-                            else:
-                                failed_profile_frames.extend(direct_fallback_frames)
-                                profile_errors.append(
-                                    "Some creator profiles could not be retrieved directly. "
-                                    "Configure the existing Apify token to use the fallback."
+                                    ),
                                 )
-                finally:
-                    progress_bar.empty()
+                            )
+                            if alias_updates:
+                                creator_aliases.update(alias_updates)
+                                st.session_state.creator_profile_aliases_v68_67 = dict(
+                                    creator_aliases
+                                )
+                                target_candidates = _apply_creator_profile_aliases_v68_67(
+                                    target_candidates,
+                                    creator_aliases,
+                                )
+                            if not wave_successful.empty:
+                                successful_frames.append(wave_successful)
+                            if not wave_failed.empty:
+                                failed_frames.append(wave_failed)
+                            profile_errors.extend(wave_errors)
+                            wave_metrics = pd.concat(
+                                [wave_successful, wave_failed],
+                                ignore_index=True,
+                            ) if not wave_successful.empty or not wave_failed.empty else pd.DataFrame()
+                            if not wave_metrics.empty:
+                                combined_metrics = pd.concat(
+                                    [combined_metrics, wave_metrics],
+                                    ignore_index=True,
+                                ) if not combined_metrics.empty else wave_metrics.copy()
+                                combined_metrics = combined_metrics.drop_duplicates(
+                                    ["Platform", "Creator Key", "Profile History Mode"],
+                                    keep="last",
+                                ).reset_index(drop=True)
+                        available_after = _profile_available_target_count_v68_67(
+                            target_candidates[
+                                target_candidates["Original Target ID"].isin(
+                                    processed_target_ids
+                                )
+                            ],
+                            combined_metrics,
+                            history_mode,
+                        )
+                        if available_after >= target_count:
+                            break
+                        if available_after == available_before and len(
+                            processed_target_ids
+                        ) >= len(target_candidates):
+                            break
+            finally:
+                progress_bar.empty()
 
             successful_profile_metrics = (
-                pd.concat(profile_frames, ignore_index=True)
-                if profile_frames
+                pd.concat(successful_frames, ignore_index=True)
+                if successful_frames
                 else pd.DataFrame()
             )
             failed_profile_metrics = (
-                pd.concat(failed_profile_frames, ignore_index=True)
-                if failed_profile_frames
+                pd.concat(failed_frames, ignore_index=True)
+                if failed_frames
                 else pd.DataFrame()
             )
-            profile_metrics = pd.concat(
-                [successful_profile_metrics, failed_profile_metrics],
-                ignore_index=True,
-            ) if not successful_profile_metrics.empty or not failed_profile_metrics.empty else pd.DataFrame()
-            combined_metrics = pd.concat(
-                [existing_metrics, profile_metrics], ignore_index=True
-            ) if isinstance(existing_metrics, pd.DataFrame) and not existing_metrics.empty else profile_metrics.copy()
-            if not combined_metrics.empty:
-                combined_metrics = combined_metrics.drop_duplicates(
-                    ["Platform", "Creator Key", "Profile History Mode"], keep="last"
-                ).reset_index(drop=True)
             if not successful_profile_metrics.empty:
                 fetched_at = pd.to_datetime(
                     successful_profile_metrics.get("Profile Fetched At", pd.Series(dtype=str)),
@@ -5319,26 +5635,53 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                     else datetime.now(timezone.utc).isoformat()
                 )
             st.session_state.creator_profile_metrics_v68_51 = combined_metrics
-            available_count = int(
-                successful_profile_metrics.get(
-                    "Profile Posts", pd.Series(dtype=float)
-                ).fillna(0).gt(0).sum()
+            processed_targets = target_candidates[
+                target_candidates["Original Target ID"].isin(processed_target_ids)
+            ]
+            available_count = _profile_available_target_count_v68_67(
+                processed_targets,
+                combined_metrics,
+                history_mode,
             )
-            successful_count = len(successful_profile_metrics)
-            if targets_to_fetch.empty:
+            available_keys = _profile_metrics_available_keys_v68_67(
+                combined_metrics,
+                history_mode,
+            )
+            replacement_count = sum(
+                1
+                for _, target in processed_targets.iterrows()
+                if int(target.get("Rank Position", 0) or 0) > target_count
+                and (
+                    safe_str(target.get("Platform")),
+                    safe_str(target.get("Creator Key")),
+                ) in available_keys
+            )
+            if newly_checked_count == 0:
                 st.info("Profile results are already saved for all selected creators.")
             elif available_count:
                 st.success(
                     f"Recent profile metrics are available for {available_count:,} of "
-                    f"{len(targets_to_fetch):,} newly checked creators."
+                    f"the requested {target_count:,} creators."
                 )
-            elif successful_count:
+                if replacement_count:
+                    st.info(
+                        f"Used {replacement_count:,} next-ranked creator"
+                        f"{'s' if replacement_count != 1 else ''} because earlier "
+                        "profiles remained unavailable."
+                    )
+            elif not successful_profile_metrics.empty:
                 st.info(
-                    f"Checked {successful_count:,} selected creator"
-                    f"{'s' if successful_count != 1 else ''}; no public posts fell within the three-month window."
+                    "No public posts for the checked creators fell within the "
+                    "three-month window."
                 )
             else:
                 st.warning("No profile metrics were updated in this run. Batch metrics are unchanged.")
+            if available_count < target_count:
+                st.warning(
+                    f"Only {available_count:,} available creator profile"
+                    f"{'s were' if available_count != 1 else ' was'} found after "
+                    "checking the ranked creator list."
+                )
             if not successful_profile_metrics.empty:
                 profile_status = successful_profile_metrics.get(
                     "Profile Data Status",
@@ -5368,7 +5711,10 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             "Average Engagement": "Batch Average Engagement",
             "Average Engagement Rate": "Batch Average Engagement Rate",
         }).copy()
-        display_table["Creator Key"] = display_table["Creator"].map(creator_key)
+        display_table = _apply_creator_profile_aliases_v68_67(
+            display_table,
+            creator_aliases,
+        )
         display_table["Creator Profile"] = display_table.apply(
             lambda row: creator_profile_url(row.get("Platform"), row.get("Creator")),
             axis=1,
@@ -5827,6 +6173,7 @@ if st.session_state.step == 2:
                 st.session_state.tagged_df = pd.DataFrame()
                 st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
                 st.session_state.creator_profile_updated_at_v68_51 = ""
+                st.session_state.creator_profile_aliases_v68_67 = {}
                 st.session_state.tiktok_follower_attempted_keys_v68_65 = []
                 st.session_state.last_message = ""
                 reset_date_filter_state_v68()
@@ -7381,6 +7728,7 @@ elif st.session_state.step == 6:
             st.session_state.tagged_df = pd.DataFrame()
             st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
             st.session_state.creator_profile_updated_at_v68_51 = ""
+            st.session_state.creator_profile_aliases_v68_67 = {}
             st.session_state.tiktok_follower_attempted_keys_v68_65 = []
             st.session_state.last_message = ""
             reset_date_filter_state_v68()

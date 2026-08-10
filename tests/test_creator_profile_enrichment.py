@@ -28,6 +28,7 @@ from ugc_tagger.creator_profile_enrichment import (
     profile_history_settings,
     profile_scope_count,
     reconcile_creator_profile_fallback_metrics,
+    resolve_tiktok_creator_handle,
     scrape_creator_profile_metrics,
     tiktok_profile_requires_fallback,
 )
@@ -67,6 +68,39 @@ class _FakeClient:
 
 
 class CreatorProfileEnrichmentTests(unittest.TestCase):
+    def test_resolves_renamed_tiktok_creator_from_live_post_identity(self):
+        resolved = resolve_tiktok_creator_handle(
+            "old.handle",
+            "https://www.tiktok.com/@old.handle/video/123",
+            post_extractor=lambda _url: {
+                "uploader_id": "current.handle",
+                "uploader": "Current display name",
+            },
+        )
+        self.assertEqual(resolved, "current.handle")
+
+    def test_resolves_renamed_tiktok_creator_from_live_canonical_url(self):
+        resolved = resolve_tiktok_creator_handle(
+            "old_handle",
+            "https://www.tiktok.com/@old_handle/video/123",
+            post_extractor=lambda _url: {
+                "uploader_id": "7198301643920",
+                "webpage_url": "https://www.tiktok.com/@new_handle/video/123",
+            },
+        )
+        self.assertEqual(resolved, "new_handle")
+
+    def test_renamed_tiktok_creator_rejects_numeric_id_and_display_name(self):
+        with self.assertRaisesRegex(RuntimeError, "current username"):
+            resolve_tiktok_creator_handle(
+                "old_handle",
+                "https://www.tiktok.com/@old_handle/video/123",
+                post_extractor=lambda _url: {
+                    "uploader_id": "7198301643920",
+                    "uploader": "Display Name Only",
+                },
+            )
+
     def test_tiktok_followers_only_reads_profile_header_without_post_scraping(self):
         profile_html = (
             '<script id="SIGI_STATE" type="application/json">'
