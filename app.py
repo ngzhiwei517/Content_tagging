@@ -20,7 +20,7 @@ import uuid
 import requests
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import pandas as pd
@@ -2946,6 +2946,240 @@ def _all_ranked_candidates_v56(batch: pd.DataFrame) -> pd.DataFrame:
         st.session_state.top_n = old_top_n
 
 
+def _ordered_ranked_replacements_v68_58(
+    selected: pd.DataFrame,
+    candidate_pool: pd.DataFrame,
+    *,
+    group_key: Callable,
+    normalize_link: Callable,
+) -> pd.DataFrame:
+    """Return unused candidates in ranked order, interleaved by active group."""
+    if selected.empty or candidate_pool.empty:
+        return candidate_pool.iloc[0:0].copy().reset_index(drop=True)
+
+    selected_links = {
+        normalize_link(value)
+        for value in selected.get("Link", pd.Series(dtype=str)).tolist()
+        if normalize_link(value)
+    }
+    target_keys = []
+    for _, row in selected.iterrows():
+        key = group_key(row)
+        if key not in target_keys:
+            target_keys.append(key)
+    buckets: Dict[Tuple[str, ...], List[Dict]] = {key: [] for key in target_keys}
+    seen = set(selected_links)
+    for _, row in candidate_pool.iterrows():
+        normalized = normalize_link(row.get("Link"))
+        key = group_key(row)
+        if not normalized or normalized in seen or key not in buckets:
+            continue
+        seen.add(normalized)
+        buckets[key].append(row.to_dict())
+
+    ordered: List[Dict] = []
+    offsets = {key: 0 for key in target_keys}
+    while True:
+        added = False
+        for key in target_keys:
+            position = offsets[key]
+            if position >= len(buckets[key]):
+                continue
+            ordered.append(buckets[key][position])
+            offsets[key] = position + 1
+            added = True
+        if not added:
+            break
+    return pd.DataFrame(ordered).reindex(columns=candidate_pool.columns).reset_index(drop=True)
+
+
+def _initial_checkpoint_rows_v68_58(
+    selected: pd.DataFrame,
+    candidate_pool: pd.DataFrame,
+    *,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> pd.DataFrame:
+    """Pad the first checkpoint to a chunk boundary with ranked replacements."""
+    base = selected.copy().reset_index(drop=True)
+    if base.empty:
+        return base
+    size = max(1, int(chunk_size))
+    padding = (-len(base)) % size
+    if padding <= 0 or candidate_pool.empty:
+        return base
+    return pd.concat(
+        [base, candidate_pool.head(padding)],
+        ignore_index=True,
+    )
+
+
+def _top_n_deficits_v68_58(
+    selected: pd.DataFrame,
+    results: pd.DataFrame,
+    *,
+    group_key: Callable,
+    removed_mask: Callable,
+) -> Dict[Tuple[str, ...], int]:
+    """Count how many usable posts each original Top-N group still needs."""
+    targets: Dict[Tuple[str, ...], int] = {}
+    for _, row in selected.iterrows():
+        key = group_key(row)
+        targets[key] = targets.get(key, 0) + 1
+
+    available_counts: Dict[Tuple[str, ...], int] = {}
+    if isinstance(results, pd.DataFrame) and not results.empty:
+        available = results.loc[~removed_mask(results)].copy()
+        for _, row in available.iterrows():
+            key = group_key(row)
+            if key in targets:
+                available_counts[key] = available_counts.get(key, 0) + 1
+    return {
+        key: max(0, target - available_counts.get(key, 0))
+        for key, target in targets.items()
+    }
+
+
+def _checkpoint_candidates_v68_58(
+    selected: pd.DataFrame,
+    batch: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the stable initial job rows and complete ranked replacement pool."""
+    ranked = _all_ranked_candidates_v56(batch)
+    replacements = _ordered_ranked_replacements_v68_58(
+        selected,
+        ranked,
+        group_key=_selection_group_key_v56,
+        normalize_link=final_update2_normalize_url,
+    )
+    initial = _initial_checkpoint_rows_v68_58(selected, replacements)
+    return initial, replacements
+
+
+def _checkpoint_execution_rows_v68_58(
+    initial: pd.DataFrame,
+    replacements: pd.DataFrame,
+    manifest: Dict,
+) -> pd.DataFrame:
+    """Rebuild the exact expanded checkpoint input after an app restart."""
+    rows = initial.copy().reset_index(drop=True)
+    existing = {
+        final_update2_normalize_url(value)
+        for value in rows.get("Link", pd.Series(dtype=str)).tolist()
+        if final_update2_normalize_url(value)
+    }
+    by_link = {
+        final_update2_normalize_url(row.get("Link")): row.to_dict()
+        for _, row in replacements.iterrows()
+        if final_update2_normalize_url(row.get("Link"))
+    }
+    appended = []
+    for value in manifest.get("backfill_links", []):
+        normalized = final_update2_normalize_url(value)
+        if not normalized or normalized in existing or normalized not in by_link:
+            continue
+        existing.add(normalized)
+        appended.append(by_link[normalized])
+    if appended:
+        rows = pd.concat(
+            [rows, pd.DataFrame(appended).reindex(columns=rows.columns)],
+            ignore_index=True,
+        )
+    return rows
+
+
+def _unused_replacement_wave_v68_58(
+    replacements: pd.DataFrame,
+    execution_rows: pd.DataFrame,
+    deficits: Dict[Tuple[str, ...], int],
+    *,
+    limit: int = DEFAULT_CHUNK_SIZE,
+) -> pd.DataFrame:
+    """Choose the next ranked checkpoint wave only from groups with a deficit."""
+    attempted = {
+        final_update2_normalize_url(value)
+        for value in execution_rows.get("Link", pd.Series(dtype=str)).tolist()
+        if final_update2_normalize_url(value)
+    }
+    rows = []
+    for _, candidate in replacements.iterrows():
+        normalized = final_update2_normalize_url(candidate.get("Link"))
+        key = _selection_group_key_v56(candidate)
+        if (
+            not normalized
+            or normalized in attempted
+            or deficits.get(key, 0) <= 0
+        ):
+            continue
+        attempted.add(normalized)
+        rows.append(candidate.to_dict())
+        if len(rows) >= max(1, int(limit)):
+            break
+    return pd.DataFrame(rows).reindex(columns=replacements.columns).reset_index(drop=True)
+
+
+def _unused_backfill_row_v68_58(row) -> Dict:
+    """Create a provider-free checkpoint row for a replacement no longer needed."""
+    output = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+    output.update(
+        {
+            "Review Action": "REMOVE",
+            "Needs Review": False,
+            "Validation Status": "removed",
+            "Tier Used": "backfill_not_needed",
+            "QA Priority": "Low",
+            "QA Reason": "Not analysed because the requested Top-N count was already complete.",
+            "Review Note": "Unused ranked replacement; no scraper or Gemini call was made.",
+            "Gemini Called": False,
+        }
+    )
+    return output
+
+
+def _without_unused_backfill_v68_58(results: pd.DataFrame) -> pd.DataFrame:
+    """Hide provider-free checkpoint fillers from Review and exports."""
+    if not isinstance(results, pd.DataFrame) or results.empty:
+        return results
+    tiers = results.get(
+        "Tier Used",
+        pd.Series([""] * len(results), index=results.index),
+    ).fillna("").astype(str).str.strip().str.lower()
+    return results.loc[~tiers.eq("backfill_not_needed")].reset_index(drop=True)
+
+
+def _extend_top_n_checkpoint_v68_58(
+    store: BatchCheckpointStore,
+    manifest: Dict,
+    selected: pd.DataFrame,
+    replacement_pool: pd.DataFrame,
+    execution_rows: pd.DataFrame,
+) -> Tuple[Dict, bool, Dict[Tuple[str, ...], int]]:
+    """Add the next bounded replacement wave when a completed job is short."""
+    completed = store.load_completed_results(manifest)
+    deficits = _top_n_deficits_v68_58(
+        selected,
+        completed,
+        group_key=_selection_group_key_v56,
+        removed_mask=_removed_mask_v56,
+    )
+    if not any(deficits.values()):
+        return manifest, False, deficits
+    wave = _unused_replacement_wave_v68_58(
+        replacement_pool,
+        execution_rows,
+        deficits,
+    )
+    if wave.empty:
+        return manifest, False, deficits
+    links = [
+        safe_str(value)
+        for value in wave.get("Link", pd.Series(dtype=str)).tolist()
+        if safe_str(value)
+    ]
+    if not links:
+        return manifest, False, deficits
+    return store.extend_with_backfill_links(manifest, links), True, deficits
+
+
 def _removed_mask_v56(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=bool)
@@ -3049,9 +3283,13 @@ def _large_batch_manifest_v68_43(selected: pd.DataFrame) -> Optional[Dict]:
         st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
     )
     try:
+        initial_rows, _ = _checkpoint_candidates_v68_58(
+            selected.reset_index(drop=True),
+            st.session_state.get("batch_df", pd.DataFrame()),
+        )
         return _large_batch_store_v68_43().find(
             runtime_id,
-            selected.reset_index(drop=True),
+            initial_rows,
             model=model,
         )
     except Exception:
@@ -3071,7 +3309,11 @@ def _large_batch_job_id_v68_55(selected: pd.DataFrame) -> str:
         st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
     )
     try:
-        fingerprint = input_fingerprint(selected.reset_index(drop=True), model)
+        initial_rows, _ = _checkpoint_candidates_v68_58(
+            selected.reset_index(drop=True),
+            st.session_state.get("batch_df", pd.DataFrame()),
+        )
+        fingerprint = input_fingerprint(initial_rows, model)
         return _large_batch_store_v68_43()._job_id(runtime_id, fingerprint)
     except Exception:
         return ""
@@ -3413,6 +3655,11 @@ def _run_checkpointed_tag_every_link_v68_43(
 
     store = _large_batch_store_v68_43()
     store.cleanup_old_jobs()
+    batch = st.session_state.get("batch_df", pd.DataFrame())
+    initial_rows, replacement_pool = _checkpoint_candidates_v68_58(
+        selected.reset_index(drop=True),
+        batch,
+    )
     proposed_started_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     proposed_run_id = (
         f"{gemini_model_slug(comparison_model)}_"
@@ -3421,10 +3668,11 @@ def _run_checkpointed_tag_every_link_v68_43(
     try:
         manifest = store.prepare(
             runtime_id,
-            selected,
+            initial_rows,
             model=comparison_model,
             comparison_run_id=proposed_run_id,
             comparison_started_utc=proposed_started_utc,
+            requested_rows=len(selected),
         )
     except Exception as exc:
         st.error(f"Could not create the large-batch checkpoint: {exc}")
@@ -3440,17 +3688,47 @@ def _run_checkpointed_tag_every_link_v68_43(
         manifest.get("elapsed_seconds", 0.0) or 0.0
     )
 
+    execution_rows = _checkpoint_execution_rows_v68_58(
+        initial_rows,
+        replacement_pool,
+        manifest,
+    )
+    if len(execution_rows) < int(manifest.get("total_rows", 0)):
+        st.error(
+            "The saved Top-N replacement queue could not be restored. "
+            "Open the original batch with the same filters and try again."
+        )
+        return pd.DataFrame()
+
     completed_rows = int(manifest.get("completed_rows", 0))
     saved_rows = int(manifest.get("saved_rows", completed_rows))
     total_rows = max(1, int(manifest.get("total_rows", len(selected))))
     total_chunks = max(1, int(manifest.get("total_chunks", 1)))
     next_chunk_index = store.next_chunk_index(manifest)
     if next_chunk_index is None:
-        completed = store.load_completed_results(manifest)
+        manifest, extended, deficits = _extend_top_n_checkpoint_v68_58(
+            store,
+            manifest,
+            selected,
+            replacement_pool,
+            execution_rows,
+        )
+        if extended:
+            store.mark_continuation_ready(manifest)
+            return None
+        completed = _without_unused_backfill_v68_58(
+            store.load_completed_results(manifest)
+        )
+        if any(deficits.values()):
+            available_count = max(0, len(selected) - sum(deficits.values()))
+            st.warning(
+                f"Only {available_count:,} of the requested {len(selected):,} "
+                "Top posts are available in the filtered batch."
+            )
         return _attach_comparison_metadata_v68_43(completed, manifest)
 
     chunk_number = next_chunk_index + 1
-    chunk = store.chunk_frame(selected, manifest, next_chunk_index)
+    chunk = store.chunk_frame(execution_rows, manifest, next_chunk_index)
     status = st.status(
         f"Large batch: chunk {chunk_number} of {total_chunks}",
         expanded=True,
@@ -3474,11 +3752,80 @@ def _run_checkpointed_tag_every_link_v68_43(
             for position in range(len(chunk))
             if position not in existing_positions
         ]
-        remaining_positions = all_remaining_positions[
+        saved_positions = set(existing_positions)
+
+        def save_checkpoint_row(chunk_position: int, tagged_row: Dict) -> None:
+            remote_row_saved = store.save_partial_row(
+                manifest["job_id"],
+                next_chunk_index,
+                chunk_position,
+                pd.Series(tagged_row),
+            )
+            if (
+                getattr(store, "persistent_store", None) is not None
+                and remote_row_saved is False
+            ):
+                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
+            saved_positions.add(chunk_position)
+
+        required_links = {
+            final_update2_normalize_url(value)
+            for value in selected.get("Link", pd.Series(dtype=str)).tolist()
+            if final_update2_normalize_url(value)
+        }
+        required_remaining = [
+            position
+            for position in all_remaining_positions
+            if final_update2_normalize_url(chunk.iloc[position].get("Link"))
+            in required_links
+        ]
+        if required_remaining:
+            # Finish the user's original Top-N rows before spending anything on
+            # possible replacements. Public data may still be prefetched in a
+            # bounded group, but Gemini remains limited to the live row budget.
+            eligible_positions = required_remaining
+        else:
+            saved_results = store.load_saved_results(manifest)
+            deficits = _top_n_deficits_v68_58(
+                selected,
+                saved_results,
+                group_key=_selection_group_key_v56,
+                removed_mask=_removed_mask_v56,
+            )
+            no_longer_needed = [
+                position
+                for position in all_remaining_positions
+                if deficits.get(_selection_group_key_v56(chunk.iloc[position]), 0)
+                <= 0
+            ]
+            for position in no_longer_needed:
+                save_checkpoint_row(
+                    position,
+                    _unused_backfill_row_v68_58(chunk.iloc[position]),
+                )
+            all_remaining_positions = [
+                position
+                for position in all_remaining_positions
+                if position not in saved_positions
+            ]
+            reserved: Dict[Tuple[str, ...], int] = {}
+            eligible_positions = []
+            for position in all_remaining_positions:
+                key = _selection_group_key_v56(chunk.iloc[position])
+                if reserved.get(key, 0) >= deficits.get(key, 0):
+                    continue
+                reserved[key] = reserved.get(key, 0) + 1
+                eligible_positions.append(position)
+
+        remaining_positions = eligible_positions[
             :MAX_LIVE_POSTS_PER_EXECUTION_V68_52
         ]
+        # Inspect the whole currently eligible window, then let the existing
+        # bounded slice below collect at most 25 missing records. This preserves
+        # the proven 25-at-a-time scrape windows for original rows, while a
+        # replacement window contains only the posts needed for its deficit.
+        scrape_positions = eligible_positions
         remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
-        saved_positions = set(existing_positions)
 
         records = store.load_scraped_records(manifest["job_id"], next_chunk_index)
         records = list(records or [])
@@ -3486,7 +3833,7 @@ def _run_checkpointed_tag_every_link_v68_43(
         rows_missing_records = [
             row
             for position, row in chunk.iterrows()
-            if position in all_remaining_positions
+            if position in scrape_positions
             and _final_update2_adapter.match_record(row, by_id, by_url) is None
         ]
         if rows_missing_records:
@@ -3551,22 +3898,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 pd.DataFrame([tagged_row]),
                 "Tag every link",
             )
-            remote_row_saved = store.save_partial_row(
-                manifest["job_id"],
-                next_chunk_index,
-                chunk_position,
-                routed_row.iloc[0],
-            )
-            # The immediately previous checkpoint class returned ``None`` even
-            # after a successful remote write. Only an explicit ``False`` from
-            # the current class proves that configured persistence failed. This
-            # keeps Streamlit's brief mixed-module hot-reload window compatible.
-            if (
-                getattr(store, "persistent_store", None) is not None
-                and remote_row_saved is False
-            ):
-                raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
-            saved_positions.add(chunk_position)
+            save_checkpoint_row(chunk_position, routed_row.iloc[0].to_dict())
             if sensitive_count:
                 logs.append("Routed 1 sensitive post to human review.")
             overall_saved = completed_rows + len(saved_positions)
@@ -3652,11 +3984,33 @@ def _run_checkpointed_tag_every_link_v68_43(
             tagged_chunk,
             elapsed_seconds=time.perf_counter() - chunk_timer,
         )
+        extended = False
+        if manifest.get("status") == "completed":
+            manifest, extended, deficits = _extend_top_n_checkpoint_v68_58(
+                store,
+                manifest,
+                selected,
+                replacement_pool,
+                execution_rows,
+            )
+            if extended:
+                replacement_total = sum(deficits.values())
+                status.update(
+                    label=(
+                        f"Saved progress; checking the next-ranked posts for "
+                        f"{replacement_total:,} replacement(s)"
+                    ),
+                    state="complete",
+                    expanded=False,
+                )
+                store.mark_continuation_ready(manifest)
         # Keep only the latest records in memory. Older completed chunks already
         # contain the public URLs and preview fields needed by Review.
         st.session_state.apify_records_by_key = final_update2_review_cache(records)
         partial = _attach_comparison_metadata_v68_43(
-            store.load_completed_results(manifest),
+            _without_unused_backfill_v68_58(
+                store.load_completed_results(manifest)
+            ),
             manifest,
         )
         st.session_state.tagged_df = partial
@@ -3665,14 +4019,15 @@ def _run_checkpointed_tag_every_link_v68_43(
         )
         _persist_runtime_checkpoint_v68_15()
         progress.progress(min(int(manifest["completed_rows"]) / total_rows, 1.0))
-        status.update(
-            label=(
-                f"Saved chunk {chunk_number} of {total_chunks} "
-                f"({int(manifest['completed_rows']):,}/{total_rows:,} posts)"
-            ),
-            state="complete",
-            expanded=False,
-        )
+        if not extended:
+            status.update(
+                label=(
+                    f"Saved chunk {chunk_number} of {total_chunks} "
+                    f"({int(manifest['completed_rows']):,}/{total_rows:,} posts)"
+                ),
+                state="complete",
+                expanded=False,
+            )
         if manifest.get("status") != "completed":
             store.mark_continuation_ready(manifest)
     except Exception as exc:
@@ -3686,7 +4041,9 @@ def _run_checkpointed_tag_every_link_v68_43(
         quota_pause = _is_quota_interruption_v68_43(exc)
         manifest = store.mark_paused(manifest, quota=quota_pause)
         partial = _attach_comparison_metadata_v68_43(
-            store.load_saved_results(manifest),
+            _without_unused_backfill_v68_58(
+                store.load_saved_results(manifest)
+            ),
             manifest,
         )
         if not partial.empty:
@@ -3723,7 +4080,21 @@ def _run_checkpointed_tag_every_link_v68_43(
         raise
 
     if manifest.get("status") == "completed":
-        completed = store.load_completed_results(manifest)
+        completed = _without_unused_backfill_v68_58(
+            store.load_completed_results(manifest)
+        )
+        deficits = _top_n_deficits_v68_58(
+            selected,
+            completed,
+            group_key=_selection_group_key_v56,
+            removed_mask=_removed_mask_v56,
+        )
+        if any(deficits.values()):
+            available_count = max(0, len(selected) - sum(deficits.values()))
+            st.warning(
+                f"Only {available_count:,} of the requested {len(selected):,} "
+                "Top posts are available in the filtered batch."
+            )
         return _attach_comparison_metadata_v68_43(completed, manifest)
     return None
 

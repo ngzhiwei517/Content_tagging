@@ -55,6 +55,9 @@ class _Streamlit:
     def error(self, message):
         self.errors.append(str(message))
 
+    def warning(self, message):
+        self.errors.append(str(message))
+
 
 class _MemoryCheckpointObjects:
     def __init__(self):
@@ -89,6 +92,49 @@ class _FailPartialCheckpointObjects(_MemoryCheckpointObjects):
 
 
 def _load_runner(namespace):
+    namespace.setdefault(
+        "_checkpoint_candidates_v68_58",
+        lambda selected, _batch: (selected.reset_index(drop=True), pd.DataFrame()),
+    )
+    namespace.setdefault(
+        "_checkpoint_execution_rows_v68_58",
+        lambda initial, _replacements, _manifest: initial.reset_index(drop=True),
+    )
+    namespace.setdefault(
+        "_extend_top_n_checkpoint_v68_58",
+        lambda _store, manifest, _selected, _replacements, _rows: (
+            manifest,
+            False,
+            {},
+        ),
+    )
+    namespace.setdefault(
+        "_without_unused_backfill_v68_58",
+        lambda frame: frame,
+    )
+    namespace.setdefault(
+        "_top_n_deficits_v68_58",
+        lambda _selected, _results, **_kwargs: {},
+    )
+    namespace.setdefault(
+        "_unused_backfill_row_v68_58",
+        lambda row: row.to_dict() | {
+            "Review Action": "REMOVE",
+            "Validation Status": "removed",
+        },
+    )
+    namespace.setdefault(
+        "_selection_group_key_v56",
+        lambda _row: ("All selected posts",),
+    )
+    namespace.setdefault(
+        "_removed_mask_v56",
+        lambda frame: pd.Series([False] * len(frame), index=frame.index),
+    )
+    namespace.setdefault(
+        "final_update2_normalize_url",
+        lambda value: str(value or "").strip(),
+    )
     definition = next(
         node
         for node in APP_TREE.body
@@ -102,6 +148,179 @@ def _load_runner(namespace):
 
 
 class LargeBatchScrapeWindowTests(unittest.TestCase):
+    def test_top_fifty_backfills_unavailable_rows_without_tagging_surplus(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "Platform": "TikTok",
+                    "Source": "Top 50 simulation",
+                    "Link": f"https://www.tiktok.com/@creator/video/{950000 + index}",
+                    "Market": "SG",
+                    "Track": "Ranked track",
+                    "Creator": f"creator_{index}",
+                }
+                for index in range(50)
+            ]
+        )
+        replacements = pd.DataFrame(
+            [
+                selected.iloc[0].to_dict()
+                | {
+                    "Link": f"https://www.tiktok.com/@replacement/video/{959000 + index}",
+                    "Creator": f"replacement_{index}",
+                }
+                for index in range(10)
+            ]
+        )
+        unavailable_links = set(selected.iloc[:5]["Link"])
+        scrape_sizes = []
+        tag_calls = []
+        fake_st = _Streamlit()
+
+        def normalize(value):
+            return str(value or "").strip()
+
+        def removed_mask(frame):
+            return frame.get(
+                "Validation Status",
+                pd.Series([""] * len(frame), index=frame.index),
+            ).fillna("").astype(str).str.lower().eq("removed")
+
+        def deficits(_selected, results, **_kwargs):
+            usable = results.loc[~removed_mask(results)] if not results.empty else results
+            return {("All selected posts",): max(0, 50 - len(usable))}
+
+        def execution_rows(initial, pool, manifest):
+            rows = initial.copy()
+            requested = list(manifest.get("backfill_links", []))
+            if requested:
+                rows = pd.concat(
+                    [rows, pool[pool["Link"].isin(requested)]],
+                    ignore_index=True,
+                )
+            return rows.reset_index(drop=True)
+
+        def extend(store, manifest, _selected, pool, rows):
+            missing = deficits(_selected, store.load_completed_results(manifest))
+            if not any(missing.values()):
+                return manifest, False, missing
+            attempted = set(rows["Link"])
+            wave = pool[~pool["Link"].isin(attempted)].head(50)
+            if wave.empty:
+                return manifest, False, missing
+            return (
+                store.extend_with_backfill_links(manifest, wave["Link"].tolist()),
+                True,
+                missing,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def scrape(links, _token, **_kwargs):
+                scrape_sizes.append(len(links))
+                return [
+                    {"submittedVideoUrl": link, "webVideoUrl": link}
+                    for link in links
+                ]
+
+            def tag_rows(
+                remaining,
+                _records,
+                _gemini_key,
+                _apify_token,
+                _model,
+                _logs,
+                _remaining_positions,
+                _saved_positions,
+                on_result,
+                on_progress,
+            ):
+                for position, (_, row) in enumerate(remaining.iterrows()):
+                    link = row["Link"]
+                    tag_calls.append(link)
+                    removed = link in unavailable_links
+                    on_result(
+                        position,
+                        row.to_dict()
+                        | {
+                            "Creative Type": "Others",
+                            "Review Action": "REMOVE" if removed else "",
+                            "Validation Status": "removed" if removed else "pass",
+                        },
+                        "auto_removed_unavailable" if removed else "tier1_cover",
+                    )
+                    on_progress(position + 1, len(remaining), "tier1_cover")
+
+            namespace = {
+                "BatchCheckpointStore": BatchCheckpointStore,
+                "Dict": Dict,
+                "List": List,
+                "LOGGER": logging.getLogger("top-fifty-backfill-test"),
+                "MAX_APIFY_POSTS_PER_EXECUTION_V68_54": 25,
+                "MAX_LIVE_POSTS_PER_EXECUTION_V68_52": 5,
+                "Optional": Optional,
+                "REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52": 5,
+                "_attach_comparison_metadata_v68_43": lambda frame, _manifest: frame,
+                "_checkpoint_candidates_v68_58": lambda frame, _batch: (
+                    frame.reset_index(drop=True),
+                    replacements,
+                ),
+                "_checkpoint_execution_rows_v68_58": execution_rows,
+                "_extend_top_n_checkpoint_v68_58": extend,
+                "_final_update2_adapter": adapter,
+                "_is_quota_interruption_v68_43": lambda _exc: False,
+                "_large_batch_error_code_v68_43": lambda _exc: "TEST_ERROR",
+                "_large_batch_store_v68_43": lambda: BatchCheckpointStore(root),
+                "_persist_runtime_checkpoint_v68_15": lambda: None,
+                "_removed_mask_v56": removed_mask,
+                "_render_run_log_v45": lambda *_args: None,
+                "_route_sensitive_for_selection_v56": lambda frame, _mode: (frame, 0),
+                "_selection_group_key_v56": lambda _row: ("All selected posts",),
+                "_tag_remaining_with_row_isolation_v68_43": tag_rows,
+                "_top_n_deficits_v68_58": deficits,
+                "_unused_backfill_row_v68_58": lambda row: row.to_dict()
+                | {
+                    "Review Action": "REMOVE",
+                    "Validation Status": "removed",
+                    "Tier Used": "backfill_not_needed",
+                },
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_without_unused_backfill_v68_58": lambda frame: frame.loc[
+                    ~frame.get(
+                        "Tier Used",
+                        pd.Series([""] * len(frame), index=frame.index),
+                    ).fillna("").astype(str).eq("backfill_not_needed")
+                ].reset_index(drop=True),
+                "datetime": datetime,
+                "final_update2_normalize_url": normalize,
+                "final_update2_review_cache": adapter.review_cache,
+                "final_update2_scrape_links": scrape,
+                "gemini_model_slug": lambda _model: "test-model",
+                "is_supported_link": lambda _link: True,
+                "pd": pd,
+                "platform_for_url": adapter.detect_platform,
+                "safe_str": lambda value: "" if value is None else str(value),
+                "st": fake_st,
+                "time": time,
+                "timezone": timezone,
+                "uuid": uuid,
+            }
+            runner = _load_runner(namespace)
+            result = None
+            for _ in range(40):
+                result = runner(selected, "gemini-key", "apify-token", "test-model")
+                if result is not None:
+                    break
+
+        self.assertIsInstance(result, pd.DataFrame)
+        usable = result.loc[~removed_mask(result)]
+        self.assertEqual(len(usable), 50)
+        self.assertEqual(len(tag_calls), 55)
+        self.assertEqual(tag_calls[-5:], replacements.iloc[:5]["Link"].tolist())
+        self.assertEqual(scrape_sizes, [25, 25, 5])
+        self.assertFalse(fake_st.errors)
+
     def test_two_hundred_fifty_posts_never_reach_apify_in_one_request(self):
         selected = pd.DataFrame(
             [

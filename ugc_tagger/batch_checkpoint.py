@@ -323,18 +323,29 @@ class BatchCheckpointStore:
         model: str,
         comparison_run_id: str,
         comparison_started_utc: str,
+        requested_rows: Optional[int] = None,
     ) -> Dict:
         """Create a new job or reconcile an existing resumable job."""
         fingerprint = input_fingerprint(selected, model)
         job_id = self._job_id(runtime_id, fingerprint)
         existing = self.load_manifest(job_id)
-        total_rows = len(selected)
+        initial_rows = len(selected)
+        requested_rows = max(
+            0,
+            min(
+                initial_rows,
+                int(initial_rows if requested_rows is None else requested_rows),
+            ),
+        )
+        total_rows = initial_rows
         total_chunks = (total_rows + self.chunk_size - 1) // self.chunk_size
 
         if (
             existing
             and existing.get("fingerprint") == fingerprint
-            and int(existing.get("total_rows", -1)) == total_rows
+            and int(existing.get("initial_rows", existing.get("total_rows", -1)))
+            == initial_rows
+            and int(existing.get("requested_rows", requested_rows)) == requested_rows
             and int(existing.get("chunk_size", -1)) == self.chunk_size
         ):
             return self.reconcile(existing)
@@ -346,9 +357,12 @@ class BatchCheckpointStore:
             "fingerprint": fingerprint,
             "status": "running",
             "model": str(model),
+            "initial_rows": initial_rows,
+            "requested_rows": requested_rows,
             "total_rows": total_rows,
             "chunk_size": self.chunk_size,
             "total_chunks": total_chunks,
+            "backfill_links": [],
             "completed_chunks": [],
             "completed_rows": 0,
             "partial_rows": 0,
@@ -365,6 +379,46 @@ class BatchCheckpointStore:
         }
         self._atomic_write_json(self._manifest_path(job_id), manifest)
         return manifest
+
+    def extend_with_backfill_links(
+        self,
+        manifest: Dict,
+        links: Iterable[str],
+    ) -> Dict:
+        """Append one ranked replacement wave without changing the job id.
+
+        Callers extend only after every currently declared chunk is complete.
+        The original fingerprint therefore remains the recovery identity while
+        ``backfill_links`` records the deterministic extra input rows needed to
+        replace unavailable posts.
+        """
+        reconciled = self.reconcile(manifest)
+        updated = dict(reconciled)
+        existing = [str(link).strip() for link in updated.get("backfill_links", [])]
+        seen = {link for link in existing if link}
+        appended = []
+        for value in links:
+            link = str(value or "").strip()
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            appended.append(link)
+        if not appended:
+            return updated
+
+        previous_total = int(updated.get("total_rows", 0))
+        chunk_size = max(1, int(updated.get("chunk_size", self.chunk_size)))
+        updated["backfill_links"] = existing + appended
+        updated["total_rows"] = previous_total + len(appended)
+        updated["total_chunks"] = (
+            int(updated["total_rows"]) + chunk_size - 1
+        ) // chunk_size
+        updated["status"] = "running"
+        updated["pause_reason"] = ""
+        updated["last_error"] = ""
+        updated["continuation_ready"] = True
+        updated["execution_lease_until"] = 0
+        return self.save_manifest(updated)
 
     def find(
         self,
