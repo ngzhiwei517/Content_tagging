@@ -179,7 +179,6 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
-                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)
@@ -286,7 +285,6 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
-                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)
@@ -409,7 +407,6 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
-                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)

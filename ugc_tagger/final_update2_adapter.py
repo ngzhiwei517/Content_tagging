@@ -786,41 +786,66 @@ def enrich_review_drama(
 MAX_APIFY_POSTS_PER_REQUEST = 25
 
 
-def _known_instagram_view(
-    known_instagram_views: Optional[Dict[str, int]],
-    link: str,
-) -> Optional[int]:
-    """Return an explicitly supplied file view count for one Instagram URL."""
-    if not known_instagram_views:
-        return None
-    normalized = normalize_post_url(link)
-    identifier = post_identifier(link)
-    for key in (normalized, link, identifier):
-        if key and key in known_instagram_views:
-            return _number(known_instagram_views[key])
-    return None
-
-
-def _apply_known_instagram_view(record: Dict, views: int) -> Dict:
-    """Fill one direct record from uploaded metrics without changing its media."""
-    record["playCount"] = _number(views)
+def _instagram_unavailable_metrics(record: Optional[Dict]) -> set:
+    if not isinstance(record, dict):
+        return {"views", "likes", "comments", "shares", "saves"}
     unavailable = record.get("instagramMetricsUnavailable", [])
     if not isinstance(unavailable, list):
         unavailable = []
-    record["instagramMetricsUnavailable"] = [
-        metric for metric in unavailable if _text(metric).casefold() != "views"
+    return {_text(metric).casefold() for metric in unavailable if _text(metric)}
+
+
+def _merge_instagram_refresh_records(
+    direct_record: Optional[Dict],
+    fallback_record: Optional[Dict],
+) -> Optional[Dict]:
+    """Prefer current Apify data without discarding useful free-scrape fields."""
+    direct = dict(direct_record) if isinstance(direct_record, dict) else None
+    fallback = dict(fallback_record) if isinstance(fallback_record, dict) else None
+    fallback_error = _text(
+        (fallback or {}).get("error") or (fallback or {}).get("errorCode")
+    )
+    if fallback is None or fallback_error:
+        return direct or fallback
+    if direct is None:
+        return fallback
+
+    merged = dict(fallback)
+    direct_unavailable = _instagram_unavailable_metrics(direct)
+    fallback_unavailable = _instagram_unavailable_metrics(fallback)
+    metric_fields = {
+        "views": "playCount",
+        "likes": "diggCount",
+        "comments": "commentCount",
+        "shares": "shareCount",
+        "saves": "collectCount",
+    }
+    for metric, field in metric_fields.items():
+        if metric in fallback_unavailable and metric not in direct_unavailable:
+            merged[field] = direct.get(field, 0)
+
+    merged["instagramMetricsUnavailable"] = [
+        label
+        for label in ("Views", "Likes", "Comments", "Shares", "Saves")
+        if label.casefold() in direct_unavailable
+        and label.casefold() in fallback_unavailable
     ]
-    record["_views_source"] = "uploaded_file"
-    return record
+
+    for field in (
+        "url", "webVideoUrl", "submittedVideoUrl", "inputUrl", "text",
+        "mediaUrls", "images", "slideshowImageLinks", "videoMeta",
+        "authorMeta", "musicMeta", "createTimeISO",
+    ):
+        if merged.get(field) in (None, "", [], {}) and direct.get(field) not in (
+            None, "", [], {},
+        ):
+            merged[field] = direct[field]
+    merged["_scrape_provider"] = "direct_then_apify"
+    return merged
 
 
-def scrape_links(
-    links: List[str],
-    apify_token: str,
-    *,
-    known_instagram_views: Optional[Dict[str, int]] = None,
-) -> List[Dict]:
-    """Use direct retrieval first and avoid repeating uploaded IG view metrics."""
+def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
+    """Refresh direct public metadata first, with selective Apify fallback."""
     tiktok_links = [link for link in links if detect_platform(link) == TIKTOK]
     instagram_links = [link for link in links if detect_platform(link) == INSTAGRAM_REELS]
     if len(tiktok_links) > MAX_APIFY_POSTS_PER_REQUEST:
@@ -880,17 +905,7 @@ def scrape_links(
     if instagram_links:
         direct_records, fallback_links = scrape_instagram_posts_direct(instagram_links)
         direct_by_id, direct_by_url = index_records(direct_records)
-        paid_fallback_links: List[str] = []
-        for link in fallback_links:
-            direct_record = match_record({"Link": link}, direct_by_id, direct_by_url)
-            known_views = _known_instagram_view(known_instagram_views, link)
-            if isinstance(direct_record, dict) and known_views is not None:
-                _apply_known_instagram_view(direct_record, known_views)
-            else:
-                # A missing direct record still needs Apify for usable post/media
-                # data. A partial record needs it only when uploaded Views are
-                # unavailable too.
-                paid_fallback_links.append(link)
+        paid_fallback_links = list(fallback_links)
 
         fallback_records: List[Dict] = []
         if paid_fallback_links:
@@ -916,25 +931,9 @@ def scrape_links(
         for link in instagram_links:
             direct_record = match_record({"Link": link}, direct_by_id, direct_by_url)
             fallback_record = match_record({"Link": link}, fallback_by_id, fallback_by_url)
-            fallback_unavailable = {
-                _text(metric).casefold()
-                for metric in (
-                    fallback_record.get("instagramMetricsUnavailable", [])
-                    if isinstance(fallback_record, dict)
-                    else []
-                )
-            }
-            fallback_has_views = (
-                isinstance(fallback_record, dict)
-                and not _text(fallback_record.get("error") or fallback_record.get("errorCode"))
-                and "views" not in fallback_unavailable
-            )
-            selected = (
-                fallback_record
-                if fallback_has_views
-                else direct_record
-                if isinstance(direct_record, dict)
-                else fallback_record
+            selected = _merge_instagram_refresh_records(
+                direct_record,
+                fallback_record,
             )
             if isinstance(selected, dict):
                 instagram_records.append(selected)

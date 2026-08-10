@@ -73,6 +73,18 @@ def _number(value) -> int:
     return max(number, 0)
 
 
+def _optional_number(value):
+    """Return a non-negative number while preserving an unavailable value."""
+    raw = _text(value)
+    if not raw:
+        return pd.NA
+    try:
+        number = int(float(raw.replace(",", "")))
+    except (TypeError, ValueError):
+        return pd.NA
+    return max(number, 0)
+
+
 def _nested(record: Dict, *path, default=None):
     current = record
     for part in path:
@@ -214,13 +226,25 @@ def _instagram_post_row(record: Dict) -> Dict:
         or _nested(record, "owner", "followersCount", default=0)
         or _first(user, ("follower_count", "followers_count", "followers"), 0)
     )
-    views = _number(
+    views = _optional_number(
         _first(
             record,
             ("videoPlayCount", "videoViewCount", "viewCount", "playCount", "viewsCount"),
-            0,
         )
     )
+    media_type = " ".join(
+        _text(record.get(key)).casefold()
+        for key in ("type", "mediaType", "productType")
+        if _text(record.get(key))
+    )
+    is_non_video = (
+        record.get("isVideo") is False
+        or any(marker in media_type for marker in ("image", "sidecar", "carousel"))
+    )
+    # Instagram/Apify can return videoPlayCount=0 for image and carousel posts.
+    # That is a schema placeholder rather than a measured zero view count.
+    if pd.notna(views) and views == 0 and is_non_video:
+        views = pd.NA
     engagement = sum(
         _number(_first(record, keys, 0))
         for keys in (
@@ -241,7 +265,11 @@ def _instagram_post_row(record: Dict) -> Dict:
         "Followers": followers,
         "Views": views,
         "Engagement": engagement,
-        "Engagement Rate": (engagement / views * 100) if views else pd.NA,
+        "Engagement Rate": (
+            engagement / views * 100
+            if pd.notna(views) and views > 0
+            else pd.NA
+        ),
     }
 
 
@@ -962,16 +990,21 @@ def _extract_instagram_user_full_window(
                 complete = False
                 partial_reason = f"{safe_cap}-post safety limit reached"
                 break
-            entries.append({
+            entry = {
                 "id": _text(getattr(post, "mediaid", "")),
                 "shortCode": _text(getattr(post, "shortcode", "")),
                 "ownerUsername": handle,
                 "ownerFollowersCount": followers,
                 "timestamp": post_date,
-                "videoViewCount": _number(getattr(post, "video_view_count", 0)),
                 "likesCount": _number(getattr(post, "likes", 0)),
                 "commentsCount": _number(getattr(post, "comments", 0)),
-            })
+            }
+            video_views = _optional_number(
+                getattr(post, "video_view_count", None)
+            )
+            if pd.notna(video_views):
+                entry["videoViewCount"] = video_views
+            entries.append(entry)
         return {
             "followers": followers,
             "entries": entries,
@@ -1088,11 +1121,16 @@ def _aggregate_profile_posts(
         ),
         axis=1,
     )
-    for column in [
-        "Profile Posts", "Current Followers", "Profile Average Views",
-        "Profile Average Engagement", "Profile Average Engagement Rate",
-    ]:
+    for column in ["Profile Posts", "Current Followers"]:
         summary[column] = pd.to_numeric(summary[column], errors="coerce").fillna(0)
+    no_recent_posts = summary["Profile Posts"].le(0)
+    for column in [
+        "Profile Average Views",
+        "Profile Average Engagement",
+        "Profile Average Engagement Rate",
+    ]:
+        summary[column] = pd.to_numeric(summary[column], errors="coerce")
+        summary.loc[no_recent_posts, column] = 0
     return summary[PROFILE_METRIC_COLUMNS]
 
 
@@ -1299,6 +1337,100 @@ def fetch_direct_creator_profile_metrics(
     return metrics, errors
 
 
+def reconcile_creator_profile_fallback_metrics(
+    direct_metrics: pd.DataFrame,
+    fallback_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """Keep free profile data unless the paid fallback is genuinely better."""
+    direct = (
+        direct_metrics.copy()
+        if isinstance(direct_metrics, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    fallback = (
+        fallback_metrics.copy()
+        if isinstance(fallback_metrics, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    if direct.empty:
+        return fallback.reset_index(drop=True)
+    if fallback.empty:
+        return direct.reset_index(drop=True)
+
+    columns = list(dict.fromkeys([*direct.columns, *fallback.columns]))
+
+    def row_key(row: Dict) -> Tuple[str, str]:
+        return _text(row.get("Platform")), creator_key(row.get("Creator Key"))
+
+    def numeric_value(row: Dict, column: str):
+        return pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").iloc[0]
+
+    direct_rows = {row_key(row): row for row in direct.to_dict("records")}
+    fallback_rows = {row_key(row): row for row in fallback.to_dict("records")}
+    ordered_keys = list(dict.fromkeys([*direct_rows, *fallback_rows]))
+    selected_rows = []
+
+    for key in ordered_keys:
+        direct_row = direct_rows.get(key)
+        fallback_row = fallback_rows.get(key)
+        if direct_row is None:
+            selected_rows.append(fallback_row)
+            continue
+        if fallback_row is None:
+            selected_rows.append(direct_row)
+            continue
+
+        direct_status = _text(direct_row.get("Profile Data Status"))
+        fallback_status = _text(fallback_row.get("Profile Data Status"))
+        direct_unavailable = (
+            not direct_status or direct_status.casefold().startswith("unavailable")
+        )
+        fallback_unavailable = (
+            not fallback_status or fallback_status.casefold().startswith("unavailable")
+        )
+        direct_posts = numeric_value(direct_row, "Profile Posts")
+        fallback_posts = numeric_value(fallback_row, "Profile Posts")
+        direct_views = numeric_value(direct_row, "Profile Average Views")
+        fallback_views = numeric_value(fallback_row, "Profile Average Views")
+        direct_views_missing = (
+            pd.notna(direct_posts) and direct_posts > 0 and pd.isna(direct_views)
+        )
+        fallback_improves_views = (
+            pd.notna(fallback_posts)
+            and fallback_posts > 0
+            and pd.notna(fallback_views)
+        )
+        use_fallback = (
+            not fallback_unavailable
+            and (direct_unavailable or (direct_views_missing and fallback_improves_views))
+        )
+        selected = dict(fallback_row if use_fallback else direct_row)
+
+        selected_status = _text(selected.get("Profile Data Status"))
+        selected_posts = numeric_value(selected, "Profile Posts")
+        selected_views = numeric_value(selected, "Profile Average Views")
+        if use_fallback and selected_status.casefold().startswith("available"):
+            if pd.notna(selected_posts) and selected_posts > 0 and pd.isna(selected_views):
+                selected["Profile Data Status"] = (
+                    "Available (Apify fallback: latest 20 posts; views unavailable)"
+                )
+            else:
+                selected["Profile Data Status"] = (
+                    "Available (Apify fallback: latest 20 posts)"
+                )
+        elif (
+            not use_fallback
+            and direct_views_missing
+            and selected_status.casefold().startswith("available")
+        ):
+            selected["Profile Data Status"] = (
+                "Available (views unavailable after Apify fallback)"
+            )
+        selected_rows.append(selected)
+
+    return pd.DataFrame(selected_rows).reindex(columns=columns).reset_index(drop=True)
+
+
 def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
     """Return True when direct Instagram results are missing essential fields."""
     if not isinstance(metrics, pd.DataFrame) or metrics.empty:
@@ -1317,7 +1449,12 @@ def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
     ).fillna(0)
     incomplete_status = status.str.startswith(("Unavailable", "Partial"))
     followers_missing = followers.le(0)
-    return bool((incomplete_status | followers_missing).any())
+    views_missing = pd.Series(False, index=instagram.index)
+    if {"Profile Posts", "Profile Average Views"}.issubset(instagram.columns):
+        posts = pd.to_numeric(instagram["Profile Posts"], errors="coerce").fillna(0)
+        views = pd.to_numeric(instagram["Profile Average Views"], errors="coerce")
+        views_missing = posts.gt(0) & views.isna()
+    return bool((incomplete_status | followers_missing | views_missing).any())
 
 
 def tiktok_profile_requires_fallback(metrics: pd.DataFrame) -> bool:

@@ -426,7 +426,9 @@ class SummaryV6815Tests(unittest.TestCase):
             "post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT",
             creator_section,
         )
-        self.assertIn("Apify fallback: latest 20 posts", creator_section)
+        self.assertIn(
+            "reconcile_creator_profile_fallback_metrics(", creator_section
+        )
         self.assertIn("if profile_fallback_targets:", creator_section)
         direct_lookup_position = creator_section.index(
             "direct_creator_profile_metrics_v68_58("
@@ -461,6 +463,24 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         self.assertTrue(
             self.creator_profile_direct_failed(pd.DataFrame(), "Instagram Reels")
+        )
+
+        missing_views = pd.DataFrame([{
+            "Platform": "Instagram Reels",
+            "Profile Data Status": "Available",
+            "Profile Posts": 3,
+            "Profile Average Views": pd.NA,
+        }])
+        explicit_zero_views = missing_views.copy()
+        explicit_zero_views["Profile Average Views"] = 0
+        self.assertTrue(
+            self.creator_profile_direct_failed(missing_views, "Instagram Reels")
+        )
+        self.assertFalse(
+            self.creator_profile_direct_failed(explicit_zero_views, "Instagram Reels")
+        )
+        self.assertIn(
+            "returns a genuinely better metric row", APP_SOURCE
         )
 
     def test_profile_followers_backfill_zero_batch_values_and_kol_size(self):

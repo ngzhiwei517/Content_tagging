@@ -48,6 +48,7 @@ from ugc_tagger.creator_profile_enrichment import (
     fetch_direct_creator_profile_metrics,
     fetch_tiktok_profile_followers,
     profile_history_settings,
+    reconcile_creator_profile_fallback_metrics,
     scrape_creator_profile_metrics,
 )
 from ugc_tagger.model_comparison import (
@@ -1087,7 +1088,25 @@ def creator_profile_direct_failed_v68_66(
     if platform_rows.empty:
         return True
     statuses = platform_rows["Profile Data Status"].fillna("").astype(str).str.strip()
-    return bool(statuses.eq("").any() or statuses.str.startswith("Unavailable").any())
+    unavailable = statuses.eq("") | statuses.str.startswith("Unavailable")
+    if safe_str(platform).casefold().startswith("instagram"):
+        profile_posts = pd.to_numeric(
+            platform_rows.get(
+                "Profile Posts",
+                pd.Series(0, index=platform_rows.index, dtype="int64"),
+            ),
+            errors="coerce",
+        ).fillna(0)
+        average_views = pd.to_numeric(
+            platform_rows.get("Profile Average Views", pd.Series(
+                pd.NA,
+                index=platform_rows.index,
+                dtype="Float64",
+            )),
+            errors="coerce",
+        )
+        unavailable |= profile_posts.gt(0) & average_views.isna()
+    return bool(unavailable.any())
 
 
 @st.cache_data(
@@ -1707,31 +1726,6 @@ def unavailable_metric_names(value) -> set:
 def metric_is_available(row, metric: str) -> bool:
     unavailable = unavailable_metric_names(row.get("Metrics Unavailable", ""))
     return safe_str(metric).strip().lower() not in unavailable
-
-
-def uploaded_instagram_views(rows) -> Dict[str, int]:
-    """Index valid Instagram Views supplied by uploaded input rows.
-
-    The availability marker distinguishes an explicit zero from the default
-    zero used when an uploaded file or pasted link did not provide Views.
-    """
-    if isinstance(rows, pd.DataFrame):
-        input_rows = [row for _, row in rows.iterrows()]
-    elif isinstance(rows, pd.Series):
-        input_rows = [rows]
-    else:
-        input_rows = list(rows or [])
-
-    known: Dict[str, int] = {}
-    for row in input_rows:
-        link = safe_str(row.get("Link"))
-        platform = safe_str(row.get("Platform")) or platform_for_url(link)
-        if platform != INSTAGRAM_REELS or not metric_is_available(row, "Views"):
-            continue
-        normalized = final_update2_normalize_url(link)
-        if normalized:
-            known[normalized] = clean_num(row.get("Views"))
-    return known
 
 
 def available_metric_rate(row, metric: str) -> float:
@@ -3508,11 +3502,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"Collecting public data for {len(links):,} post(s) using "
                 "direct retrieval first, with Apify fallback..."
             )
-            new_records = final_update2_scrape_links(
-                links,
-                apify_token,
-                known_instagram_views=uploaded_instagram_views(scrape_rows),
-            )
+            new_records = final_update2_scrape_links(links, apify_token)
             new_records = list(new_records or [])
             new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
             for row in scrape_rows:
@@ -3819,11 +3809,7 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             unsafe_allow_html=True,
         )
         try:
-            records = final_update2_scrape_links(
-                links,
-                apify_token,
-                known_instagram_views=uploaded_instagram_views(pending),
-            )
+            records = final_update2_scrape_links(links, apify_token)
             cached_records.update(final_update2_review_cache(records))
 
             def on_progress(done: int, total: int, tier: str):
@@ -3921,11 +3907,7 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
     records = [record] if isinstance(record, dict) else []
     if not records and link and apify_token:
         try:
-            records = final_update2_scrape_links(
-                [link],
-                apify_token,
-                known_instagram_views=uploaded_instagram_views(pd.DataFrame([row_dict])),
-            )
+            records = final_update2_scrape_links([link], apify_token)
             cache.update(final_update2_review_cache(records))
             st.session_state.apify_records_by_key = cache
         except Exception as exc:
@@ -4868,8 +4850,9 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                 position / max(len(targets_to_fetch), 1)
                             )
                         # Direct retrieval always runs first. Apify is used only
-                        # when the direct result is completely unavailable;
-                        # useful partial histories stay on the free path.
+                        # when the free result is unavailable or lacks Instagram
+                        # views, and never replaces useful direct data unless it
+                        # returns a genuinely better metric row.
                         if profile_fallback_targets:
                             fallback_token = (
                                 _managed_api_secret_v68_43("APIFY_TOKEN")
@@ -4892,28 +4875,31 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         fallback_metrics["Profile Fetched At"] = datetime.now(
                                             timezone.utc
                                         ).isoformat()
-                                        fallback_status = fallback_metrics[
+                                    direct_fallback_metrics = (
+                                        pd.concat(direct_fallback_frames, ignore_index=True)
+                                        if direct_fallback_frames
+                                        else pd.DataFrame()
+                                    )
+                                    reconciled_metrics = (
+                                        reconcile_creator_profile_fallback_metrics(
+                                            direct_fallback_metrics,
+                                            fallback_metrics,
+                                        )
+                                    )
+                                    if not reconciled_metrics.empty:
+                                        reconciled_status = reconciled_metrics[
                                             "Profile Data Status"
                                         ].fillna("").astype(str)
-                                        fallback_unavailable = fallback_metrics[
-                                            fallback_status.str.startswith("Unavailable")
+                                        reconciled_unavailable = reconciled_metrics[
+                                            reconciled_status.str.startswith("Unavailable")
                                         ]
-                                        fallback_successful = fallback_metrics[
-                                            ~fallback_status.str.startswith("Unavailable")
-                                        ].copy()
-                                        if not fallback_successful.empty:
-                                            available_fallback = fallback_successful[
-                                                "Profile Data Status"
-                                            ].astype(str).str.startswith("Available")
-                                            fallback_successful.loc[
-                                                available_fallback,
-                                                "Profile Data Status",
-                                            ] = "Available (Apify fallback: latest 20 posts)"
-                                            profile_frames.append(fallback_successful)
-                                        if not fallback_unavailable.empty:
-                                            failed_profile_frames.append(fallback_unavailable)
-                                    else:
-                                        failed_profile_frames.extend(direct_fallback_frames)
+                                        reconciled_successful = reconciled_metrics[
+                                            ~reconciled_status.str.startswith("Unavailable")
+                                        ]
+                                        if not reconciled_successful.empty:
+                                            profile_frames.append(reconciled_successful)
+                                        if not reconciled_unavailable.empty:
+                                            failed_profile_frames.append(reconciled_unavailable)
                                     profile_errors.extend(fallback_errors)
                                 except Exception:
                                     failed_profile_frames.extend(direct_fallback_frames)
