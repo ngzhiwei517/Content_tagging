@@ -47,10 +47,8 @@ from ugc_tagger.creator_profile_enrichment import (
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
     fetch_tiktok_profile_followers,
-    instagram_profile_requires_fallback,
     profile_history_settings,
     scrape_creator_profile_metrics,
-    tiktok_profile_requires_fallback,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -1068,6 +1066,28 @@ def render_uploaded_track_catalog_feedback_v68_62(
 
 CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
 MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65 = 5
+
+
+def creator_profile_direct_failed_v68_66(
+    metrics: pd.DataFrame,
+    platform: str,
+) -> bool:
+    """Return True only when the free profile lookup produced no usable row.
+
+    Partial results remain free-only. This prevents a useful multi-post direct
+    result from being replaced by the smaller paid latest-20 fallback.
+    """
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return True
+    if not {"Platform", "Profile Data Status"}.issubset(metrics.columns):
+        return True
+    platform_rows = metrics[
+        metrics["Platform"].fillna("").astype(str).eq(safe_str(platform))
+    ]
+    if platform_rows.empty:
+        return True
+    statuses = platform_rows["Profile Data Status"].fillna("").astype(str).str.strip()
+    return bool(statuses.eq("").any() or statuses.str.startswith("Unavailable").any())
 
 
 @st.cache_data(
@@ -4806,12 +4826,9 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     post_limit=history_post_limit,
                                 )
                                 target_platform = safe_str(target.get("Platform"))
-                                requires_fallback = (
-                                    target_platform == INSTAGRAM_REELS
-                                    and instagram_profile_requires_fallback(direct_metrics)
-                                ) or (
-                                    target_platform == TIKTOK
-                                    and tiktok_profile_requires_fallback(direct_metrics)
+                                requires_fallback = creator_profile_direct_failed_v68_66(
+                                    direct_metrics,
+                                    target_platform,
                                 )
                                 if requires_fallback:
                                     profile_fallback_targets.append({
@@ -4831,12 +4848,18 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                 unavailable_metrics = getattr(exc, "profile_metrics", None)
                                 target_platform = safe_str(target.get("Platform"))
                                 if target_platform in {TIKTOK, INSTAGRAM_REELS}:
-                                    profile_fallback_targets.append({
-                                        "Platform": target_platform,
-                                        "Creator": safe_str(target.get("Creator")),
-                                    })
-                                    if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                        direct_fallback_frames.append(unavailable_metrics)
+                                    if creator_profile_direct_failed_v68_66(
+                                        unavailable_metrics,
+                                        target_platform,
+                                    ):
+                                        profile_fallback_targets.append({
+                                            "Platform": target_platform,
+                                            "Creator": safe_str(target.get("Creator")),
+                                        })
+                                        if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                            direct_fallback_frames.append(unavailable_metrics)
+                                    elif isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
+                                        profile_frames.append(unavailable_metrics)
                                 else:
                                     if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
                                         failed_profile_frames.append(unavailable_metrics)
@@ -4844,6 +4867,9 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             progress_bar.progress(
                                 position / max(len(targets_to_fetch), 1)
                             )
+                        # Direct retrieval always runs first. Apify is used only
+                        # when the direct result is completely unavailable;
+                        # useful partial histories stay on the free path.
                         if profile_fallback_targets:
                             fallback_token = (
                                 _managed_api_secret_v68_43("APIFY_TOKEN")
