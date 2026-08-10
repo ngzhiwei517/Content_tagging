@@ -2,7 +2,7 @@
 
 A Streamlit application for tagging, reviewing, and reporting TikTok and Instagram Reels content for music-marketing workflows.
 
-[Open the Streamlit app](https://umgcontenttag.streamlit.app/)
+
 
 ## Key capabilities
 
