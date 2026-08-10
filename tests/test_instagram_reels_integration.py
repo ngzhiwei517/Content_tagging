@@ -211,7 +211,13 @@ class TikTokShortLinkTests(unittest.TestCase):
 
         def fake_tiktok_scrape(links, token):
             captured["links"] = links
-            return [{"id": "7618049168501755157", "webVideoUrl": self.CANONICAL_URL}]
+            return [{
+                "id": "7618049168501755157",
+                "webVideoUrl": self.CANONICAL_URL,
+                "playCount": 100,
+                "diggCount": 10,
+                "commentCount": 1,
+            }]
 
         fake_backend = SimpleNamespace(run_apify_tiktok_scraper_api=fake_tiktok_scrape)
         with patch(
@@ -621,7 +627,13 @@ class InstagramScrapeTests(unittest.TestCase):
         tiktok_url = "https://www.tiktok.com/@creator/video/7600000000000000001"
         fake_backend = SimpleNamespace(
             run_apify_tiktok_scraper_api=lambda links, token: [
-                {"id": "7600000000000000001", "webVideoUrl": links[0]}
+                {
+                    "id": "7600000000000000001",
+                    "webVideoUrl": links[0],
+                    "playCount": 100,
+                    "diggCount": 10,
+                    "commentCount": 1,
+                }
             ]
         )
         with patch("ugc_tagger.final_update2_adapter.load_backend", return_value=fake_backend), patch(

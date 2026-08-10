@@ -1023,6 +1023,25 @@ def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
     return bool((incomplete_status | followers_missing).any())
 
 
+def tiktok_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
+    """Return True when direct TikTok profile results need paid recovery."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return True
+    required = {"Platform", "Profile Data Status", "Current Followers"}
+    if not required.issubset(metrics.columns):
+        return True
+    tiktok = metrics[metrics.get("Platform", pd.Series(dtype=str)).eq(TIKTOK)]
+    if tiktok.empty:
+        return True
+    status = tiktok.get(
+        "Profile Data Status", pd.Series("", index=tiktok.index, dtype=str)
+    ).fillna("").astype(str)
+    followers = pd.to_numeric(
+        tiktok.get("Current Followers", 0), errors="coerce"
+    ).fillna(0)
+    return bool(status.str.startswith("Unavailable").any() or followers.le(0).any())
+
+
 def scrape_creator_profile_metrics(
     creators,
     apify_token: str,
@@ -1054,6 +1073,7 @@ def scrape_creator_profile_metrics(
     rows: List[Dict] = []
     errors: List[str] = []
     failed_platforms: List[str] = []
+    failed_creators: List[Tuple[str, str]] = []
     instagram_followers: Dict[str, int] = {}
 
     tiktok_handles = requested.loc[requested["Platform"].eq(TIKTOK), "Profile Creator"].tolist()
@@ -1073,7 +1093,22 @@ def scrape_creator_profile_metrics(
                 "shouldDownloadMusicCovers": False,
                 "commentsPerPost": 0,
             })
-            rows.extend(_tiktok_post_row(item) for item in items)
+            tiktok_rows = [_tiktok_post_row(item) for item in items]
+            rows.extend(tiktok_rows)
+            returned_keys = {
+                _text(row.get("Creator Key")) for row in tiktok_rows
+                if _text(row.get("Creator Key"))
+            }
+            missing_handles = [
+                handle for handle in tiktok_handles
+                if creator_key(handle) not in returned_keys
+            ]
+            failed_creators.extend((TIKTOK, handle) for handle in missing_handles)
+            if missing_handles:
+                errors.append(
+                    "TikTok profile data was not returned for "
+                    f"{len(missing_handles)} creator(s)."
+                )
         except Exception:
             failed_platforms.append(TIKTOK)
             errors.append("TikTok creator profiles could not be retrieved in this run.")
@@ -1109,11 +1144,30 @@ def scrape_creator_profile_metrics(
         except Exception:
             errors.append("Instagram follower counts could not be refreshed in this run.")
 
+        instagram_evidence = {
+            _text(row.get("Creator Key")) for row in rows
+            if row.get("Platform") == INSTAGRAM_REELS
+            and _text(row.get("Creator Key"))
+        } | set(instagram_followers)
+        missing_handles = [
+            handle for handle in instagram_handles
+            if creator_key(handle) not in instagram_evidence
+        ]
+        failed_creators.extend(
+            (INSTAGRAM_REELS, handle) for handle in missing_handles
+        )
+        if missing_handles:
+            errors.append(
+                "Instagram profile data was not returned for "
+                f"{len(missing_handles)} creator(s)."
+            )
+
     return _aggregate_profile_posts(
         requested,
         rows,
         instagram_followers=instagram_followers,
         failed_platforms=failed_platforms,
+        failed_creators=failed_creators,
         months=months,
         as_of=as_of,
     ), errors

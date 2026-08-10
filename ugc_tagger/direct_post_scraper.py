@@ -59,6 +59,35 @@ def _usable_video_info(info: Optional[Dict]) -> bool:
     return bool(info.get("id") and (info.get("url") or info.get("formats")))
 
 
+def tiktok_post_has_essential_metrics(info: Optional[Dict]) -> bool:
+    """Require explicit views, likes, and comments from either scraper."""
+    if not isinstance(info, dict) or info.get("error") or info.get("errorCode"):
+        return False
+
+    def has_value(keys) -> bool:
+        for key in keys:
+            if key not in info:
+                continue
+            value = info.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and value.strip().casefold() in {
+                "", "nan", "none", "null",
+            }:
+                continue
+            return True
+        return False
+
+    return all(
+        has_value(keys)
+        for keys in (
+            ("view_count", "playCount", "viewCount", "views"),
+            ("like_count", "diggCount", "likeCount", "likes"),
+            ("comment_count", "commentCount", "comments"),
+        )
+    )
+
+
 def _tiktok_handle_from_url(url: str) -> str:
     match = re.search(r"tiktok\.com/@([^/?#]+)", str(url or ""), flags=re.IGNORECASE)
     return match.group(1).strip().lstrip("@") if match else ""
@@ -160,7 +189,9 @@ def scrape_tiktok_posts_direct(
             info = extractor(link)
         except Exception:
             return None
-        return _direct_record(link, info) if _usable_video_info(info) else None
+        if not _usable_video_info(info) or not tiktok_post_has_essential_metrics(info):
+            return None
+        return _direct_record(link, info)
 
     if len(requested) > 1:
         workers = max(1, min(int(max_workers), len(requested)))

@@ -27,6 +27,7 @@ from ugc_tagger.creator_profile_enrichment import (
     profile_history_settings,
     profile_scope_count,
     scrape_creator_profile_metrics,
+    tiktok_profile_requires_fallback,
 )
 from ugc_tagger.instagram_reels_adapter import INSTAGRAM_REELS, TIKTOK
 
@@ -64,6 +65,30 @@ class _FakeClient:
 
 
 class CreatorProfileEnrichmentTests(unittest.TestCase):
+    def test_tiktok_profile_fallback_requires_followers_and_available_status(self):
+        base = pd.DataFrame([{
+            "Platform": TIKTOK,
+            "Current Followers": 800,
+            "Profile Data Status": "Available",
+        }])
+        self.assertFalse(tiktok_profile_requires_fallback(base))
+
+        no_recent = base.copy()
+        no_recent["Profile Data Status"] = "No recent public posts"
+        self.assertFalse(tiktok_profile_requires_fallback(no_recent))
+
+        partial = base.copy()
+        partial["Profile Data Status"] = "Partial (2,000-post safety limit reached)"
+        self.assertFalse(tiktok_profile_requires_fallback(partial))
+
+        missing_followers = base.copy()
+        missing_followers["Current Followers"] = 0
+        self.assertTrue(tiktok_profile_requires_fallback(missing_followers))
+
+        unavailable = base.copy()
+        unavailable["Profile Data Status"] = "Unavailable"
+        self.assertTrue(tiktok_profile_requires_fallback(unavailable))
+
     def test_instagram_profile_fallback_requires_followers_and_complete_history(self):
         base = pd.DataFrame([{
             "Platform": INSTAGRAM_REELS,
@@ -265,6 +290,54 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
         )
         self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
+
+    def test_tiktok_apify_fallback_honours_latest_twenty_request(self):
+        client = _FakeClient({f"{TIKTOK_PROFILE_ACTOR_ID}:posts": []})
+
+        scrape_creator_profile_metrics(
+            [{"Platform": TIKTOK, "Creator": "alice"}],
+            "test-token",
+            client=client,
+            months=3,
+            post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        tiktok_input = next(
+            run_input for actor_id, run_input in client.calls
+            if actor_id == TIKTOK_PROFILE_ACTOR_ID
+        )
+        self.assertEqual(tiktok_input["resultsPerPage"], 20)
+        self.assertEqual(tiktok_input["oldestPostDateUnified"], "3 months")
+
+    def test_tiktok_apify_partial_response_keeps_missing_creator_unavailable(self):
+        client = _FakeClient({
+            f"{TIKTOK_PROFILE_ACTOR_ID}:posts": [{
+                "createTimeISO": "2026-07-15T00:00:00Z",
+                "authorMeta": {"name": "alice", "fans": 10_000},
+                "playCount": 1_000,
+                "diggCount": 100,
+                "commentCount": 10,
+            }],
+        })
+
+        metrics, errors = scrape_creator_profile_metrics(
+            [
+                {"Platform": TIKTOK, "Creator": "alice"},
+                {"Platform": TIKTOK, "Creator": "bob"},
+            ],
+            "test-token",
+            client=client,
+            months=3,
+            post_limit=20,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        alice = metrics[metrics["Creator Key"].eq("alice")].iloc[0]
+        bob = metrics[metrics["Creator Key"].eq("bob")].iloc[0]
+        self.assertEqual(alice["Profile Data Status"], "Available")
+        self.assertEqual(bob["Profile Data Status"], "Unavailable")
+        self.assertTrue(any("1 creator" in error for error in errors))
 
     def test_missing_token_is_rejected_without_a_client(self):
         with self.assertRaisesRegex(RuntimeError, "Missing Apify token"):

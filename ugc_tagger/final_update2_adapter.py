@@ -32,7 +32,10 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
-from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
+from ugc_tagger.direct_post_scraper import (
+    scrape_tiktok_posts_direct,
+    tiktok_post_has_essential_metrics,
+)
 
 
 # Keep the runtime version beside the UI/backend schema boundary.  Importing
@@ -845,8 +848,13 @@ def scrape_links(
         direct_records, fallback_links = scrape_tiktok_posts_direct(actor_links)
         tiktok_records = list(direct_records)
         if fallback_links:
+            apify_records = backend.run_apify_tiktok_scraper_api(
+                fallback_links, apify_token
+            )
             tiktok_records.extend(
-                backend.run_apify_tiktok_scraper_api(fallback_links, apify_token)
+                record
+                for record in list(apify_records or [])
+                if tiktok_post_has_essential_metrics(record)
             )
         for record in tiktok_records:
             if isinstance(record, dict):

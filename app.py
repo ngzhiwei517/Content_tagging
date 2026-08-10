@@ -49,6 +49,7 @@ from ugc_tagger.creator_profile_enrichment import (
     instagram_profile_requires_fallback,
     profile_history_settings,
     scrape_creator_profile_metrics,
+    tiktok_profile_requires_fallback,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -4735,8 +4736,8 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             profile_frames = []
             failed_profile_frames = []
             profile_errors = []
-            instagram_fallback_targets = []
-            instagram_direct_failures = []
+            profile_fallback_targets = []
+            direct_fallback_frames = []
             if not targets_to_fetch.empty:
                 progress_bar = st.progress(0)
                 try:
@@ -4755,15 +4756,20 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     months=3,
                                     post_limit=history_post_limit,
                                 )
-                                if (
-                                    safe_str(target.get("Platform")) == INSTAGRAM_REELS
+                                target_platform = safe_str(target.get("Platform"))
+                                requires_fallback = (
+                                    target_platform == INSTAGRAM_REELS
                                     and instagram_profile_requires_fallback(direct_metrics)
-                                ):
-                                    instagram_fallback_targets.append({
-                                        "Platform": INSTAGRAM_REELS,
+                                ) or (
+                                    target_platform == TIKTOK
+                                    and tiktok_profile_requires_fallback(direct_metrics)
+                                )
+                                if requires_fallback:
+                                    profile_fallback_targets.append({
+                                        "Platform": target_platform,
                                         "Creator": safe_str(target.get("Creator")),
                                     })
-                                    instagram_direct_failures.append(direct_metrics)
+                                    direct_fallback_frames.append(direct_metrics)
                                 else:
                                     profile_frames.append(direct_metrics)
                             except Exception as exc:
@@ -4774,13 +4780,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     exc,
                                 )
                                 unavailable_metrics = getattr(exc, "profile_metrics", None)
-                                if safe_str(target.get("Platform")) == INSTAGRAM_REELS:
-                                    instagram_fallback_targets.append({
-                                        "Platform": INSTAGRAM_REELS,
+                                target_platform = safe_str(target.get("Platform"))
+                                if target_platform in {TIKTOK, INSTAGRAM_REELS}:
+                                    profile_fallback_targets.append({
+                                        "Platform": target_platform,
                                         "Creator": safe_str(target.get("Creator")),
                                     })
                                     if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                        instagram_direct_failures.append(unavailable_metrics)
+                                        direct_fallback_frames.append(unavailable_metrics)
                                 else:
                                     if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
                                         failed_profile_frames.append(unavailable_metrics)
@@ -4788,7 +4795,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             progress_bar.progress(
                                 position / max(len(targets_to_fetch), 1)
                             )
-                        if instagram_fallback_targets:
+                        if profile_fallback_targets:
                             fallback_token = (
                                 _managed_api_secret_v68_43("APIFY_TOKEN")
                                 or clean_api_secret(
@@ -4800,7 +4807,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             if fallback_token:
                                 try:
                                     fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
-                                        pd.DataFrame(instagram_fallback_targets),
+                                        pd.DataFrame(profile_fallback_targets),
                                         fallback_token,
                                         months=3,
                                         post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
@@ -4810,11 +4817,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         fallback_metrics["Profile Fetched At"] = datetime.now(
                                             timezone.utc
                                         ).isoformat()
+                                        fallback_status = fallback_metrics[
+                                            "Profile Data Status"
+                                        ].fillna("").astype(str)
                                         fallback_unavailable = fallback_metrics[
-                                            fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                            fallback_status.str.startswith("Unavailable")
                                         ]
                                         fallback_successful = fallback_metrics[
-                                            ~fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                            ~fallback_status.str.startswith("Unavailable")
                                         ].copy()
                                         if not fallback_successful.empty:
                                             available_fallback = fallback_successful[
@@ -4828,17 +4838,17 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         if not fallback_unavailable.empty:
                                             failed_profile_frames.append(fallback_unavailable)
                                     else:
-                                        failed_profile_frames.extend(instagram_direct_failures)
+                                        failed_profile_frames.extend(direct_fallback_frames)
                                     profile_errors.extend(fallback_errors)
                                 except Exception:
-                                    failed_profile_frames.extend(instagram_direct_failures)
+                                    failed_profile_frames.extend(direct_fallback_frames)
                                     profile_errors.append(
-                                        "Instagram profile fallback could not be completed in this run."
+                                        "Profile fallback could not be completed in this run."
                                     )
                             else:
-                                failed_profile_frames.extend(instagram_direct_failures)
+                                failed_profile_frames.extend(direct_fallback_frames)
                                 profile_errors.append(
-                                    "Some Instagram profiles could not be retrieved anonymously. "
+                                    "Some creator profiles could not be retrieved directly. "
                                     "Configure the existing Apify token to use the fallback."
                                 )
                 finally:

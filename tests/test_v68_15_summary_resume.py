@@ -383,8 +383,9 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Fetch profile metrics", creator_section)
         self.assertIn("direct_creator_profile_metrics_v68_58", creator_section)
         self.assertIn("scrape_creator_profile_metrics", creator_section)
-        self.assertIn("instagram_fallback_targets", creator_section)
-        self.assertIn('safe_str(target.get("Platform")) == INSTAGRAM_REELS', creator_section)
+        self.assertIn("profile_fallback_targets", creator_section)
+        self.assertIn("direct_fallback_frames", creator_section)
+        self.assertIn("target_platform in {TIKTOK, INSTAGRAM_REELS}", creator_section)
         self.assertIn('fallback_token', creator_section)
         self.assertIn("st.number_input", creator_section)
         self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
@@ -409,6 +410,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("profile_history_settings", creator_section)
         self.assertIn("pending_creator_profile_targets_v68_61", creator_section)
         self.assertIn("instagram_profile_requires_fallback", creator_section)
+        self.assertIn("tiktok_profile_requires_fallback", creator_section)
         self.assertIn(
             "post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT",
             creator_section,

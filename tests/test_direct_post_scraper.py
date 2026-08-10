@@ -13,7 +13,13 @@ class _Backend:
 
     def run_apify_tiktok_scraper_api(self, links, _token):
         self.links.extend(links)
-        return [{"submittedVideoUrl": link, "id": link.rsplit("/", 1)[-1]} for link in links]
+        return [{
+            "submittedVideoUrl": link,
+            "id": link.rsplit("/", 1)[-1],
+            "playCount": 100,
+            "diggCount": 10,
+            "commentCount": 1,
+        } for link in links]
 
 
 def _video_info(url):
@@ -82,6 +88,54 @@ class DirectPostScraperTests(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertEqual(fallback, [video, photo])
 
+    def test_missing_essential_metric_uses_apify_fallback(self):
+        link = "https://www.tiktok.com/@creator/video/123"
+        for missing_metric in ("view_count", "like_count", "comment_count"):
+            with self.subTest(missing_metric=missing_metric):
+                incomplete = _video_info(link)
+                incomplete.pop(missing_metric)
+                records, fallback = scrape_tiktok_posts_direct(
+                    [link], extractor=lambda _url, info=incomplete: info
+                )
+                self.assertEqual(records, [])
+                self.assertEqual(fallback, [link])
+
+    def test_explicit_zero_metrics_are_valid_and_do_not_trigger_fallback(self):
+        link = "https://www.tiktok.com/@creator/video/123"
+        zero_metrics = _video_info(link)
+        zero_metrics.update({
+            "view_count": 0,
+            "like_count": 0,
+            "comment_count": 0,
+        })
+
+        records, fallback = scrape_tiktok_posts_direct(
+            [link], extractor=lambda _url: zero_metrics
+        )
+
+        self.assertEqual(fallback, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["playCount"], 0)
+        self.assertEqual(records[0]["diggCount"], 0)
+        self.assertEqual(records[0]["commentCount"], 0)
+
+    def test_only_incomplete_post_is_sent_to_fallback(self):
+        complete = "https://www.tiktok.com/@creator/video/123"
+        incomplete = "https://www.tiktok.com/@creator/video/456"
+
+        def extractor(url):
+            info = _video_info(url)
+            if url == incomplete:
+                info["view_count"] = None
+            return info
+
+        records, fallback = scrape_tiktok_posts_direct(
+            [complete, incomplete], extractor=extractor
+        )
+
+        self.assertEqual([record["submittedVideoUrl"] for record in records], [complete])
+        self.assertEqual(fallback, [incomplete])
+
     def test_adapter_calls_apify_only_for_direct_failures(self):
         direct = "https://www.tiktok.com/@creator/video/123"
         fallback = "https://www.tiktok.com/@creator/video/456"
@@ -106,6 +160,26 @@ class DirectPostScraperTests(unittest.TestCase):
 
         self.assertEqual(backend.links, [fallback])
         self.assertEqual(len(records), 2)
+
+    def test_adapter_rejects_incomplete_apify_metrics(self):
+        link = "https://www.tiktok.com/@creator/video/456"
+        backend = _Backend()
+        backend.run_apify_tiktok_scraper_api = lambda _links, _token: [{
+            "submittedVideoUrl": link,
+            "id": "456",
+            "playCount": 100,
+            "diggCount": 10,
+        }]
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_tiktok_posts_direct",
+            return_value=([], [link]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=backend,
+        ):
+            records = scrape_links([link], "token")
+
+        self.assertEqual(records, [])
 
 
 if __name__ == "__main__":
