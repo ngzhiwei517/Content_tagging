@@ -27,6 +27,7 @@ from ugc_tagger.creator_profile_enrichment import (
     normalize_creator_handle,
     profile_history_settings,
     profile_scope_count,
+    reconcile_creator_profile_fallback_metrics,
     scrape_creator_profile_metrics,
     tiktok_profile_requires_fallback,
 )
@@ -229,6 +230,16 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         partial["Profile Data Status"] = "Partial (full history may be incomplete)"
         self.assertTrue(instagram_profile_requires_fallback(partial))
 
+        missing_views = base.copy()
+        missing_views["Profile Posts"] = 3
+        missing_views["Profile Average Views"] = pd.NA
+        self.assertTrue(instagram_profile_requires_fallback(missing_views))
+
+        explicit_zero_views = base.copy()
+        explicit_zero_views["Profile Posts"] = 3
+        explicit_zero_views["Profile Average Views"] = 0
+        self.assertFalse(instagram_profile_requires_fallback(explicit_zero_views))
+
     def test_instagram_profile_extractor_is_metadata_only_and_stops_at_cutoff(self):
         posts = [
             types.SimpleNamespace(
@@ -238,6 +249,10 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             types.SimpleNamespace(
                 mediaid="recent", shortcode="recent", date_utc="2026-08-02T00:00:00Z",
                 video_view_count=300, likes=30, comments=3,
+            ),
+            types.SimpleNamespace(
+                mediaid="recent-photo", shortcode="recent-photo",
+                date_utc="2026-07-20T00:00:00Z", likes=20, comments=2,
             ),
             types.SimpleNamespace(
                 mediaid="old", shortcode="old", date_utc="2026-04-01T00:00:00Z",
@@ -271,7 +286,12 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             )
 
         self.assertEqual(result["followers"], 800)
-        self.assertEqual([entry["id"] for entry in result["entries"]], ["recent"])
+        self.assertEqual(
+            [entry["id"] for entry in result["entries"]],
+            ["recent", "recent-photo"],
+        )
+        self.assertEqual(result["entries"][0]["videoViewCount"], 300)
+        self.assertNotIn("videoViewCount", result["entries"][1])
         self.assertTrue(result["complete"])
         self.assertFalse(FakeLoader.kwargs["download_pictures"])
         self.assertFalse(FakeLoader.kwargs["download_videos"])
@@ -384,6 +404,189 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
         )
         self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
         self.assertEqual(instagram_posts_input["resultsLimit"], 20)
+
+    def test_instagram_profile_views_preserve_missing_and_explicit_zero(self):
+        client = _FakeClient({
+            f"{INSTAGRAM_PROFILE_ACTOR_ID}:posts": [
+                {
+                    "timestamp": "2026-07-20T00:00:00Z",
+                    "ownerUsername": "missing",
+                    "likesCount": 600,
+                    "commentsCount": 16,
+                },
+                {
+                    "timestamp": "2026-07-21T00:00:00Z",
+                    "ownerUsername": "zero",
+                    "type": "Video",
+                    "videoPlayCount": 0,
+                    "likesCount": 5,
+                },
+                {
+                    "timestamp": "2026-07-22T00:00:00Z",
+                    "ownerUsername": "mixed",
+                    "likesCount": 10,
+                },
+                {
+                    "timestamp": "2026-07-23T00:00:00Z",
+                    "ownerUsername": "mixed",
+                    "videoViewCount": 1_000,
+                    "likesCount": 100,
+                },
+                {
+                    "timestamp": "2026-07-24T00:00:00Z",
+                    "ownerUsername": "invalid",
+                    "viewsCount": "N/A",
+                    "likesCount": 8,
+                },
+                {
+                    "timestamp": "2026-07-25T00:00:00Z",
+                    "ownerUsername": "carousel-zero",
+                    "type": "Sidecar",
+                    "productType": "carousel_container",
+                    "videoPlayCount": 0,
+                    "likesCount": 12,
+                },
+            ],
+            f"{INSTAGRAM_PROFILE_ACTOR_ID}:details": [
+                {"username": "missing", "followersCount": 100},
+                {"username": "zero", "followersCount": 200},
+                {"username": "mixed", "followersCount": 300},
+                {"username": "invalid", "followersCount": 400},
+                {"username": "carousel-zero", "followersCount": 500},
+            ],
+        })
+
+        metrics, errors = scrape_creator_profile_metrics(
+            [
+                {"Platform": INSTAGRAM_REELS, "Creator": "missing"},
+                {"Platform": INSTAGRAM_REELS, "Creator": "zero"},
+                {"Platform": INSTAGRAM_REELS, "Creator": "mixed"},
+                {"Platform": INSTAGRAM_REELS, "Creator": "invalid"},
+                {"Platform": INSTAGRAM_REELS, "Creator": "carousel-zero"},
+            ],
+            "test-token",
+            client=client,
+            months=3,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        self.assertEqual(errors, [])
+        by_creator = metrics.set_index("Creator Key")
+        self.assertTrue(pd.isna(by_creator.loc["missing", "Profile Average Views"]))
+        self.assertEqual(
+            int(by_creator.loc["missing", "Profile Average Engagement"]),
+            616,
+        )
+        self.assertTrue(
+            pd.isna(by_creator.loc["missing", "Profile Average Engagement Rate"])
+        )
+        self.assertEqual(by_creator.loc["zero", "Profile Average Views"], 0)
+        self.assertTrue(
+            pd.isna(by_creator.loc["zero", "Profile Average Engagement Rate"])
+        )
+        self.assertEqual(by_creator.loc["mixed", "Profile Average Views"], 1_000)
+        self.assertAlmostEqual(
+            float(by_creator.loc["mixed", "Profile Average Engagement Rate"]),
+            10.0,
+        )
+        self.assertTrue(pd.isna(by_creator.loc["invalid", "Profile Average Views"]))
+        self.assertTrue(
+            pd.isna(by_creator.loc["carousel-zero", "Profile Average Views"])
+        )
+        self.assertTrue(
+            pd.isna(
+                by_creator.loc[
+                    "carousel-zero", "Profile Average Engagement Rate"
+                ]
+            )
+        )
+
+    def test_profile_fallback_keeps_direct_data_unless_paid_row_improves_it(self):
+        direct = pd.DataFrame([
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "blocked",
+                "Profile Posts": 3,
+                "Current Followers": 9_373,
+                "Profile Average Views": pd.NA,
+                "Profile Average Engagement": 616,
+                "Profile Average Engagement Rate": pd.NA,
+                "Profile Data Status": "Available",
+            },
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "empty",
+                "Profile Posts": 3,
+                "Current Followers": 1_000,
+                "Profile Average Views": pd.NA,
+                "Profile Average Engagement": 100,
+                "Profile Average Engagement Rate": pd.NA,
+                "Profile Data Status": "Available",
+            },
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "improved",
+                "Profile Posts": 3,
+                "Current Followers": 2_000,
+                "Profile Average Views": pd.NA,
+                "Profile Average Engagement": 200,
+                "Profile Average Engagement Rate": pd.NA,
+                "Profile Data Status": "Available",
+            },
+        ])
+        fallback = pd.DataFrame([
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "blocked",
+                "Profile Posts": 0,
+                "Current Followers": 0,
+                "Profile Average Views": 0,
+                "Profile Average Engagement": 0,
+                "Profile Average Engagement Rate": 0,
+                "Profile Data Status": "Unavailable",
+            },
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "empty",
+                "Profile Posts": 0,
+                "Current Followers": 1_050,
+                "Profile Average Views": 0,
+                "Profile Average Engagement": 0,
+                "Profile Average Engagement Rate": 0,
+                "Profile Data Status": "No recent public posts",
+            },
+            {
+                "Platform": INSTAGRAM_REELS,
+                "Creator Key": "improved",
+                "Profile Posts": 20,
+                "Current Followers": 2_100,
+                "Profile Average Views": 500,
+                "Profile Average Engagement": 50,
+                "Profile Average Engagement Rate": 10,
+                "Profile Data Status": "Available",
+            },
+        ])
+
+        reconciled = reconcile_creator_profile_fallback_metrics(direct, fallback)
+        by_creator = reconciled.set_index("Creator Key")
+
+        self.assertEqual(int(by_creator.loc["blocked", "Profile Posts"]), 3)
+        self.assertEqual(
+            int(by_creator.loc["blocked", "Profile Average Engagement"]), 616
+        )
+        self.assertIn(
+            "views unavailable after Apify fallback",
+            by_creator.loc["blocked", "Profile Data Status"],
+        )
+        self.assertEqual(int(by_creator.loc["empty", "Profile Posts"]), 3)
+        self.assertEqual(int(by_creator.loc["improved", "Profile Posts"]), 20)
+        self.assertEqual(
+            int(by_creator.loc["improved", "Profile Average Views"]), 500
+        )
+        self.assertEqual(
+            by_creator.loc["improved", "Profile Data Status"],
+            "Available (Apify fallback: latest 20 posts)",
+        )
 
     def test_instagram_apify_fallback_stays_at_twenty_for_full_history_request(self):
         client = _FakeClient({
