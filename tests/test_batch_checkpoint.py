@@ -319,6 +319,56 @@ class BatchCheckpointStoreTests(unittest.TestCase):
         self.assertNotEqual(original, reordered)
         self.assertNotEqual(original, other_model)
 
+    def test_completed_job_can_extend_with_ranked_backfill_and_resume_same_id(self):
+        initial = self.sample_rows(50)
+        extra_links = [
+            f"https://www.instagram.com/reel/BACKFILL{i:02d}"
+            for i in range(50)
+        ]
+        runtime_id = "9" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            store = BatchCheckpointStore(Path(directory), chunk_size=50)
+            manifest = store.prepare(
+                runtime_id,
+                initial,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="backfill-test",
+                comparison_started_utc="2026-08-10T00:00:00+00:00",
+                requested_rows=50,
+            )
+            first = store.chunk_frame(initial, manifest, 0).assign(
+                **{"Creative Type": "Others"}
+            )
+            manifest = store.save_completed_chunk(
+                manifest,
+                0,
+                first,
+                elapsed_seconds=1.0,
+            )
+            self.assertEqual(manifest["status"], "completed")
+
+            extended = store.extend_with_backfill_links(manifest, extra_links)
+            self.assertEqual(extended["job_id"], manifest["job_id"])
+            self.assertEqual(extended["requested_rows"], 50)
+            self.assertEqual(extended["total_rows"], 100)
+            self.assertEqual(extended["total_chunks"], 2)
+            self.assertEqual(extended["status"], "running")
+            self.assertEqual(store.next_chunk_index(extended), 1)
+
+            # ``prepare`` receives only the stable initial rows after a rerun;
+            # it must preserve the already extended recovery manifest.
+            resumed = store.prepare(
+                runtime_id,
+                initial,
+                model="gemini-3.1-flash-lite",
+                comparison_run_id="ignored-new-id",
+                comparison_started_utc="2026-08-10T01:00:00+00:00",
+                requested_rows=50,
+            )
+            self.assertEqual(resumed["job_id"], manifest["job_id"])
+            self.assertEqual(resumed["total_rows"], 100)
+            self.assertEqual(resumed["backfill_links"], extra_links)
+
 
 class StreamlitLargeBatchContractTests(unittest.TestCase):
     @classmethod
