@@ -103,6 +103,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "rate_pct",
             "unavailable_metric_names",
             "metric_is_available",
+            "uploaded_instagram_views",
             "available_metric_rate",
             "preserve_unavailable_metric_blanks",
             "add_performance_fields",
@@ -119,6 +120,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.normalize_market = staticmethod(namespace["normalize_market"])
         cls.infer_market_from_filename = staticmethod(namespace["infer_market_from_filename"])
         cls.infer_track_from_filename = staticmethod(namespace["infer_track_from_filename"])
+        cls.uploaded_instagram_views = staticmethod(namespace["uploaded_instagram_views"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
         cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
         cls.format_display_value = staticmethod(namespace["format_display_value"])
@@ -260,6 +262,34 @@ class CsvCompatibilityTests(unittest.TestCase):
         rows, _ = self.parse(text, name="instagram.csv")
         self.assertEqual(rows.loc[0, "Metrics Unavailable"], "Views, Shares, Saves")
         self.assertTrue(pd.isna(rows.loc[0, "Views"]))
+
+    def test_uploaded_instagram_views_only_indexes_explicit_file_metrics(self):
+        with_views, _ = self.parse(
+            "Instagram Reel URL,View Count\n"
+            "https://www.instagram.com/reel/DExampleAbC1/?utm_source=test,5000\n",
+            name="instagram_with_views.csv",
+        )
+        without_views, _ = self.parse(
+            "Instagram Reel URL,Like Count\n"
+            "https://www.instagram.com/reel/DExampleAbC2/,250\n",
+            name="instagram_without_views.csv",
+        )
+        self.assertEqual(
+            self.uploaded_instagram_views(with_views),
+            {"https://www.instagram.com/reel/DExampleAbC1": 5000},
+        )
+        self.assertEqual(self.uploaded_instagram_views(without_views), {})
+
+    def test_uploaded_instagram_views_preserves_an_explicit_zero(self):
+        rows, _ = self.parse(
+            "Instagram Reel URL,View Count\n"
+            "https://www.instagram.com/reel/DExampleAbC1/,0\n",
+            name="instagram_zero_views.csv",
+        )
+        self.assertEqual(
+            self.uploaded_instagram_views(rows),
+            {"https://www.instagram.com/reel/DExampleAbC1": 0},
+        )
 
     def test_mixed_platform_file_detects_each_row_from_its_link(self):
         text = (

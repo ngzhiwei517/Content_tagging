@@ -46,9 +46,11 @@ from ugc_tagger.creator_profile_enrichment import (
     creator_key,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    fetch_tiktok_profile_followers,
     instagram_profile_requires_fallback,
     profile_history_settings,
     scrape_creator_profile_metrics,
+    tiktok_profile_requires_fallback,
 )
 from ugc_tagger.model_comparison import (
     DEFAULT_GEMINI_MODEL,
@@ -947,6 +949,7 @@ DEFAULT_STATE = {
     # excluded from restart checkpoints and never contain API tokens or media.
     "creator_profile_metrics_v68_51": pd.DataFrame(),
     "creator_profile_updated_at_v68_51": "",
+    "tiktok_follower_attempted_keys_v68_65": [],
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
@@ -1064,6 +1067,7 @@ def render_uploaded_track_catalog_feedback_v68_62(
 
 
 CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61 = 6 * 60 * 60
+MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65 = 5
 
 
 @st.cache_data(
@@ -1098,6 +1102,25 @@ def direct_creator_profile_metrics_v68_58(
         raise error
     metrics["Profile Fetched At"] = datetime.now(timezone.utc).isoformat()
     return metrics
+
+
+@st.cache_data(
+    ttl=CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61,
+    max_entries=500,
+    show_spinner=False,
+)
+def direct_tiktok_profile_followers_v68_65(
+    normalized_creator_key: str,
+    representative_post_url: str,
+) -> int:
+    """Cache one successful free TikTok public-metadata follower lookup."""
+    followers = fetch_tiktok_profile_followers(
+        normalized_creator_key,
+        representative_post_url=representative_post_url,
+    )
+    if followers < 0:
+        raise RuntimeError("TikTok returned an invalid follower count.")
+    return followers
 
 
 RUNTIME_CHECKPOINT_DIR_V68_15 = Path(".tmp") / "runtime_checkpoints"
@@ -1143,6 +1166,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_id_v68_41_4",
     "comparison_run_started_utc_v68_41_4",
     "comparison_run_elapsed_v68_41_4",
+    "tiktok_follower_attempted_keys_v68_65",
 )
 RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
 RUNTIME_BLOCKED_COLUMN_V68_44 = re.compile(
@@ -1665,6 +1689,31 @@ def metric_is_available(row, metric: str) -> bool:
     return safe_str(metric).strip().lower() not in unavailable
 
 
+def uploaded_instagram_views(rows) -> Dict[str, int]:
+    """Index valid Instagram Views supplied by uploaded input rows.
+
+    The availability marker distinguishes an explicit zero from the default
+    zero used when an uploaded file or pasted link did not provide Views.
+    """
+    if isinstance(rows, pd.DataFrame):
+        input_rows = [row for _, row in rows.iterrows()]
+    elif isinstance(rows, pd.Series):
+        input_rows = [rows]
+    else:
+        input_rows = list(rows or [])
+
+    known: Dict[str, int] = {}
+    for row in input_rows:
+        link = safe_str(row.get("Link"))
+        platform = safe_str(row.get("Platform")) or platform_for_url(link)
+        if platform != INSTAGRAM_REELS or not metric_is_available(row, "Views"):
+            continue
+        normalized = final_update2_normalize_url(link)
+        if normalized:
+            known[normalized] = clean_num(row.get("Views"))
+    return known
+
+
 def available_metric_rate(row, metric: str) -> float:
     """Calculate a rate, preserving unavailable platform metrics as missing."""
     if not metric_is_available(row, metric) or not metric_is_available(row, "Views"):
@@ -1799,6 +1848,32 @@ def apply_profile_followers_v68_64(
         if calculated_kol != "Unknown":
             out.at[index, "KOL Size"] = calculated_kol
     return out
+
+
+def missing_tiktok_follower_targets_v68_65(rows: pd.DataFrame) -> pd.DataFrame:
+    """Return unique TikTok creators whose batch follower count is missing."""
+    columns = ["Platform", "Creator", "Creator Key", "Link"]
+    if not isinstance(rows, pd.DataFrame) or rows.empty:
+        return pd.DataFrame(columns=columns)
+    if "Platform" not in rows.columns or "Creator" not in rows.columns:
+        return pd.DataFrame(columns=columns)
+    followers = (
+        rows["Followers"].map(clean_num)
+        if "Followers" in rows.columns
+        else pd.Series(0, index=rows.index, dtype="int64")
+    )
+    source = rows.copy()
+    if "Link" not in source.columns:
+        source["Link"] = ""
+    targets = source.loc[
+        source["Platform"].map(safe_str).eq(TIKTOK) & followers.le(0),
+        ["Platform", "Creator", "Link"],
+    ].copy()
+    targets["Creator Key"] = targets["Creator"].map(creator_key)
+    targets = targets[targets["Creator Key"].ne("")]
+    return targets.drop_duplicates(
+        ["Platform", "Creator Key"], keep="first"
+    ).reset_index(drop=True)
 
 
 def format_display_value(col: str, val) -> str:
@@ -3413,7 +3488,11 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"Collecting public data for {len(links):,} post(s) using "
                 "direct retrieval first, with Apify fallback..."
             )
-            new_records = final_update2_scrape_links(links, apify_token)
+            new_records = final_update2_scrape_links(
+                links,
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(scrape_rows),
+            )
             new_records = list(new_records or [])
             new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
             for row in scrape_rows:
@@ -3720,7 +3799,11 @@ def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             unsafe_allow_html=True,
         )
         try:
-            records = final_update2_scrape_links(links, apify_token)
+            records = final_update2_scrape_links(
+                links,
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(pending),
+            )
             cached_records.update(final_update2_review_cache(records))
 
             def on_progress(done: int, total: int, tier: str):
@@ -3818,7 +3901,11 @@ def _review_ai_suggest_final_update2(row, gemini_key: str, apify_token: str) -> 
     records = [record] if isinstance(record, dict) else []
     if not records and link and apify_token:
         try:
-            records = final_update2_scrape_links([link], apify_token)
+            records = final_update2_scrape_links(
+                [link],
+                apify_token,
+                known_instagram_views=uploaded_instagram_views(pd.DataFrame([row_dict])),
+            )
             cache.update(final_update2_review_cache(records))
             st.session_state.apify_records_by_key = cache
         except Exception as exc:
@@ -4698,8 +4785,8 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             profile_frames = []
             failed_profile_frames = []
             profile_errors = []
-            instagram_fallback_targets = []
-            instagram_direct_failures = []
+            profile_fallback_targets = []
+            direct_fallback_frames = []
             if not targets_to_fetch.empty:
                 progress_bar = st.progress(0)
                 try:
@@ -4718,15 +4805,20 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     months=3,
                                     post_limit=history_post_limit,
                                 )
-                                if (
-                                    safe_str(target.get("Platform")) == INSTAGRAM_REELS
+                                target_platform = safe_str(target.get("Platform"))
+                                requires_fallback = (
+                                    target_platform == INSTAGRAM_REELS
                                     and instagram_profile_requires_fallback(direct_metrics)
-                                ):
-                                    instagram_fallback_targets.append({
-                                        "Platform": INSTAGRAM_REELS,
+                                ) or (
+                                    target_platform == TIKTOK
+                                    and tiktok_profile_requires_fallback(direct_metrics)
+                                )
+                                if requires_fallback:
+                                    profile_fallback_targets.append({
+                                        "Platform": target_platform,
                                         "Creator": safe_str(target.get("Creator")),
                                     })
-                                    instagram_direct_failures.append(direct_metrics)
+                                    direct_fallback_frames.append(direct_metrics)
                                 else:
                                     profile_frames.append(direct_metrics)
                             except Exception as exc:
@@ -4737,13 +4829,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                     exc,
                                 )
                                 unavailable_metrics = getattr(exc, "profile_metrics", None)
-                                if safe_str(target.get("Platform")) == INSTAGRAM_REELS:
-                                    instagram_fallback_targets.append({
-                                        "Platform": INSTAGRAM_REELS,
+                                target_platform = safe_str(target.get("Platform"))
+                                if target_platform in {TIKTOK, INSTAGRAM_REELS}:
+                                    profile_fallback_targets.append({
+                                        "Platform": target_platform,
                                         "Creator": safe_str(target.get("Creator")),
                                     })
                                     if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
-                                        instagram_direct_failures.append(unavailable_metrics)
+                                        direct_fallback_frames.append(unavailable_metrics)
                                 else:
                                     if isinstance(unavailable_metrics, pd.DataFrame) and not unavailable_metrics.empty:
                                         failed_profile_frames.append(unavailable_metrics)
@@ -4751,7 +4844,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             progress_bar.progress(
                                 position / max(len(targets_to_fetch), 1)
                             )
-                        if instagram_fallback_targets:
+                        if profile_fallback_targets:
                             fallback_token = (
                                 _managed_api_secret_v68_43("APIFY_TOKEN")
                                 or clean_api_secret(
@@ -4763,7 +4856,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                             if fallback_token:
                                 try:
                                     fallback_metrics, fallback_errors = scrape_creator_profile_metrics(
-                                        pd.DataFrame(instagram_fallback_targets),
+                                        pd.DataFrame(profile_fallback_targets),
                                         fallback_token,
                                         months=3,
                                         post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
@@ -4773,11 +4866,14 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         fallback_metrics["Profile Fetched At"] = datetime.now(
                                             timezone.utc
                                         ).isoformat()
+                                        fallback_status = fallback_metrics[
+                                            "Profile Data Status"
+                                        ].fillna("").astype(str)
                                         fallback_unavailable = fallback_metrics[
-                                            fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                            fallback_status.str.startswith("Unavailable")
                                         ]
                                         fallback_successful = fallback_metrics[
-                                            ~fallback_metrics["Profile Data Status"].eq("Unavailable")
+                                            ~fallback_status.str.startswith("Unavailable")
                                         ].copy()
                                         if not fallback_successful.empty:
                                             available_fallback = fallback_successful[
@@ -4791,17 +4887,17 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                                         if not fallback_unavailable.empty:
                                             failed_profile_frames.append(fallback_unavailable)
                                     else:
-                                        failed_profile_frames.extend(instagram_direct_failures)
+                                        failed_profile_frames.extend(direct_fallback_frames)
                                     profile_errors.extend(fallback_errors)
                                 except Exception:
-                                    failed_profile_frames.extend(instagram_direct_failures)
+                                    failed_profile_frames.extend(direct_fallback_frames)
                                     profile_errors.append(
-                                        "Instagram profile fallback could not be completed in this run."
+                                        "Profile fallback could not be completed in this run."
                                     )
                             else:
-                                failed_profile_frames.extend(instagram_direct_failures)
+                                failed_profile_frames.extend(direct_fallback_frames)
                                 profile_errors.append(
-                                    "Some Instagram profiles could not be retrieved anonymously. "
+                                    "Some creator profiles could not be retrieved directly. "
                                     "Configure the existing Apify token to use the fallback."
                                 )
                 finally:
@@ -5348,6 +5444,7 @@ if st.session_state.step == 2:
                 st.session_state.tagged_df = pd.DataFrame()
                 st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
                 st.session_state.creator_profile_updated_at_v68_51 = ""
+                st.session_state.tiktok_follower_attempted_keys_v68_65 = []
                 st.session_state.last_message = ""
                 reset_date_filter_state_v68()
                 st.rerun()
@@ -6411,6 +6508,132 @@ elif st.session_state.step == 6:
         work,
         st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame()),
     )
+
+    missing_follower_targets = missing_tiktok_follower_targets_v68_65(work)
+    if not missing_follower_targets.empty:
+        attempted_follower_keys = {
+            safe_str(key)
+            for key in st.session_state.get(
+                "tiktok_follower_attempted_keys_v68_65", []
+            )
+            if safe_str(key)
+        }
+        pending_follower_targets = missing_follower_targets[
+            ~missing_follower_targets["Creator Key"].isin(attempted_follower_keys)
+        ]
+        if pending_follower_targets.empty:
+            attempted_follower_keys = set()
+            pending_follower_targets = missing_follower_targets.copy()
+            st.session_state.tiktok_follower_attempted_keys_v68_65 = []
+        with st.container(border=True):
+            follower_info_col, follower_action_col = st.columns([2, 1])
+            with follower_info_col:
+                st.markdown("**Missing TikTok followers**")
+                st.caption(
+                    f"{len(missing_follower_targets):,} unique creator"
+                    f"{'s' if len(missing_follower_targets) != 1 else ''} can be checked "
+                    "from public TikTok profiles, five at a time. No Apify credits are used."
+                )
+            with follower_action_col:
+                fill_followers_clicked = st.button(
+                    "Fill missing followers",
+                    type="secondary",
+                    width="stretch",
+                    key="fill_missing_tiktok_followers_v68_65",
+                )
+            if fill_followers_clicked:
+                targets_to_check = pending_follower_targets.head(
+                    MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65
+                )
+                successful_followers = 0
+                filled_rows = 0
+                failed_followers = 0
+                progress_bar = st.progress(0)
+                try:
+                    for position, (_, target) in enumerate(
+                        targets_to_check.iterrows(), start=1
+                    ):
+                        try:
+                            followers = direct_tiktok_profile_followers_v68_65(
+                                safe_str(target.get("Creator Key")),
+                                safe_str(target.get("Link")),
+                            )
+                            if followers > 0:
+                                follower_metrics = pd.DataFrame([{
+                                    "Platform": TIKTOK,
+                                    "Creator Key": safe_str(target.get("Creator Key")),
+                                    "Current Followers": followers,
+                                }])
+                                before_missing = work["Followers"].map(clean_num).le(0)
+                                st.session_state.tagged_df = apply_profile_followers_v68_64(
+                                    st.session_state.tagged_df,
+                                    follower_metrics,
+                                )
+                                qa_all_rows = apply_profile_followers_v68_64(
+                                    qa_all_rows,
+                                    follower_metrics,
+                                )
+                                work = apply_profile_followers_v68_64(
+                                    work,
+                                    follower_metrics,
+                                )
+                                successful_followers += 1
+                                filled_rows += int(
+                                    (
+                                        before_missing
+                                        & work["Followers"].map(clean_num).gt(0)
+                                    ).sum()
+                                )
+                            else:
+                                failed_followers += 1
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "Free TikTok follower lookup failed for %s: %s",
+                                safe_str(target.get("Creator")),
+                                exc,
+                            )
+                            failed_followers += 1
+                        attempted_follower_keys.add(
+                            safe_str(target.get("Creator Key"))
+                        )
+                        st.session_state.tiktok_follower_attempted_keys_v68_65 = sorted(
+                            attempted_follower_keys
+                        )
+                        _persist_runtime_checkpoint_v68_15()
+                        progress_bar.progress(
+                            position / max(len(targets_to_check), 1)
+                        )
+                finally:
+                    progress_bar.empty()
+
+                if successful_followers:
+                    _persist_runtime_checkpoint_v68_15()
+                    st.success(
+                        f"Filled follower counts for {successful_followers:,} creator"
+                        f"{'s' if successful_followers != 1 else ''} across "
+                        f"{filled_rows:,} post{'s' if filled_rows != 1 else ''}."
+                    )
+                if failed_followers:
+                    st.warning(
+                        f"{failed_followers:,} public profile"
+                        f"{'s' if failed_followers != 1 else ''} did not return a follower count. "
+                        "Those existing values were kept."
+                    )
+                remaining_targets = missing_tiktok_follower_targets_v68_65(work)
+                remaining_unchecked = remaining_targets[
+                    ~remaining_targets["Creator Key"].isin(attempted_follower_keys)
+                ]
+                remaining_count = len(remaining_unchecked)
+                if remaining_count:
+                    st.info(
+                        f"{remaining_count:,} more creator"
+                        f"{'s' if remaining_count != 1 else ''} can be checked on the next click."
+                    )
+                elif failed_followers:
+                    st.info(
+                        "All missing public profiles were checked once. Click again to retry "
+                        "profiles that were temporarily unavailable."
+                    )
     work = preserve_unavailable_metric_blanks(work)
     work["Platform Display"] = work["Platform"].map(lambda x: display_empty(x, TIKTOK))
     work["Market Display"] = work["Market"].map(display_market)
@@ -6775,6 +6998,7 @@ elif st.session_state.step == 6:
             st.session_state.tagged_df = pd.DataFrame()
             st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
             st.session_state.creator_profile_updated_at_v68_51 = ""
+            st.session_state.tiktok_follower_attempted_keys_v68_65 = []
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()

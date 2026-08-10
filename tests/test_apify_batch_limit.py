@@ -13,7 +13,12 @@ class _Backend:
 
     def run_apify_tiktok_scraper_api(self, links, _token):
         self.request_sizes.append(len(links))
-        return [{"submittedVideoUrl": link} for link in links]
+        return [{
+            "submittedVideoUrl": link,
+            "playCount": 100,
+            "diggCount": 10,
+            "commentCount": 1,
+        } for link in links]
 
 
 class ApifyBatchLimitTests(unittest.TestCase):

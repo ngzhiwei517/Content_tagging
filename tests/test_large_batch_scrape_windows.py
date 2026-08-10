@@ -122,7 +122,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def scrape(links, _token):
+            def scrape(links, _token, **_kwargs):
                 scrape_sizes.append(len(links))
                 return [
                     {"submittedVideoUrl": link, "webVideoUrl": link}
@@ -179,6 +179,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
+                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)
@@ -218,7 +219,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "tagging_jobs"
 
-            def scrape(links, _token):
+            def scrape(links, _token, **_kwargs):
                 scrape_sizes.append(len(links))
                 return [
                     {"submittedVideoUrl": link, "webVideoUrl": link}
@@ -285,6 +286,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
+                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)
@@ -341,7 +343,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "tagging_jobs"
 
-            def scrape(links, _token):
+            def scrape(links, _token, **_kwargs):
                 return [
                     {"submittedVideoUrl": link, "webVideoUrl": link}
                     for link in links
@@ -407,6 +409,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "st": fake_st,
                 "time": time,
                 "timezone": timezone,
+                "uploaded_instagram_views": lambda _rows: {},
                 "uuid": uuid,
             }
             runner = _load_runner(namespace)

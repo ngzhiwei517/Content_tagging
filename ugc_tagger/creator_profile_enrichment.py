@@ -7,7 +7,10 @@ downloads and never persists the Apify token or returned post media URLs.
 from __future__ import annotations
 
 import json
+import random
 import re
+import string
+import time
 from datetime import datetime, timezone
 from html import unescape
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -33,6 +36,8 @@ DIRECT_PROFILE_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+TIKTOK_PROFILE_STATS_URL = "https://www.tiktok.com/api/creator/item_list/"
+FOLLOWER_LOOKUP_TIMEOUT_SECONDS = 8
 
 PROFILE_METRIC_COLUMNS = [
     "Platform",
@@ -280,11 +285,97 @@ def _recursive_first(record, keys: Iterable[str]):
     return None
 
 
-def _tiktok_profile_details(page_html: str) -> Tuple[str, int, Optional[int]]:
-    """Extract a public TikTok profile's secUid, followers, and post count."""
+def _nested_dicts(record):
+    """Yield every dictionary in a decoded hydration payload."""
+    if isinstance(record, dict):
+        yield record
+        for value in record.values():
+            yield from _nested_dicts(value)
+    elif isinstance(record, list):
+        for value in record:
+            yield from _nested_dicts(value)
+
+
+def _tiktok_matched_profile_details(
+    payload: Dict,
+    expected_creator: str,
+) -> Tuple[str, Optional[int], Optional[int]]:
+    """Return fields paired with the requested creator inside hydration JSON."""
+    expected_key = creator_key(expected_creator)
+    if not expected_key:
+        return "", None, None
+
+    def paired_details(user, stats=None, fallback_handle=""):
+        if not isinstance(user, dict):
+            return None
+        returned_key = creator_key(
+            _first(
+                user,
+                ("uniqueId", "unique_id", "username", "userName"),
+                fallback_handle,
+            )
+        )
+        if returned_key != expected_key:
+            return None
+        sec_uid = _text(_first(user, ("secUid", "sec_uid", "authorSecId"), ""))
+        if not sec_uid:
+            return None
+        stats_record = stats if isinstance(stats, dict) else user
+        follower_value = _first(
+            stats_record,
+            ("followerCount", "followersCount", "follower_count"),
+            None,
+        )
+        post_count_value = _first(
+            stats_record,
+            ("videoCount", "postCount", "video_count", "post_count"),
+            None,
+        )
+        return (
+            sec_uid,
+            _number(follower_value) if follower_value not in (None, "") else None,
+            _number(post_count_value) if post_count_value not in (None, "") else None,
+        )
+
+    for scope in _nested_dicts(payload):
+        # Common userInfo shape: {"user": {...}, "stats": {...}}.
+        direct = paired_details(scope.get("user"), scope.get("stats"))
+        if direct:
+            return direct
+
+        # SIGI_STATE commonly keeps users and their stats in sibling maps.
+        users = scope.get("users")
+        stats_by_user = scope.get("stats")
+        if isinstance(users, dict):
+            for map_key, user in users.items():
+                paired_stats = (
+                    stats_by_user.get(map_key)
+                    if isinstance(stats_by_user, dict)
+                    else None
+                )
+                mapped = paired_details(user, paired_stats, fallback_handle=map_key)
+                if mapped:
+                    return mapped
+
+        # Some payloads place identity and statistics in the same object.
+        inline = paired_details(
+            scope,
+            scope.get("stats") if isinstance(scope.get("stats"), dict) else scope,
+        )
+        if inline:
+            return inline
+    return "", None, None
+
+
+def _tiktok_profile_header_details(
+    page_html: str,
+    *,
+    expected_creator: str = "",
+) -> Tuple[str, Optional[int], Optional[int]]:
+    """Extract TikTok profile-header fields while preserving missing values."""
     source = _text(page_html)
     if not source:
-        return "", 0, None
+        return "", None, None
 
     payloads = []
     for script_id in ("__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE"):
@@ -301,17 +392,25 @@ def _tiktok_profile_details(page_html: str) -> Tuple[str, int, Optional[int]]:
             continue
 
     for payload in payloads:
+        if expected_creator:
+            matched = _tiktok_matched_profile_details(payload, expected_creator)
+            if matched[0]:
+                return matched
+            continue
         sec_uid = _text(_recursive_first(payload, ("secUid", "sec_uid")))
+        follower_value = _recursive_first(
+            payload,
+            ("followerCount", "followersCount", "follower_count"),
+        )
+        post_count_value = _recursive_first(
+            payload,
+            ("videoCount", "postCount", "video_count", "post_count"),
+        )
         if sec_uid:
-            followers = _number(
-                _recursive_first(
-                    payload,
-                    ("followerCount", "followersCount", "follower_count"),
-                )
-            )
-            post_count_value = _recursive_first(
-                payload,
-                ("videoCount", "postCount", "video_count", "post_count"),
+            followers = (
+                _number(follower_value)
+                if follower_value not in (None, "")
+                else None
             )
             post_count = (
                 _number(post_count_value)
@@ -322,6 +421,10 @@ def _tiktok_profile_details(page_html: str) -> Tuple[str, int, Optional[int]]:
 
     # TikTok occasionally moves the hydration payload while retaining these
     # public JSON fields. Keep a narrow fallback rather than storing the page.
+    # It is intentionally disabled for follower-only lookups because raw
+    # fields cannot prove that the identity and statistics belong together.
+    if expected_creator:
+        return "", None, None
     sec_uid_match = re.search(r'["\']secUid["\']\s*:\s*["\']([^"\']+)', source)
     follower_match = re.search(
         r'["\'](?:followerCount|followersCount)["\']\s*:\s*(\d+)',
@@ -333,12 +436,18 @@ def _tiktok_profile_details(page_html: str) -> Tuple[str, int, Optional[int]]:
     )
     return (
         _text(sec_uid_match.group(1) if sec_uid_match else ""),
-        _number(follower_match.group(1) if follower_match else 0),
+        _number(follower_match.group(1)) if follower_match else None,
         _number(post_count_match.group(1)) if post_count_match else None,
     )
 
 
-def _fetch_tiktok_profile_html(profile_url: str) -> str:
+def _tiktok_profile_details(page_html: str) -> Tuple[str, int, Optional[int]]:
+    """Extract a public TikTok profile's secUid, followers, and post count."""
+    sec_uid, followers, post_count = _tiktok_profile_header_details(page_html)
+    return sec_uid, followers if followers is not None else 0, post_count
+
+
+def _fetch_tiktok_profile_html(profile_url: str, *, timeout: int = 20) -> str:
     """Retrieve public profile HTML without cookies, proxies, or media."""
     import requests
 
@@ -348,10 +457,198 @@ def _fetch_tiktok_profile_html(profile_url: str) -> str:
             "User-Agent": DIRECT_PROFILE_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml",
         },
-        timeout=20,
+        timeout=timeout,
     )
     response.raise_for_status()
     return response.text
+
+
+def _fetch_tiktok_profile_stats(sec_uid: str, creator: str) -> Dict:
+    """Fetch one public TikTok profile item to read its author statistics."""
+    import requests
+
+    query = {
+        "aid": "1988",
+        "app_language": "en",
+        "app_name": "tiktok_web",
+        "browser_language": "en-US",
+        "browser_name": "Mozilla",
+        "browser_online": "true",
+        "browser_platform": "Win32",
+        "browser_version": "5.0 (Windows)",
+        "channel": "tiktok_web",
+        "cookie_enabled": "true",
+        "count": "1",
+        "cursor": str(int(time.time() * 1000)),
+        "device_id": "".join(random.choices(string.digits, k=19)),
+        "device_platform": "web_pc",
+        "focus_state": "true",
+        "from_page": "user",
+        "history_len": "2",
+        "is_fullscreen": "false",
+        "is_page_visible": "true",
+        "language": "en",
+        "os": "windows",
+        "region": "US",
+        "screen_height": "1080",
+        "screen_width": "1920",
+        "secUid": sec_uid,
+        "type": "1",
+        "tz_name": "UTC",
+        "verifyFp": "verify_" + "".join(random.choices(string.hexdigits, k=7)),
+        "webcast_language": "en",
+    }
+    response = requests.get(
+        TIKTOK_PROFILE_STATS_URL,
+        params=query,
+        headers={
+            "User-Agent": DIRECT_PROFILE_USER_AGENT,
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": creator_profile_url(TIKTOK, creator),
+        },
+        timeout=FOLLOWER_LOOKUP_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("TikTok profile statistics were not available.")
+    return payload
+
+
+def _extract_tiktok_post_identity(post_url: str) -> Dict:
+    """Resolve a TikTok post's creator identity without downloading media."""
+    try:
+        import yt_dlp
+    except Exception as exc:  # pragma: no cover - dependency contract
+        raise RuntimeError("Missing dependency: install yt-dlp.") from exc
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "ignoreerrors": True,
+        "socket_timeout": FOLLOWER_LOOKUP_TIMEOUT_SECONDS,
+    }
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(post_url, download=False)
+    return info if isinstance(info, dict) else {}
+
+
+def _tiktok_profile_stats_followers(
+    payload: Dict,
+    *,
+    expected_creator: str,
+    expected_sec_uid: str,
+) -> Optional[int]:
+    """Read followers only when the returned author matches the target."""
+    expected_key = creator_key(expected_creator)
+    for item in list((payload or {}).get("itemList") or []):
+        if not isinstance(item, dict):
+            continue
+        author = item.get("author") if isinstance(item.get("author"), dict) else {}
+        returned_key = creator_key(
+            _first(author, ("uniqueId", "unique_id", "author"), "")
+        )
+        returned_sec_uid = _text(
+            _first(author, ("secUid", "sec_uid", "authorSecId"), "")
+        )
+        if returned_key and expected_key and returned_key != expected_key:
+            continue
+        if returned_sec_uid and expected_sec_uid and returned_sec_uid != expected_sec_uid:
+            continue
+        if not (
+            (returned_key and returned_key == expected_key)
+            or (returned_sec_uid and returned_sec_uid == expected_sec_uid)
+        ):
+            continue
+        stats = item.get("authorStats")
+        if not isinstance(stats, dict):
+            stats = item.get("authorStatsV2")
+        if not isinstance(stats, dict):
+            continue
+        follower_value = _first(
+            stats,
+            ("followerCount", "followersCount", "follower_count"),
+            None,
+        )
+        if follower_value not in (None, ""):
+            return _number(follower_value)
+    return None
+
+
+def fetch_tiktok_profile_followers(
+    creator,
+    *,
+    representative_post_url: str = "",
+    profile_fetcher: Optional[Callable[[str], str]] = None,
+    post_extractor: Optional[Callable[[str], Dict]] = None,
+    playlist_extractor: Optional[Callable[[str, int], Dict]] = None,
+    profile_stats_fetcher: Optional[Callable[[str, str], Dict]] = None,
+) -> int:
+    """Return one TikTok creator's public follower count without media.
+
+    The fast path reads the public profile header. If TikTok omits that header,
+    the fallback resolves the creator ID through yt-dlp and requests one public
+    metadata item for its author statistics. Neither path downloads media or
+    calls Apify.
+    """
+    handle = normalize_creator_handle(creator)
+    if not handle:
+        raise RuntimeError("TikTok creator handle is missing.")
+    fetch_profile_html = profile_fetcher or (
+        lambda profile_url: _fetch_tiktok_profile_html(
+            profile_url,
+            timeout=FOLLOWER_LOOKUP_TIMEOUT_SECONDS,
+        )
+    )
+    try:
+        page_html = fetch_profile_html(creator_profile_url(TIKTOK, handle))
+    except Exception:
+        page_html = ""
+    sec_uid, followers, _post_count = _tiktok_profile_header_details(
+        page_html,
+        expected_creator=handle,
+    )
+    if sec_uid and followers is not None:
+        return followers
+
+    extract_playlist = playlist_extractor or _extract_tiktok_user_playlist
+    extract_post_identity = post_extractor or _extract_tiktok_post_identity
+    fetch_profile_stats = profile_stats_fetcher or _fetch_tiktok_profile_stats
+    try:
+        if not sec_uid and _text(representative_post_url):
+            post_info = extract_post_identity(_text(representative_post_url))
+            post_creator = creator_key(
+                _first(post_info, ("uploader", "creator", "author"), "")
+            )
+            post_sec_uid = _text(
+                _first(post_info, ("channel_id", "authorSecId", "secUid"), "")
+            )
+            if post_creator == creator_key(handle) and post_sec_uid:
+                sec_uid = post_sec_uid
+        if not sec_uid:
+            playlist = extract_playlist(creator_profile_url(TIKTOK, handle), 1)
+            if not isinstance(playlist, dict):
+                raise RuntimeError("TikTok creator ID was not available.")
+            sec_uid = _text(playlist.get("id"))
+        if not sec_uid:
+            raise RuntimeError("TikTok creator ID was not available.")
+        stats_payload = fetch_profile_stats(sec_uid, handle)
+        followers = _tiktok_profile_stats_followers(
+            stats_payload,
+            expected_creator=handle,
+            expected_sec_uid=sec_uid,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"TikTok creator @{handle} could not be retrieved in this run."
+        ) from exc
+    if followers is None:
+        raise RuntimeError(
+            f"TikTok creator @{handle} did not return a verified follower count."
+        )
+    return followers
 
 
 def _extract_tiktok_user_playlist(query: str, post_limit: int) -> Dict:
@@ -1023,6 +1320,25 @@ def instagram_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
     return bool((incomplete_status | followers_missing).any())
 
 
+def tiktok_profile_requires_fallback(metrics: pd.DataFrame) -> bool:
+    """Return True when direct TikTok profile results need paid recovery."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return True
+    required = {"Platform", "Profile Data Status", "Current Followers"}
+    if not required.issubset(metrics.columns):
+        return True
+    tiktok = metrics[metrics.get("Platform", pd.Series(dtype=str)).eq(TIKTOK)]
+    if tiktok.empty:
+        return True
+    status = tiktok.get(
+        "Profile Data Status", pd.Series("", index=tiktok.index, dtype=str)
+    ).fillna("").astype(str)
+    followers = pd.to_numeric(
+        tiktok.get("Current Followers", 0), errors="coerce"
+    ).fillna(0)
+    return bool(status.str.startswith("Unavailable").any() or followers.le(0).any())
+
+
 def scrape_creator_profile_metrics(
     creators,
     apify_token: str,
@@ -1054,6 +1370,7 @@ def scrape_creator_profile_metrics(
     rows: List[Dict] = []
     errors: List[str] = []
     failed_platforms: List[str] = []
+    failed_creators: List[Tuple[str, str]] = []
     instagram_followers: Dict[str, int] = {}
 
     tiktok_handles = requested.loc[requested["Platform"].eq(TIKTOK), "Profile Creator"].tolist()
@@ -1073,7 +1390,22 @@ def scrape_creator_profile_metrics(
                 "shouldDownloadMusicCovers": False,
                 "commentsPerPost": 0,
             })
-            rows.extend(_tiktok_post_row(item) for item in items)
+            tiktok_rows = [_tiktok_post_row(item) for item in items]
+            rows.extend(tiktok_rows)
+            returned_keys = {
+                _text(row.get("Creator Key")) for row in tiktok_rows
+                if _text(row.get("Creator Key"))
+            }
+            missing_handles = [
+                handle for handle in tiktok_handles
+                if creator_key(handle) not in returned_keys
+            ]
+            failed_creators.extend((TIKTOK, handle) for handle in missing_handles)
+            if missing_handles:
+                errors.append(
+                    "TikTok profile data was not returned for "
+                    f"{len(missing_handles)} creator(s)."
+                )
         except Exception:
             failed_platforms.append(TIKTOK)
             errors.append("TikTok creator profiles could not be retrieved in this run.")
@@ -1109,11 +1441,30 @@ def scrape_creator_profile_metrics(
         except Exception:
             errors.append("Instagram follower counts could not be refreshed in this run.")
 
+        instagram_evidence = {
+            _text(row.get("Creator Key")) for row in rows
+            if row.get("Platform") == INSTAGRAM_REELS
+            and _text(row.get("Creator Key"))
+        } | set(instagram_followers)
+        missing_handles = [
+            handle for handle in instagram_handles
+            if creator_key(handle) not in instagram_evidence
+        ]
+        failed_creators.extend(
+            (INSTAGRAM_REELS, handle) for handle in missing_handles
+        )
+        if missing_handles:
+            errors.append(
+                "Instagram profile data was not returned for "
+                f"{len(missing_handles)} creator(s)."
+            )
+
     return _aggregate_profile_posts(
         requested,
         rows,
         instagram_followers=instagram_followers,
         failed_platforms=failed_platforms,
+        failed_creators=failed_creators,
         months=months,
         as_of=as_of,
     ), errors

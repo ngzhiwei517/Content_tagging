@@ -22,11 +22,13 @@ from ugc_tagger.creator_profile_enrichment import (
     _extract_tiktok_user_full_window,
     creator_profile_url,
     fetch_direct_creator_profile_metrics,
+    fetch_tiktok_profile_followers,
     instagram_profile_requires_fallback,
     normalize_creator_handle,
     profile_history_settings,
     profile_scope_count,
     scrape_creator_profile_metrics,
+    tiktok_profile_requires_fallback,
 )
 from ugc_tagger.instagram_reels_adapter import INSTAGRAM_REELS, TIKTOK
 
@@ -64,6 +66,149 @@ class _FakeClient:
 
 
 class CreatorProfileEnrichmentTests(unittest.TestCase):
+    def test_tiktok_followers_only_reads_profile_header_without_post_scraping(self):
+        profile_html = (
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"user":{"uniqueId":"Alice","secUid":"sec-alice"},'
+            '"stats":{"followerCount":12345,"videoCount":99}}'
+            "</script>"
+        )
+        requested_urls = []
+
+        followers = fetch_tiktok_profile_followers(
+            "@Alice",
+            profile_fetcher=lambda url: requested_urls.append(url) or profile_html,
+            playlist_extractor=lambda _query, _limit: self.fail(
+                "Profile-header followers must not invoke the playlist fallback."
+            ),
+        )
+
+        self.assertEqual(followers, 12_345)
+        self.assertEqual(requested_urls, ["https://www.tiktok.com/@Alice"])
+
+    def test_tiktok_followers_only_distinguishes_zero_from_missing_hydration(self):
+        zero_html = (
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"user":{"uniqueId":"new-account","secUid":"sec-new"},'
+            '"stats":{"followerCount":0}}'
+            "</script>"
+        )
+        self.assertEqual(
+            fetch_tiktok_profile_followers(
+                "new-account",
+                profile_fetcher=lambda _url: zero_html,
+            ),
+            0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not return"):
+            fetch_tiktok_profile_followers(
+                "blocked",
+                profile_fetcher=lambda _url: "<html>blocked</html>",
+                playlist_extractor=lambda _query, _limit: {"id": "sec-blocked"},
+                profile_stats_fetcher=lambda _sec_uid, _creator: {
+                    "itemList": [{
+                        "author": {
+                            "uniqueId": "someone-else",
+                            "secUid": "sec-someone-else",
+                        },
+                        "authorStats": {"followerCount": 999_999},
+                    }],
+                },
+            )
+
+    def test_tiktok_followers_only_wraps_one_profile_fetch_failure(self):
+        with self.assertRaisesRegex(RuntimeError, "could not be retrieved"):
+            fetch_tiktok_profile_followers(
+                "broken",
+                profile_fetcher=lambda _url: (_ for _ in ()).throw(TimeoutError()),
+                playlist_extractor=lambda _query, _limit: (
+                    _ for _ in ()
+                ).throw(TimeoutError()),
+            )
+
+    def test_tiktok_followers_only_uses_verified_public_stats_fallback(self):
+        calls = []
+
+        followers = fetch_tiktok_profile_followers(
+            "Alice",
+            representative_post_url="https://www.tiktok.com/@alice/video/123",
+            profile_fetcher=lambda _url: "<html>challenge</html>",
+            post_extractor=lambda post_url: calls.append(
+                ("post", post_url)
+            ) or {"uploader": "alice", "channel_id": "sec-alice"},
+            playlist_extractor=lambda _query, _limit: self.fail(
+                "A verified post identity must avoid the profile playlist fallback."
+            ),
+            profile_stats_fetcher=lambda sec_uid, creator: calls.append(
+                ("stats", sec_uid, creator)
+            ) or {
+                "itemList": [{
+                    "author": {"uniqueId": "alice", "secUid": "sec-alice"},
+                    "authorStats": {"followerCount": 91_200},
+                }],
+            },
+        )
+
+        self.assertEqual(followers, 91_200)
+        self.assertEqual(calls, [
+            ("post", "https://www.tiktok.com/@alice/video/123"),
+            ("stats", "sec-alice", "Alice"),
+        ])
+
+    def test_tiktok_profile_header_rejects_unrelated_follower_without_identity(self):
+        unrelated_html = (
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"recommended":{"stats":{"followerCount":888888}}}'
+            "</script>"
+        )
+        with self.assertRaisesRegex(RuntimeError, "did not return"):
+            fetch_tiktok_profile_followers(
+                "alice",
+                profile_fetcher=lambda _url: unrelated_html,
+                playlist_extractor=lambda _query, _limit: {"id": "sec-alice"},
+                profile_stats_fetcher=lambda _sec_uid, _creator: {"itemList": []},
+            )
+
+    def test_tiktok_profile_header_rejects_unrelated_identity_and_followers(self):
+        unrelated_html = (
+            '<script id="SIGI_STATE" type="application/json">'
+            '{"recommended":{"user":{"uniqueId":"someone-else",'
+            '"secUid":"sec-other"},"stats":{"followerCount":888888}}}'
+            "</script>"
+        )
+        with self.assertRaisesRegex(RuntimeError, "did not return"):
+            fetch_tiktok_profile_followers(
+                "alice",
+                profile_fetcher=lambda _url: unrelated_html,
+                playlist_extractor=lambda _query, _limit: {"id": "sec-alice"},
+                profile_stats_fetcher=lambda _sec_uid, _creator: {"itemList": []},
+            )
+
+    def test_tiktok_profile_fallback_requires_followers_and_available_status(self):
+        base = pd.DataFrame([{
+            "Platform": TIKTOK,
+            "Current Followers": 800,
+            "Profile Data Status": "Available",
+        }])
+        self.assertFalse(tiktok_profile_requires_fallback(base))
+
+        no_recent = base.copy()
+        no_recent["Profile Data Status"] = "No recent public posts"
+        self.assertFalse(tiktok_profile_requires_fallback(no_recent))
+
+        partial = base.copy()
+        partial["Profile Data Status"] = "Partial (2,000-post safety limit reached)"
+        self.assertFalse(tiktok_profile_requires_fallback(partial))
+
+        missing_followers = base.copy()
+        missing_followers["Current Followers"] = 0
+        self.assertTrue(tiktok_profile_requires_fallback(missing_followers))
+
+        unavailable = base.copy()
+        unavailable["Profile Data Status"] = "Unavailable"
+        self.assertTrue(tiktok_profile_requires_fallback(unavailable))
+
     def test_instagram_profile_fallback_requires_followers_and_complete_history(self):
         base = pd.DataFrame([{
             "Platform": INSTAGRAM_REELS,
@@ -265,6 +410,54 @@ class CreatorProfileEnrichmentTests(unittest.TestCase):
             INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
         )
         self.assertEqual(instagram_posts_input["onlyPostsNewerThan"], "3 months")
+
+    def test_tiktok_apify_fallback_honours_latest_twenty_request(self):
+        client = _FakeClient({f"{TIKTOK_PROFILE_ACTOR_ID}:posts": []})
+
+        scrape_creator_profile_metrics(
+            [{"Platform": TIKTOK, "Creator": "alice"}],
+            "test-token",
+            client=client,
+            months=3,
+            post_limit=INSTAGRAM_APIFY_FALLBACK_POST_LIMIT,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        tiktok_input = next(
+            run_input for actor_id, run_input in client.calls
+            if actor_id == TIKTOK_PROFILE_ACTOR_ID
+        )
+        self.assertEqual(tiktok_input["resultsPerPage"], 20)
+        self.assertEqual(tiktok_input["oldestPostDateUnified"], "3 months")
+
+    def test_tiktok_apify_partial_response_keeps_missing_creator_unavailable(self):
+        client = _FakeClient({
+            f"{TIKTOK_PROFILE_ACTOR_ID}:posts": [{
+                "createTimeISO": "2026-07-15T00:00:00Z",
+                "authorMeta": {"name": "alice", "fans": 10_000},
+                "playCount": 1_000,
+                "diggCount": 100,
+                "commentCount": 10,
+            }],
+        })
+
+        metrics, errors = scrape_creator_profile_metrics(
+            [
+                {"Platform": TIKTOK, "Creator": "alice"},
+                {"Platform": TIKTOK, "Creator": "bob"},
+            ],
+            "test-token",
+            client=client,
+            months=3,
+            post_limit=20,
+            as_of="2026-08-04T00:00:00Z",
+        )
+
+        alice = metrics[metrics["Creator Key"].eq("alice")].iloc[0]
+        bob = metrics[metrics["Creator Key"].eq("bob")].iloc[0]
+        self.assertEqual(alice["Profile Data Status"], "Available")
+        self.assertEqual(bob["Profile Data Status"], "Unavailable")
+        self.assertTrue(any("1 creator" in error for error in errors))
 
     def test_missing_token_is_rejected_without_a_client(self):
         with self.assertRaisesRegex(RuntimeError, "Missing Apify token"):

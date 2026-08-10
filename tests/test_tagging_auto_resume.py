@@ -263,7 +263,7 @@ class AutoResumeStateTests(unittest.TestCase):
         )[1].split("def run_real_tagging_backend", 1)[0]
         self.assertLess(
             runner.index("store.mark_executing(manifest)"),
-            runner.index("final_update2_scrape_links(links, apify_token)"),
+            runner.index("final_update2_scrape_links("),
         )
         self.assertLess(
             runner.index("store.mark_executing(manifest)"),
