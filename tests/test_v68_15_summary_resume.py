@@ -49,6 +49,7 @@ class RuntimeCheckpointTests(unittest.TestCase):
         self.assertNotIn("apify_token", checkpoint_block)
         self.assertIn('"batch_df"', checkpoint_block)
         self.assertIn('"tagged_df"', checkpoint_block)
+        self.assertIn('"tiktok_follower_attempted_keys_v68_65"', checkpoint_block)
 
     def test_url_tracks_batch_and_step_for_reconnect(self):
         self.assertIn('st.query_params["run"] = run_id', APP_SOURCE)
@@ -101,6 +102,9 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["kol_size_for_market"] = load_function("kol_size_for_market", namespace)
         cls.apply_profile_followers = staticmethod(
             load_function("apply_profile_followers_v68_64", namespace)
+        )
+        cls.missing_tiktok_follower_targets = staticmethod(
+            load_function("missing_tiktok_follower_targets_v68_65", namespace)
         )
         namespace["CREATOR_PROFILE_CACHE_TTL_SECONDS_V68_61"] = 6 * 60 * 60
         cls.pending_profile_targets = staticmethod(
@@ -449,6 +453,58 @@ class SummaryV6815Tests(unittest.TestCase):
         }])
         enriched = self.apply_profile_followers(rows, profile_metrics)
         self.assertEqual(int(enriched.loc[0, "Followers"]), 12_000)
+
+    def test_profile_followers_match_platform_and_normalized_creator_only(self):
+        rows = pd.DataFrame([
+            {"Platform": "TikTok", "Creator": "@Alice", "Market": "SG", "Followers": 0, "KOL Size": "Unknown"},
+            {"Platform": "Instagram Reels", "Creator": "ALICE", "Market": "SG", "Followers": 0, "KOL Size": "Unknown"},
+            {"Platform": "TikTok", "Creator": "", "Market": "SG", "Followers": 0, "KOL Size": "Unknown"},
+            {"Platform": "TikTok", "Creator": "bob", "Market": "SG", "Followers": "12,000", "KOL Size": "Micro"},
+        ])
+        profile_metrics = pd.DataFrame([
+            {"Platform": "TikTok", "Creator Key": "alice", "Current Followers": 25_000},
+            {"Platform": "Instagram Reels", "Creator Key": "alice", "Current Followers": 90_000},
+            {"Platform": "TikTok", "Creator Key": "bob", "Current Followers": 75_000},
+        ])
+
+        enriched = self.apply_profile_followers(rows, profile_metrics)
+
+        self.assertEqual(int(enriched.loc[0, "Followers"]), 25_000)
+        self.assertEqual(int(enriched.loc[1, "Followers"]), 90_000)
+        self.assertEqual(int(enriched.loc[2, "Followers"]), 0)
+        self.assertEqual(enriched.loc[3, "Followers"], "12,000")
+        self.assertEqual(enriched.loc[3, "KOL Size"], "Micro")
+
+    def test_missing_tiktok_follower_targets_are_unique_and_free_lookup_is_explicit(self):
+        rows = pd.DataFrame([
+            {
+                "Platform": "TikTok",
+                "Creator": "@Alice",
+                "Followers": 0,
+                "Link": "https://www.tiktok.com/@alice/video/123",
+            },
+            {"Platform": "TikTok", "Creator": "alice", "Followers": None, "Link": ""},
+            {"Platform": "TikTok", "Creator": "bob", "Followers": "12,000"},
+            {"Platform": "Instagram Reels", "Creator": "alice", "Followers": 0},
+            {"Platform": "TikTok", "Creator": "", "Followers": 0},
+        ])
+
+        targets = self.missing_tiktok_follower_targets(rows)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets.iloc[0]["Creator Key"], "alice")
+        self.assertEqual(
+            targets.iloc[0]["Link"],
+            "https://www.tiktok.com/@alice/video/123",
+        )
+        self.assertIn("Fill missing followers", APP_SOURCE)
+        self.assertIn("No Apify credits are used", APP_SOURCE)
+        self.assertIn("MAX_FREE_FOLLOWER_LOOKUPS_PER_CLICK_V68_65 = 5", APP_SOURCE)
+        self.assertIn("_persist_runtime_checkpoint_v68_15()", APP_SOURCE)
+        cache_section = APP_SOURCE.split(
+            "def direct_tiktok_profile_followers_v68_65", 1
+        )[0].rsplit("@st.cache_data", 1)[1]
+        self.assertIn("max_entries=500", cache_section)
 
         cache_section = APP_SOURCE.split(
             "def direct_creator_profile_metrics_v68_58", 1
