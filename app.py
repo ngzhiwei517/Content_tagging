@@ -4536,119 +4536,133 @@ def prepare_creative_type_chart_data_v68_49(
     return summary[columns]
 
 
-def creative_type_average_engagement_rate_v68_66(
+def prepare_creative_type_engagement_chart_data_v68_70(
     df: pd.DataFrame,
-    creative_types,
-) -> Dict[str, float]:
-    """Return the mean post engagement rate for each displayed creative type."""
-    displayed = [safe_str(value) for value in creative_types]
+    *,
+    max_categories: int = 12,
+) -> pd.DataFrame:
+    """Aggregate post count and mean engagement rate for each creative type."""
+    columns = ["Creative Type", "Posts", "Average Engagement Rate"]
     if df is None or df.empty or "Primary Creative Type" not in df.columns:
-        return {label: 0.0 for label in displayed}
+        return pd.DataFrame(columns=columns)
+    if "Engagement Rate" not in df.columns:
+        return pd.DataFrame(columns=columns)
 
-    working = df.copy()
+    working = df[["Primary Creative Type", "Engagement Rate"]].copy()
     labels = working["Primary Creative Type"].fillna("").astype(str).str.strip()
     working["Creative Type"] = labels.mask(
         labels.str.casefold().isin({"", "nan", "none", "null"}),
         "Others",
     )
-    if "Engagement Rate" in working.columns:
-        working["_Engagement Rate"] = working["Engagement Rate"].map(clean_num)
-    else:
-        working["_Engagement Rate"] = working.apply(
-            lambda row: (
-                clean_num(row.get("Total Engagement"))
-                / clean_num(row.get("Views"))
-                * 100
-            )
-            if clean_num(row.get("Views"))
-            else 0.0,
-            axis=1,
+    working["Engagement Rate"] = pd.to_numeric(
+        working["Engagement Rate"], errors="coerce"
+    )
+    working = working.dropna(subset=["Engagement Rate"])
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    summary = (
+        working.groupby("Creative Type", dropna=False)
+        .agg(
+            Posts=("Creative Type", "size"),
+            **{"Average Engagement Rate": ("Engagement Rate", "mean")},
         )
-
-    visible_types = {
-        label for label in displayed if label != "Remaining creative types"
-    }
-    if "Remaining creative types" in displayed:
-        working.loc[
-            ~working["Creative Type"].isin(visible_types),
-            "Creative Type",
-        ] = "Remaining creative types"
-
-    averages = working.groupby("Creative Type", dropna=False)[
-        "_Engagement Rate"
-    ].mean()
-    return {label: float(averages.get(label, 0.0)) for label in displayed}
+        .reset_index()
+        .sort_values(
+            ["Average Engagement Rate", "Creative Type"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        .head(max(1, int(max_categories)))
+        .reset_index(drop=True)
+    )
+    summary["Posts"] = summary["Posts"].astype(int)
+    return summary[columns]
 
 
-def render_creative_type_bar_chart_v68_49(
-    mix: pd.DataFrame,
-    tagged_posts: Optional[pd.DataFrame] = None,
-) -> None:
-    """Show post mix as an interactive horizontal bar chart."""
-    if mix is None or mix.empty or float(mix["Posts"].sum()) <= 0:
+def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
+    """Show average engagement rate by creative type with post-count hover detail."""
+    if mix is None or mix.empty or "Average Engagement Rate" not in mix.columns:
         st.markdown("<div class='empty-panel'>Creative type mix will appear after posts are tagged.</div>", unsafe_allow_html=True)
         return
+    chart_data = mix.copy()
+    chart_data["Posts"] = pd.to_numeric(chart_data["Posts"], errors="coerce").fillna(0).clip(lower=0)
+    chart_data["Average Engagement Rate"] = pd.to_numeric(
+        chart_data["Average Engagement Rate"], errors="coerce"
+    )
+    chart_data = chart_data.dropna(subset=["Average Engagement Rate"])
+    chart_data = chart_data.sort_values(
+        ["Average Engagement Rate", "Creative Type"],
+        ascending=[False, True],
+        kind="stable",
+    ).head(12)
+    if chart_data.empty:
+        st.markdown("<div class='empty-panel'>Engagement-rate chart will appear after metrics are available.</div>", unsafe_allow_html=True)
+        return
     if px is None:
-        st.markdown(
-            bar_list(mix, "Creative Type", "Posts", max_rows=12, value_suffix="posts"),
-            unsafe_allow_html=True,
+        chart_bar(
+            chart_data,
+            "Creative Type",
+            "Average Engagement Rate",
+            orientation="v",
+            value_format="percent",
         )
         return
 
-    chart_data = mix.copy()
-    engagement_rates = creative_type_average_engagement_rate_v68_66(
-        tagged_posts,
-        chart_data["Creative Type"].tolist(),
-    )
-    chart_data["Average Engagement Rate"] = chart_data["Creative Type"].map(
-        engagement_rates
-    ).fillna(0.0)
-    chart_data["Label"] = chart_data.apply(
-        lambda row: (
-            f"{int(row['Posts']):,} "
-            f"({float(row['Average Engagement Rate']):.1f}% avg. ER)"
-        ),
-        axis=1,
-    )
     fig = px.bar(
         chart_data,
-        x="Posts",
-        y="Creative Type",
-        orientation="h",
-        text="Label",
-        color_discrete_sequence=["#6254e8"],
+        x="Creative Type",
+        y="Average Engagement Rate",
+        text="Average Engagement Rate",
+        color_discrete_sequence=["#111111"],
         template="plotly_white",
     )
     fig.update_traces(
-        customdata=chart_data[["Average Engagement Rate"]].to_numpy(),
+        customdata=chart_data[["Posts"]].to_numpy(),
         hovertemplate=(
-            "<b>%{y}</b><br>Posts: %{x:,.0f}"
-            "<br>Average engagement rate: %{customdata[0]:.1f}%<extra></extra>"
+            "<b>%{x}</b><br>Posts: %{customdata[0]:,.0f}"
+            "<br>Average engagement rate: %{y:.1f}%<extra></extra>"
         ),
         textposition="outside",
+        texttemplate="%{y:.1f}%",
         cliponaxis=False,
-        marker=dict(line=dict(color="rgba(255,255,255,0.75)", width=1)),
+        marker=dict(color="#111111", line=dict(color="#111111", width=1)),
     )
     fig.update_layout(
         template="plotly_white",
         showlegend=False,
-        height=520,
-        margin=dict(l=8, r=72, t=18, b=48),
+        height=500,
+        margin=dict(l=52, r=22, t=56, b=128),
         font=dict(color="#111827", size=12),
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0)",
         hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
         xaxis=dict(
-            title="Number of posts",
-            rangemode="tozero",
-            gridcolor="#e2e8f0",
+            title="Creative type",
+            categoryorder="array",
+            categoryarray=chart_data["Creative Type"].tolist(),
+            tickangle=-45,
+            automargin=True,
+            showgrid=False,
             zeroline=False,
         ),
         yaxis=dict(
-            title="",
-            categoryorder="total ascending",
+            title="Average engagement rate (%)",
+            rangemode="tozero",
+            gridcolor="#e2e8f0",
+            zeroline=False,
             automargin=True,
         ),
+        annotations=[dict(
+            text="● Average Engagement Rate",
+            x=0,
+            xref="paper",
+            y=1.15,
+            yref="paper",
+            showarrow=False,
+            xanchor="left",
+            font=dict(color="#111111", size=13),
+        )],
     )
     render_plotly_chart(fig)
 
@@ -7663,8 +7677,11 @@ elif st.session_state.step == 6:
     with c1:
         with st.container(border=True):
             st.markdown(section_title("Creative Type Mix", "#6254e8"), unsafe_allow_html=True)
-            mix = prepare_creative_type_chart_data_v68_49(filtered, "Posts", max_categories=12)
-            render_creative_type_bar_chart_v68_49(mix, filtered)
+            mix = prepare_creative_type_engagement_chart_data_v68_70(
+                filtered,
+                max_categories=12,
+            )
+            render_creative_type_bar_chart_v68_49(mix)
     with c2:
         with st.container(border=True):
             st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
