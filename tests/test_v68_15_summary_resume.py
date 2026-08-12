@@ -120,6 +120,9 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.creative_type_chart_data = staticmethod(
             load_function("prepare_creative_type_chart_data_v68_49", namespace)
         )
+        cls.creative_type_engagement_chart_data = staticmethod(
+            load_function("prepare_creative_type_engagement_chart_data_v68_70", namespace)
+        )
         cls.filter_summary = staticmethod(
             load_function("filter_summary_by_selected_values_v68_50", namespace)
         )
@@ -133,13 +136,10 @@ class SummaryV6815Tests(unittest.TestCase):
             "clean_num": namespace["clean_num"],
             "st": SimpleNamespace(markdown=lambda *args, **kwargs: None),
             "bar_list": lambda *args, **kwargs: "",
+            "chart_bar": lambda *args, **kwargs: None,
             "render_plotly_chart": lambda fig: cls.rendered_chart_figures.append(fig),
             "CREATIVE_TYPE_CHART_COLORS_V68_49": ["#6254e8", "#0ea5e9", "#10b981"],
         }
-        chart_namespace["creative_type_average_engagement_rate_v68_66"] = load_function(
-            "creative_type_average_engagement_rate_v68_66",
-            chart_namespace,
-        )
         cls.render_creative_type_bar = staticmethod(
             load_function("render_creative_type_bar_chart_v68_49", chart_namespace)
         )
@@ -200,10 +200,11 @@ class SummaryV6815Tests(unittest.TestCase):
     def test_visual_summary_uses_interactive_post_bar_and_views_doughnut(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         self.assertIn(
-            "render_creative_type_bar_chart_v68_49(mix, filtered)",
+            "render_creative_type_bar_chart_v68_49(mix)",
             step_six,
         )
         self.assertIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
+        self.assertIn("prepare_creative_type_engagement_chart_data_v68_70", step_six)
         self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
         self.assertNotIn("metric_for_chart = focus_metric", step_six)
 
@@ -250,29 +251,29 @@ class SummaryV6815Tests(unittest.TestCase):
             self.assertIn(key, filter_block)
         self.assertIn('("KOL Size Display", kol_size_filters)', step_six)
 
-    def test_creative_type_bar_shows_post_number_and_average_engagement_rate(self):
+    def test_creative_type_engagement_chart_uses_mean_rate_and_post_count(self):
+        rows = pd.DataFrame({
+            "Primary Creative Type": ["Dance", "Dance", "Comedy"],
+            "Engagement Rate": [10.0, 20.0, 37.6],
+        })
+        chart = self.creative_type_engagement_chart_data(rows)
+        self.assertEqual(chart["Creative Type"].tolist(), ["Comedy", "Dance"])
+        self.assertEqual(chart["Posts"].tolist(), [1, 2])
+        self.assertAlmostEqual(float(chart.loc[0, "Average Engagement Rate"]), 37.6)
+        self.assertAlmostEqual(float(chart.loc[1, "Average Engagement Rate"]), 15.0)
+
+    def test_creative_type_bar_hover_shows_posts_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
         mix = pd.DataFrame({
             "Creative Type": ["Dance", "Lip Sync"],
             "Posts": [8, 2],
-            "Share": [80.0, 20.0],
+            "Average Engagement Rate": [14.6, 7.5],
         })
-        tagged_posts = pd.DataFrame({
-            "Primary Creative Type": ["Dance", "Dance", "Lip Sync"],
-            "Engagement Rate": [10.0, 20.0, 5.0],
-        })
-        self.render_creative_type_bar(mix, tagged_posts)
+        self.render_creative_type_bar(mix)
         trace = self.rendered_chart_figures[-1].data[0]
-        self.assertIn("Posts: %{x:,.0f}", trace.hovertemplate)
-        self.assertIn(
-            "Average engagement rate: %{customdata[0]:.1f}%",
-            trace.hovertemplate,
-        )
-        self.assertEqual(list(trace.customdata[:, 0]), [15.0, 5.0])
-        self.assertEqual(
-            list(trace.text),
-            ["8 (15.0% avg. ER)", "2 (5.0% avg. ER)"],
-        )
+        self.assertIn("Posts: %{customdata[0]:,.0f}", trace.hovertemplate)
+        self.assertIn("Average engagement rate: %{y:.1f}%", trace.hovertemplate)
+        self.assertEqual(trace.texttemplate, "%{y:.1f}%")
 
     def test_views_doughnut_hover_shows_view_number_and_percentage(self):
         self.rendered_chart_figures.clear()
