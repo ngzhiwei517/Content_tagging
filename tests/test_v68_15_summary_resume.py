@@ -257,10 +257,19 @@ class SummaryV6815Tests(unittest.TestCase):
             "Engagement Rate": [10.0, 20.0, 37.6],
         })
         chart = self.creative_type_engagement_chart_data(rows)
-        self.assertEqual(chart["Creative Type"].tolist(), ["Comedy", "Dance"])
-        self.assertEqual(chart["Posts"].tolist(), [1, 2])
-        self.assertAlmostEqual(float(chart.loc[0, "Average Engagement Rate"]), 37.6)
-        self.assertAlmostEqual(float(chart.loc[1, "Average Engagement Rate"]), 15.0)
+        self.assertEqual(chart["Creative Type"].tolist(), ["Dance", "Comedy"])
+        self.assertEqual(chart["Posts"].tolist(), [2, 1])
+        self.assertAlmostEqual(float(chart.loc[0, "Average Engagement Rate"]), 15.0)
+        self.assertAlmostEqual(float(chart.loc[1, "Average Engagement Rate"]), 37.6)
+
+    def test_creative_type_frequency_still_renders_without_engagement_rates(self):
+        rows = pd.DataFrame({
+            "Primary Creative Type": ["Dance", "Dance", "Comedy"],
+        })
+        chart = self.creative_type_engagement_chart_data(rows)
+        self.assertEqual(chart["Creative Type"].tolist(), ["Dance", "Comedy"])
+        self.assertEqual(chart["Posts"].tolist(), [2, 1])
+        self.assertTrue(chart["Average Engagement Rate"].isna().all())
 
     def test_creative_type_bar_hover_shows_posts_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
@@ -271,9 +280,14 @@ class SummaryV6815Tests(unittest.TestCase):
         })
         self.render_creative_type_bar(mix)
         trace = self.rendered_chart_figures[-1].data[0]
-        self.assertIn("Posts: %{customdata[0]:,.0f}", trace.hovertemplate)
-        self.assertIn("Average engagement rate: %{y:.1f}%", trace.hovertemplate)
-        self.assertEqual(trace.texttemplate, "%{y:.1f}%")
+        self.assertEqual(list(trace.y), [8, 2])
+        self.assertEqual(list(trace.text), ["14.6%", "7.5%"])
+        self.assertIn("Posts: %{y:,.0f}", trace.hovertemplate)
+        self.assertIn(
+            "Average engagement rate: %{customdata[1]}",
+            trace.hovertemplate,
+        )
+        self.assertEqual(trace.marker.color, "#6254e8")
 
     def test_views_doughnut_hover_shows_view_number_and_percentage(self):
         self.rendered_chart_figures.clear()

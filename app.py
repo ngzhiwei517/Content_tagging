@@ -4545,10 +4545,11 @@ def prepare_creative_type_engagement_chart_data_v68_70(
     columns = ["Creative Type", "Posts", "Average Engagement Rate"]
     if df is None or df.empty or "Primary Creative Type" not in df.columns:
         return pd.DataFrame(columns=columns)
-    if "Engagement Rate" not in df.columns:
-        return pd.DataFrame(columns=columns)
 
-    working = df[["Primary Creative Type", "Engagement Rate"]].copy()
+    working = df[["Primary Creative Type"]].copy()
+    working["Engagement Rate"] = (
+        df["Engagement Rate"] if "Engagement Rate" in df.columns else float("nan")
+    )
     labels = working["Primary Creative Type"].fillna("").astype(str).str.strip()
     working["Creative Type"] = labels.mask(
         labels.str.casefold().isin({"", "nan", "none", "null"}),
@@ -4557,10 +4558,6 @@ def prepare_creative_type_engagement_chart_data_v68_70(
     working["Engagement Rate"] = pd.to_numeric(
         working["Engagement Rate"], errors="coerce"
     )
-    working = working.dropna(subset=["Engagement Rate"])
-    if working.empty:
-        return pd.DataFrame(columns=columns)
-
     summary = (
         working.groupby("Creative Type", dropna=False)
         .agg(
@@ -4569,8 +4566,8 @@ def prepare_creative_type_engagement_chart_data_v68_70(
         )
         .reset_index()
         .sort_values(
-            ["Average Engagement Rate", "Creative Type"],
-            ascending=[False, True],
+            ["Posts", "Average Engagement Rate", "Creative Type"],
+            ascending=[False, False, True],
             kind="stable",
         )
         .head(max(1, int(max_categories)))
@@ -4581,7 +4578,7 @@ def prepare_creative_type_engagement_chart_data_v68_70(
 
 
 def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
-    """Show average engagement rate by creative type with post-count hover detail."""
+    """Show post frequency with average engagement rate as labels and hover detail."""
     if mix is None or mix.empty or "Average Engagement Rate" not in mix.columns:
         st.markdown("<div class='empty-panel'>Creative type mix will appear after posts are tagged.</div>", unsafe_allow_html=True)
         return
@@ -4590,10 +4587,9 @@ def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
     chart_data["Average Engagement Rate"] = pd.to_numeric(
         chart_data["Average Engagement Rate"], errors="coerce"
     )
-    chart_data = chart_data.dropna(subset=["Average Engagement Rate"])
     chart_data = chart_data.sort_values(
-        ["Average Engagement Rate", "Creative Type"],
-        ascending=[False, True],
+        ["Posts", "Average Engagement Rate", "Creative Type"],
+        ascending=[False, False, True],
         kind="stable",
     ).head(12)
     if chart_data.empty:
@@ -4603,30 +4599,32 @@ def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
         chart_bar(
             chart_data,
             "Creative Type",
-            "Average Engagement Rate",
+            "Posts",
             orientation="v",
-            value_format="percent",
+            value_format="number",
         )
         return
 
+    chart_data["Engagement Rate Label"] = chart_data["Average Engagement Rate"].map(
+        lambda value: f"{float(value):.1f}%" if pd.notna(value) else "N/A"
+    )
     fig = px.bar(
         chart_data,
         x="Creative Type",
-        y="Average Engagement Rate",
-        text="Average Engagement Rate",
-        color_discrete_sequence=["#111111"],
+        y="Posts",
+        text="Engagement Rate Label",
+        color_discrete_sequence=["#6254e8"],
         template="plotly_white",
     )
     fig.update_traces(
-        customdata=chart_data[["Posts"]].to_numpy(),
+        customdata=chart_data[["Average Engagement Rate", "Engagement Rate Label"]].to_numpy(),
         hovertemplate=(
-            "<b>%{x}</b><br>Posts: %{customdata[0]:,.0f}"
-            "<br>Average engagement rate: %{y:.1f}%<extra></extra>"
+            "<b>%{x}</b><br>Posts: %{y:,.0f}"
+            "<br>Average engagement rate: %{customdata[1]}<extra></extra>"
         ),
         textposition="outside",
-        texttemplate="%{y:.1f}%",
         cliponaxis=False,
-        marker=dict(color="#111111", line=dict(color="#111111", width=1)),
+        marker=dict(color="#6254e8", line=dict(color="#4f46d8", width=1)),
     )
     fig.update_layout(
         template="plotly_white",
@@ -4647,21 +4645,21 @@ def render_creative_type_bar_chart_v68_49(mix: pd.DataFrame) -> None:
             zeroline=False,
         ),
         yaxis=dict(
-            title="Average engagement rate (%)",
+            title="Frequency",
             rangemode="tozero",
             gridcolor="#e2e8f0",
             zeroline=False,
             automargin=True,
         ),
         annotations=[dict(
-            text="● Average Engagement Rate",
+            text="● Frequency   Labels: Average Engagement Rate",
             x=0,
             xref="paper",
             y=1.15,
             yref="paper",
             showarrow=False,
             xanchor="left",
-            font=dict(color="#111111", size=13),
+            font=dict(color="#6254e8", size=13),
         )],
     )
     render_plotly_chart(fig)
