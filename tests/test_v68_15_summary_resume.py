@@ -98,6 +98,10 @@ class SummaryV6815Tests(unittest.TestCase):
             load_function("summary_creative_type_cell_v68_73", namespace)
         )
         namespace["summary_creative_type_cell_v68_73"] = cls.summary_creative_type_cell
+        cls.summary_drama_detail_cell = staticmethod(
+            load_function("summary_drama_detail_cell_v68_74", namespace)
+        )
+        namespace["summary_drama_detail_cell_v68_74"] = cls.summary_drama_detail_cell
         cls.parse_summary_creative_type_cell = staticmethod(
             load_function("_parse_summary_creative_type_cell_v68_73", namespace)
         )
@@ -145,6 +149,12 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         cls.filter_summary = staticmethod(
             load_function("filter_summary_by_selected_values_v68_50", namespace)
+        )
+        cls.summary_creative_type_options = staticmethod(
+            load_function("summary_creative_type_options_v68_75", namespace)
+        )
+        cls.filter_summary_by_creative_types = staticmethod(
+            load_function("filter_summary_by_creative_types_v68_75", namespace)
         )
         cls.summary_drilldown_mask = staticmethod(
             load_function(
@@ -249,6 +259,39 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(selected_market["Market Display"].tolist(), ["MY"])
         self.assertEqual(selected_type["Market Display"].tolist(), ["SG", "TH"])
 
+    def test_quick_creative_filter_includes_secondary_labels(self):
+        rows = pd.DataFrame({
+            "Creative Type": [
+                "Comedy, Slice of Life",
+                "Slice of Life",
+                "Dance",
+            ],
+            "Link": ["a", "b", "c"],
+        })
+        self.assertEqual(
+            self.summary_creative_type_options(rows),
+            ["Comedy", "Dance", "Slice of Life"],
+        )
+        filtered = self.filter_summary_by_creative_types(
+            rows,
+            ["Slice of Life"],
+        )
+        self.assertEqual(filtered["Link"].tolist(), ["a", "b"])
+
+    def test_quick_creative_filter_is_synced_with_existing_dropdown(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        filter_block = step_six.split(
+            "# Retain the existing combined filters", 1
+        )[1].split("total_views =", 1)[0]
+        self.assertIn('"Quick creative type"', filter_block)
+        self.assertIn('key="summary_type_quick_v68_75"', filter_block)
+        self.assertIn("_sync_summary_type_dropdown_from_quick_v68_75", filter_block)
+        self.assertIn("filter_summary_by_creative_types_v68_75", filter_block)
+        self.assertNotIn(
+            '("Primary Creative Type", type_filters)',
+            filter_block,
+        )
+
     def test_summary_ui_keeps_dropdowns_and_adds_clickable_tables(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         filter_block = step_six.split(
@@ -283,6 +326,10 @@ class SummaryV6815Tests(unittest.TestCase):
         )[1].split("def bar_list", 1)[0]
         self.assertIn("columns=TOP_CREATOR_TABLE_COLUMNS_V68_71", creator_section)
         self.assertIn('"Market": "Country"', creator_section)
+        self.assertIn("Latest 3-month profile", creator_section)
+        self.assertIn("Current filtered batch", creator_section)
+        self.assertIn("Total Views is", creator_section)
+        self.assertIn("not a three-month profile total", creator_section)
 
     def test_drama_details_use_separate_broad_label_and_subtype(self):
         drama_namespace = {
@@ -449,21 +496,35 @@ class SummaryV6815Tests(unittest.TestCase):
         )[0]
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", top_posts_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
-        self.assertIn('if column not in {"Creative Type", "Narrative"}', APP_SOURCE)
+        for column in [
+            "Creator", "Market", "Track", "Creative Type", "Narrative",
+            "Followers", "Views", "Total Engagement",
+        ]:
+            self.assertIn(f'"{column}"', APP_SOURCE)
+        self.assertIn("KOL Size and", top_posts_block)
+        self.assertIn("Engagement Rate recalculate automatically", top_posts_block)
+        self.assertIn("Platform and Link", top_posts_block)
         top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"Content Subtype"', top_post_columns)
         self.assertIn("st.dataframe(", APP_SOURCE)
         self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
         self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
 
-    def test_drama_subtype_is_folded_into_creative_type_cell(self):
+    def test_drama_detail_is_shown_only_for_drama_rows(self):
         row = pd.Series({
             "Creative Type": "Movie/Tv/Drama Edits",
             "Drama Content Category": "Micro-drama edits",
         })
         self.assertEqual(
             self.summary_creative_type_cell(row),
-            "Movie/Tv/Drama Edits\n↳ Micro-drama edits",
+            "Movie/Tv/Drama Edits",
+        )
+        self.assertEqual(self.summary_drama_detail_cell(row), "Micro-drama edits")
+        self.assertEqual(
+            self.summary_drama_detail_cell(
+                pd.Series({"Creative Type": "Travel"})
+            ),
+            "",
         )
         self.assertEqual(
             self.parse_summary_creative_type_cell(
@@ -481,11 +542,12 @@ class SummaryV6815Tests(unittest.TestCase):
             "Label History": "",
         }], index=[7])
         original = pd.DataFrame([{
-            "Creative Type": "Movie/Tv/Drama Edits\nDrama Edit",
+            "Creative Type": "Movie/Tv/Drama Edits",
+            "Drama Detail": "Drama Edit",
             "Narrative": "Old narrative",
         }], index=[7])
         edited = original.copy()
-        edited.at[7, "Creative Type"] = "Movie/Tv/Drama Edits\nMicro-drama edits"
+        edited.at[7, "Drama Detail"] = "Micro-drama edits"
         edited.at[7, "Narrative"] = "New narrative"
 
         updated, changed = self.apply_summary_post_edits(tagged, original, edited)
@@ -496,6 +558,47 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(updated.at[7, "Narrative"], "New narrative")
         self.assertEqual(updated.at[7, "Review Action"], "KEEP")
         self.assertEqual(updated.at[7, "Review Note"], "Edited directly in Summary")
+
+    def test_direct_summary_edit_updates_dimensions_and_raw_metrics(self):
+        tagged = pd.DataFrame([{
+            "Platform": "TikTok",
+            "Creator": "old_creator",
+            "Market": "SG",
+            "Track": "Old Track",
+            "Creative Type": "Travel",
+            "Narrative": "Old narrative",
+            "Followers": 5_000,
+            "Views": 1_000,
+            "Total Engagement": 100,
+        }], index=[11])
+        original = pd.DataFrame([{
+            "Platform": "TikTok",
+            "Creator": "old_creator",
+            "Market": "SG",
+            "Track": "Old Track",
+            "Creative Type": "Travel",
+            "Narrative": "Old narrative",
+            "Followers": 5_000,
+            "Views": 1_000,
+            "Total Engagement": 100,
+            "Link": "https://example.com/post",
+        }], index=[11])
+        edited = original.copy()
+        edited.loc[11, [
+            "Creator", "Market", "Track", "Followers", "Views",
+            "Total Engagement",
+        ]] = ["new_creator", "MY", "New Track", 120_000, 2_000, 500]
+
+        updated, changed = self.apply_summary_post_edits(tagged, original, edited)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(updated.at[11, "Creator"], "new_creator")
+        self.assertEqual(updated.at[11, "Market"], "MY")
+        self.assertEqual(updated.at[11, "Track"], "New Track")
+        self.assertEqual(updated.at[11, "Followers"], 120_000)
+        self.assertEqual(updated.at[11, "Views"], 2_000)
+        self.assertEqual(updated.at[11, "Total Engagement"], 500)
+        self.assertEqual(updated.at[11, "Platform"], "TikTok")
 
     def test_every_summary_table_uses_clickable_header_sorting(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]

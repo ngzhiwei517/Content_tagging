@@ -13,14 +13,107 @@ import pandas as pd
 DASHBOARD_CHAT_SUGGESTIONS = {
     "Summarise key insights": "Summarise the most important insights in this dashboard.",
     "Suggest a campaign": (
-        "Based only on these dashboard results, suggest a campaign direction and explain "
-        "which evidence supports it."
+        "Use the dashboard evidence and clearly labelled general marketing ideas to suggest "
+        "a practical campaign direction."
     ),
     "Recommend creators": (
         "Which creators should we consider engaging, and why, based only on these results?"
     ),
-    "Suggest the next creative test": (
-        "Which creative direction should we test next, and what should the test compare?"
+    "Draft a campaign brief": (
+        "Turn the strongest dashboard findings into a concise campaign brief with an objective, "
+        "audience hypothesis, creative direction, creator approach, and measurement plan."
+    ),
+    "Plan the next test": (
+        "Recommend one focused creative test, including the hypothesis, variants, primary metric, "
+        "and what result would support the idea."
+    ),
+}
+
+PAGE_CHAT_SUGGESTIONS = {
+    2: {
+        "How do I add posts?": (
+            "Explain how to use the Add posts page, including files versus pasted links, "
+            "track, artist, market, and adding rows to the current batch."
+        ),
+        "What file can I upload?": (
+            "Explain the supported upload files and the minimum required post-link data."
+        ),
+        "How should I fill track and market?": (
+            "Explain when to enter track, artist, and market on the Add posts page."
+        ),
+    },
+    3: {
+        "How do I choose posts?": (
+            "Explain Top posts versus Tag every link and how the ranking and optional filters work."
+        ),
+        "Which ranking metric should I use?": (
+            "Explain when a marketing user should rank by views, engagement, or engagement rate."
+        ),
+        "How does the date range work?": (
+            "Explain how to use the date range and optional window on the Select posts page."
+        ),
+    },
+    4: {
+        "What happens during tagging?": (
+            "Explain the Run tagging page, automatic batch protection, saved progress, and resuming."
+        ),
+        "What if a key reaches its limit?": (
+            "Explain how progress is preserved and how to continue after the Gemini or Apify key is updated."
+        ),
+    },
+    5: {
+        "How do I review a post?": (
+            "Explain the Review page and the Keep, Edit, and Remove actions."
+        ),
+        "What should I check before keeping it?": (
+            "Explain which post details and suggested tags a marketing user should verify."
+        ),
+    },
+    6: DASHBOARD_CHAT_SUGGESTIONS,
+}
+
+PAGE_TITLES = {
+    2: "Add posts",
+    3: "Select posts",
+    4: "Run tagging",
+    5: "Review",
+    6: "Summary and export",
+}
+
+PAGE_HELP_ANSWERS = {
+    2: (
+        "### Add posts\n"
+        "- Upload CSV/XLSX files, or paste one TikTok or Instagram link per line.\n"
+        "- Confirm the track name; change the detected artist or market only when needed.\n"
+        "- Add the rows to the current batch. Files and pasted links are combined.\n"
+        "- Duplicate links are removed automatically."
+    ),
+    3: (
+        "### Select posts\n"
+        "- Choose **Top posts** for a focused sample or **Tag every link** for the complete batch.\n"
+        "- For Top posts, choose a ranking metric such as Total Engagement.\n"
+        "- Apply grouping, market, platform, track, source, or date filters only when needed.\n"
+        "- Preview the selection before continuing."
+    ),
+    4: (
+        "### Run tagging\n"
+        "- Start tagging and leave the page open while the current chunk runs.\n"
+        "- Large batches save completed progress between chunks.\n"
+        "- If a key reaches its limit, update it and resume the saved job.\n"
+        "- Already completed posts should not need to be tagged again."
+    ),
+    5: (
+        "### Review posts\n"
+        "- Check the preview, creator, market, Creative Type, Narrative, and any drama details.\n"
+        "- Choose **Keep** when the result is correct.\n"
+        "- Edit any incorrect label or detail directly.\n"
+        "- Choose **Remove** for an unusable post."
+    ),
+    6: (
+        "### Review and export\n"
+        "- Use filters or Creative Type shortcuts to focus the dashboard.\n"
+        "- Review the KPI, creative, market, track, sound, post, and creator sections.\n"
+        "- Download the final CSV/XLSX or internal QA report when ready."
     ),
 }
 
@@ -40,6 +133,30 @@ def _text(value: object, *, limit: int = 240) -> str:
         pass
     cleaned = " ".join(str(value).strip().split())
     return cleaned[:limit]
+
+
+def _answer_text(value: object, *, limit: int = 6000) -> str:
+    """Keep intentional Markdown line breaks in generated chat responses."""
+    if value is None:
+        return ""
+    cleaned = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return cleaned[:limit].rstrip()
+
+
+def chat_history_markdown(
+    messages: Optional[Iterable[Mapping[str, object]]],
+    *,
+    page_title: str = "Taggy conversation",
+) -> str:
+    """Create a local, readable export without persisting the conversation."""
+    lines = [f"# {page_title}", ""]
+    for message in list(messages or []):
+        role = _text(message.get("role"), limit=20).casefold()
+        content = _answer_text(message.get("content"))
+        if role not in {"user", "assistant"} or not content:
+            continue
+        lines.extend([f"## {'User' if role == 'user' else 'Taggy'}", "", content, ""])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _number(value: object) -> Optional[float]:
@@ -268,12 +385,19 @@ def build_dashboard_prompt(
     return f"""You are a concise marketing dashboard assistant.
 
 Grounding rules:
-- Use only DASHBOARD_DATA below. Do not use the web, external knowledge, saved memory, or unstated facts.
+- Use only DASHBOARD_DATA for claims about the current results. Do not use the web, saved memory, or unstated facts.
 - Treat DASHBOARD_DATA as the source of truth. Previous chat messages provide conversational context only and are not evidence.
 - Support findings with the relevant figures. Do not invent missing metrics or claim that correlation proves causation.
-- Clearly label campaign ideas and next steps as recommendations or tests, not measured facts.
+- You may use general, timeless marketing knowledge for campaign ideas, briefs, and test designs. Put it under **AI suggestions** and never present it as dashboard evidence.
+- Clearly label campaign ideas and next steps as recommendations or tests, not measured facts or guaranteed outcomes.
 - If the dashboard does not contain enough evidence, say what is missing.
-- Keep the answer practical, marketing-friendly, and concise. Use short bullets when useful.
+
+Response format:
+- Keep the answer below 300 words unless the user explicitly asks for more detail.
+- Start with one direct sentence, then use 2 to 4 short Markdown headings and bullet points.
+- For analysis or campaign questions, use **Dashboard evidence**, **AI suggestions**, and **Watch-outs** when relevant.
+- Use no more than 3 bullets per section and keep each bullet to 1 or 2 sentences.
+- Do not use Markdown tables, walls of text, or raw heading markers inside paragraphs.
 
 DASHBOARD_DATA:
 {context_json}
@@ -283,6 +407,53 @@ SESSION_CHAT_HISTORY:
 
 USER_QUESTION:
 {_text(question, limit=1200)}
+"""
+
+
+def page_help_answer(step: int, question: str) -> str:
+    """Answer common page-usage questions locally without an API call."""
+    normalized = _text(question, limit=1200).casefold()
+    help_markers = [
+        "how do i use",
+        "how to use",
+        "how do i start",
+        "what do i do",
+        "what should i do",
+        "guide me",
+        "help me use",
+        "how does this page",
+        "explain ",
+    ]
+    if any(marker in normalized for marker in help_markers):
+        return PAGE_HELP_ANSWERS.get(int(step), "")
+    return ""
+
+
+def build_page_assistant_prompt(
+    *,
+    step: int,
+    question: str,
+    context_json: str,
+    history: Optional[Iterable[Mapping[str, object]]] = None,
+) -> str:
+    """Ground Taggy in the current workflow page and available batch data."""
+    page_title = PAGE_TITLES.get(int(step), "UGC tagging tool")
+    dashboard_prompt = build_dashboard_prompt(question, context_json, history)
+    return f"""You are Taggy, a friendly guide inside a UGC post tagging tool.
+
+CURRENT_PAGE: {page_title}
+
+Page guidance:
+{PAGE_HELP_ANSWERS.get(int(step), "Help the user understand the current workflow page.")}
+
+Additional rules:
+- First answer questions about how to use CURRENT_PAGE directly and step by step.
+- Never claim that you clicked, uploaded, scraped, tagged, saved, or changed anything.
+- Never ask for, repeat, or expose API keys or tokens.
+- For data questions, follow all grounding rules in the dashboard prompt below.
+- When dashboard data is empty, do not invent results; provide workflow guidance only.
+
+{dashboard_prompt}
 """
 
 
@@ -298,7 +469,7 @@ def generate_dashboard_answer(
     """Generate an answer; ``request_fn`` keeps tests local and credit-free."""
     prompt = build_dashboard_prompt(question, context_json, history)
     if request_fn is not None:
-        answer = _text(request_fn(model, prompt), limit=8000)
+        answer = _answer_text(request_fn(model, prompt))
     else:
         from google import genai
         from google.genai import types
@@ -312,10 +483,51 @@ def generate_dashboard_answer(
             contents=[prompt],
             config=types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=1200,
+                max_output_tokens=700,
             ),
         )
-        answer = _text(getattr(response, "text", ""), limit=8000)
+        answer = _answer_text(getattr(response, "text", ""))
     if not answer:
         raise RuntimeError("Dashboard assistant returned an empty answer")
+    return answer
+
+
+def generate_page_assistant_answer(
+    *,
+    api_key: str,
+    model: str,
+    step: int,
+    question: str,
+    context_json: str,
+    history: Optional[Iterable[Mapping[str, object]]] = None,
+    request_fn: Optional[Callable[[str, str], str]] = None,
+) -> str:
+    """Generate one page-aware Taggy response with the existing Gemini client."""
+    prompt = build_page_assistant_prompt(
+        step=step,
+        question=question,
+        context_json=context_json,
+        history=history,
+    )
+    if request_fn is not None:
+        answer = _answer_text(request_fn(model, prompt))
+    else:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=45_000),
+        )
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=700,
+            ),
+        )
+        answer = _answer_text(getattr(response, "text", ""))
+    if not answer:
+        raise RuntimeError("Taggy returned an empty answer")
     return answer
