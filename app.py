@@ -27,6 +27,12 @@ import pandas as pd
 import streamlit as st
 
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
+from ugc_tagger.dashboard_assistant import (
+    DASHBOARD_CHAT_SUGGESTIONS,
+    dashboard_context_json,
+    dashboard_context_signature,
+    generate_dashboard_answer,
+)
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
@@ -4783,6 +4789,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Sound Breakdown": "S",
         "Top Posts": "",
         "Post Summary": "P",
+        "Ask this dashboard": "AI",
         "Downloads": "↓",
     }
     icon = icon_map.get(title, "•")
@@ -4790,6 +4797,115 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         f"<div class='summary-section-title' style='--accent:{accent}'>"
         f"<div class='section-icon'>{esc(icon)}</div><div><h3>{esc(title)}</h3></div></div>"
     )
+
+
+@st.fragment
+def render_dashboard_assistant_v68_72(filtered: pd.DataFrame) -> None:
+    """Render a session-only Gemini chat grounded in the filtered dashboard."""
+    context_json = dashboard_context_json(filtered)
+    context_signature = dashboard_context_signature(context_json)
+    signature_key = "dashboard_chat_context_signature_v68_72"
+    messages_key = "dashboard_chat_messages_v68_72"
+    suggestions_key = "dashboard_chat_suggestions_v68_72"
+
+    if st.session_state.get(signature_key) != context_signature:
+        st.session_state[signature_key] = context_signature
+        st.session_state[messages_key] = []
+        st.session_state.pop(suggestions_key, None)
+
+    messages = list(st.session_state.get(messages_key, []))
+    with st.container(border=True):
+        st.markdown(section_title("Ask this dashboard", "#2563eb"), unsafe_allow_html=True)
+        st.caption(
+            "Ask about the current filtered results or request a campaign idea. "
+            "Answers use this dashboard only and are not saved."
+        )
+
+        for message in messages:
+            role = safe_str(message.get("role"))
+            if role not in {"user", "assistant"}:
+                continue
+            avatar = ":material/auto_awesome:" if role == "assistant" else None
+            with st.chat_message(role, avatar=avatar):
+                st.markdown(safe_str(message.get("content")))
+
+        suggested_question = None
+        if not messages:
+            suggested_label = st.pills(
+                "Try asking",
+                list(DASHBOARD_CHAT_SUGGESTIONS),
+                key=suggestions_key,
+                label_visibility="collapsed",
+                width="stretch",
+            )
+            if suggested_label:
+                suggested_question = DASHBOARD_CHAT_SUGGESTIONS.get(suggested_label)
+
+        typed_question = st.chat_input(
+            "Ask about these results or request a campaign idea",
+            key="dashboard_chat_input_v68_72",
+            max_chars=1000,
+        )
+        question = safe_str(typed_question) or safe_str(suggested_question)
+        if question:
+            prior_history = list(messages)
+            with st.chat_message("user"):
+                st.markdown(question)
+            messages.append({"role": "user", "content": question})
+
+            gemini_key = clean_api_secret(
+                st.session_state.get("gemini_key")
+                or _managed_api_secret_v68_43("GEMINI_API_KEY")
+            )
+            if not gemini_key:
+                answer = (
+                    "Add a Gemini API key in Streamlit Secrets to use this assistant. "
+                    "No scraping was started."
+                )
+            else:
+                try:
+                    with st.spinner("Reviewing the current dashboard..."):
+                        answer = generate_dashboard_answer(
+                            api_key=gemini_key,
+                            model=normalize_gemini_model(
+                                st.session_state.get(
+                                    "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
+                                )
+                            ),
+                            question=question,
+                            context_json=context_json,
+                            history=prior_history,
+                        )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Dashboard assistant request failed (%s)", type(exc).__name__
+                    )
+                    error_text = safe_str(exc).lower()
+                    if any(
+                        marker in error_text
+                        for marker in ["quota", "429", "resource_exhausted"]
+                    ):
+                        answer = (
+                            "The Gemini usage limit has been reached. Replace or refresh "
+                            "the Gemini key, then ask again."
+                        )
+                    else:
+                        answer = (
+                            "I couldn't answer this question right now. The dashboard "
+                            "results are unchanged, and no scraping was started."
+                        )
+
+            with st.chat_message("assistant", avatar=":material/auto_awesome:"):
+                st.markdown(answer)
+            messages.append({"role": "assistant", "content": answer})
+            st.session_state[messages_key] = messages[-12:]
+
+        if messages and st.button(
+            "Clear chat", key="dashboard_chat_clear_v68_72", width="content"
+        ):
+            st.session_state[messages_key] = []
+            st.session_state.pop(suggestions_key, None)
+            st.rerun()
 
 
 def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
@@ -8212,6 +8328,8 @@ elif st.session_state.step == 6:
         st.download_button("Download Review / QA Report", to_excel_bytes(report), f"review_qa_report_{export_model_slug}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    render_dashboard_assistant_v68_72(filtered)
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back to Review", width="stretch"):
@@ -8225,6 +8343,9 @@ elif st.session_state.step == 6:
             st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.creator_profile_aliases_v68_67 = {}
             st.session_state.tiktok_follower_attempted_keys_v68_65 = []
+            st.session_state.dashboard_chat_messages_v68_72 = []
+            st.session_state.pop("dashboard_chat_context_signature_v68_72", None)
+            st.session_state.pop("dashboard_chat_suggestions_v68_72", None)
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()
