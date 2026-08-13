@@ -933,6 +933,8 @@ DEFAULT_STATE = {
     "last_message": "",
     "review_pointer": 0,
     "review_queue_indices_v68_57": [],
+    "review_return_step_v68_71": 5,
+    "summary_drilldown_v68_71": {},
     "enable_full_video_fallback_v46": True,
     "apify_records_by_key": {},
     "date_filter_scope_v68": DATE_SCOPE_SHARED,
@@ -964,6 +966,10 @@ def reset_review_state_for_new_tagging_run() -> None:
             st.session_state.pop(key, None)
     st.session_state.review_pointer = 0
     st.session_state.review_queue_indices_v68_57 = []
+    st.session_state.review_return_step_v68_71 = 5
+    st.session_state.summary_drilldown_v68_71 = {}
+    st.session_state.pop("summary_selected_post_index_v68_71", None)
+    st.session_state.pop("summary_last_click_signature_v68_71", None)
 
 # Navigation helpers
 def go(step: int):
@@ -1203,6 +1209,8 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "last_message",
     "review_pointer",
     "review_queue_indices_v68_57",
+    "review_return_step_v68_71",
+    "summary_drilldown_v68_71",
     "enable_full_video_fallback_v46",
     "date_filter_scope_v68",
     "track_date_settings_v68",
@@ -4768,8 +4776,8 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
     icon_map = {
         "Creative Type Mix": "CT",
         "Views by Creative Type": "V",
-        "Source Summary": "S",
         "Market Summary": "M",
+        "Drama Details": "D",
         "Top Creator Performance": "C",
         "Track Summary": "T",
         "Sound Breakdown": "S",
@@ -4873,6 +4881,8 @@ SUMMARY_INTEGER_COLUMNS_V68_46 = {
     "Current Followers",
     "Profile Average Views",
     "Profile Average Engagement",
+    "Posts (3m)",
+    "Avg. Views (3m)",
 }
 SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Engagement Rate",
@@ -4883,13 +4893,18 @@ SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Saves Rate",
     "Batch Average Engagement Rate",
     "Profile Average Engagement Rate",
+    "Avg. ER (3m)",
+    "Avg. ER",
 }
 TOP_POST_TABLE_COLUMNS_V68_46 = [
+    "Edit",
     "Platform",
     "Creator",
     "Market",
     "Track",
     "Creative Type",
+    "Narrative",
+    "Content Subtype",
     "Followers",
     "KOL Size",
     "Views",
@@ -4897,6 +4912,269 @@ TOP_POST_TABLE_COLUMNS_V68_46 = [
     "Engagement Rate",
     "Link",
 ]
+
+SUMMARY_CLICK_FILTER_COLUMNS_V68_71 = {
+    "Platform": "Platform Display",
+    "Creator": "Creator",
+    "Market": "Market Display",
+    "Track": "Track Display",
+    "Campaign Track": "Track Display",
+    "Creative Type": "Primary Creative Type",
+    "Content Subtype": "Drama Content Category Display",
+    "KOL Size": "KOL Size Display",
+}
+DRAMA_DETAIL_TABLE_COLUMNS_V68_71 = [
+    "Creator",
+    "Creative Type",
+    "Content Subtype",
+    "Visual Summary",
+    "Drama Type",
+    "Edit Focus",
+    "Format",
+    "Country / Region",
+    "Drama / Show Title",
+    "Detected Audio",
+    "Audio Version",
+    "Link",
+]
+TOP_CREATOR_TABLE_COLUMNS_V68_71 = [
+    "Creator Profile",
+    "Country",
+    "Platform",
+    "Followers",
+    "KOL Size",
+    "Posts (3m)",
+    "Avg. Views (3m)",
+    "Avg. ER (3m)",
+    "Posts",
+    "Total Views",
+    "Total Engagement",
+    "Avg. ER",
+]
+
+
+def _summary_selected_cell_v68_71(event, table: pd.DataFrame) -> Dict[str, object]:
+    """Return one safe table value from a native Streamlit cell selection."""
+    if event is None or table is None or table.empty:
+        return {}
+    try:
+        cells = event.selection.cells
+    except Exception:
+        try:
+            cells = event.get("selection", {}).get("cells", [])
+        except Exception:
+            cells = []
+    if not cells:
+        return {}
+    try:
+        row_position, column_name = cells[0]
+        row_position = int(row_position)
+        column_name = safe_str(column_name)
+        if not column_name or row_position < 0 or row_position >= len(table):
+            return {}
+        return {
+            "row_position": row_position,
+            "column": column_name,
+            "value": table.iloc[row_position].get(column_name),
+            "index": table.index[row_position],
+        }
+    except Exception:
+        return {}
+
+
+def _summary_drilldown_mask_v68_71(
+    df: pd.DataFrame,
+    filter_column: str,
+    selected_value,
+) -> pd.Series:
+    """Match a clicked category, including one label inside a multi-label cell."""
+    if df is None or df.empty or filter_column not in df.columns:
+        return pd.Series(False, index=getattr(df, "index", pd.Index([])), dtype=bool)
+    selected_text = safe_str(selected_value)
+    if not selected_text:
+        return pd.Series(False, index=df.index, dtype=bool)
+    values = df[filter_column].fillna("").astype(str)
+    if filter_column in {"Creative Type", "Primary Creative Type"}:
+        return values.map(
+            lambda value: selected_text in [
+                part.strip() for part in value.split(",") if part.strip()
+            ]
+        )
+    if filter_column == "Drama Content Category Display":
+        return values.map(
+            lambda value: value.strip() == selected_text
+            or selected_text in [
+                part.strip() for part in value.split(",") if part.strip()
+            ]
+        )
+    return values.str.strip().eq(selected_text)
+
+
+def _apply_summary_drilldown_v68_71(
+    df: pd.DataFrame,
+    drilldown: Dict[str, object],
+) -> pd.DataFrame:
+    """Apply one click-driven Summary category without adding filter widgets."""
+    if not isinstance(drilldown, dict):
+        return df.copy()
+    filter_column = safe_str(drilldown.get("filter_column"))
+    selected_value = drilldown.get("value")
+    mask = _summary_drilldown_mask_v68_71(df, filter_column, selected_value)
+    return df.loc[mask].copy() if mask.any() else df.copy()
+
+
+def _open_summary_post_in_review_v68_71(original_index) -> None:
+    """Open one Summary post in the existing audited label/detail editor."""
+    tagged = st.session_state.get("tagged_df", pd.DataFrame())
+    if not isinstance(tagged, pd.DataFrame) or tagged.empty:
+        return
+    index_by_key = {safe_str(index): index for index in tagged.index}
+    actual_index = index_by_key.get(safe_str(original_index))
+    if actual_index is None:
+        return
+    queue = review_queue_indices_v68_57(
+        tagged,
+        st.session_state.get("review_queue_indices_v68_57"),
+    )
+    queue = [index for index in queue if index != actual_index]
+    queue.insert(0, actual_index)
+    st.session_state.review_queue_indices_v68_57 = [safe_str(index) for index in queue]
+    st.session_state.review_pointer = 0
+    st.session_state.review_return_step_v68_71 = 6
+    go(5)
+
+
+def _reset_summary_click_state_v68_71(*, clear_drilldown: bool = False) -> None:
+    """Clear ephemeral table selections without touching tagged results."""
+    if clear_drilldown:
+        st.session_state.summary_drilldown_v68_71 = {}
+    st.session_state.pop("summary_selected_post_index_v68_71", None)
+    st.session_state.pop("summary_last_click_signature_v68_71", None)
+    for key in [
+        "summary_platform_table_v68_71",
+        "summary_market_table_v68_71",
+        "summary_track_table_v68_71",
+        "summary_sound_table_v68_71",
+        "summary_top_posts_table_v68_71",
+        "summary_drama_details_table_v68_71",
+        "summary_creator_table_v68_71",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def prepare_drama_detail_table_v68_71(df: pd.DataFrame) -> pd.DataFrame:
+    """Show the broad drama label and the structured subtype fields separately."""
+    if df is None or df.empty or "Creative Type" not in df.columns:
+        return pd.DataFrame(columns=DRAMA_DETAIL_TABLE_COLUMNS_V68_71)
+    drama_rows = df[
+        df["Creative Type"].fillna("").astype(str).map(
+            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+        )
+    ].copy()
+    if drama_rows.empty:
+        return pd.DataFrame(columns=DRAMA_DETAIL_TABLE_COLUMNS_V68_71)
+    detail_labels = {
+        "visual summary": "Visual Summary",
+        "content category": "Content Subtype",
+        "content categories": "Content Subtype",
+        "drama type": "Drama Type",
+        "edit focus": "Edit Focus",
+        "format": "Format",
+        "country/region": "Country / Region",
+        "drama title": "Drama / Show Title",
+        "detected audio": "Detected Audio",
+        "audio version": "Audio Version",
+    }
+    records = []
+    for original_index, row in drama_rows.iterrows():
+        parsed_details: Dict[str, str] = {}
+        for line in safe_str(row.get("Content Details")).splitlines():
+            if ":" not in line:
+                continue
+            label, value = line.split(":", 1)
+            output_column = detail_labels.get(label.strip().casefold())
+            if output_column and safe_str(value):
+                parsed_details[output_column] = safe_str(value)
+        records.append({
+            "Creator": display_empty(row.get("Creator"), "Unknown"),
+            "Creative Type": operational_creative_type(row.get("Creative Type")),
+            "Content Subtype": display_empty(
+                row.get("Drama Content Category")
+                or parsed_details.get("Content Subtype"),
+                "Not specified",
+            ),
+            "Visual Summary": display_empty(
+                row.get("visual_summary")
+                or parsed_details.get("Visual Summary"),
+                "Not specified",
+            ),
+            "Drama Type": display_empty(
+                row.get("Drama Type") or parsed_details.get("Drama Type"),
+                "Not specified",
+            ),
+            "Edit Focus": display_empty(
+                row.get("Drama Edit Focus") or parsed_details.get("Edit Focus"),
+                "Not specified",
+            ),
+            "Format": display_empty(
+                row.get("Drama Format") or parsed_details.get("Format"),
+                "Not specified",
+            ),
+            "Country / Region": display_empty(
+                row.get("Drama Country/Region")
+                or parsed_details.get("Country / Region"),
+                "Not specified",
+            ),
+            "Drama / Show Title": display_empty(
+                row.get("Drama Title")
+                or parsed_details.get("Drama / Show Title"),
+                "Not specified",
+            ),
+            "Detected Audio": display_empty(
+                row.get("Detected Audio") or parsed_details.get("Detected Audio"),
+                "Not specified",
+            ),
+            "Audio Version": display_empty(
+                row.get("Audio Version") or parsed_details.get("Audio Version"),
+                "Not specified",
+            ),
+            "Link": safe_str(row.get("Link")),
+            "_index": original_index,
+        })
+    details = pd.DataFrame.from_records(records).set_index("_index")
+    return details[DRAMA_DETAIL_TABLE_COLUMNS_V68_71]
+
+
+def _consume_summary_table_click_v68_71(
+    click: Dict[str, object],
+) -> None:
+    """Apply one new table click once, then rerun into the selected view."""
+    if not isinstance(click, dict) or not click:
+        return
+    if click.get("filter_column") == "Primary Creative Type":
+        click = {**click, "value": primary_creative_type(click.get("value"))}
+    signature = "|".join([
+        safe_str(click.get("filter_column")),
+        safe_str(click.get("value")),
+        safe_str(click.get("index")),
+        safe_str(click.get("column")),
+    ])
+    if not signature or signature == st.session_state.get(
+        "summary_last_click_signature_v68_71"
+    ):
+        return
+    st.session_state.summary_last_click_signature_v68_71 = signature
+    if click.get("filter_column"):
+        st.session_state.pop("summary_selected_post_index_v68_71", None)
+        st.session_state.summary_drilldown_v68_71 = {
+            **click,
+            "label": safe_str(click.get("column")) or "Selection",
+        }
+    else:
+        st.session_state.summary_selected_post_index_v68_71 = safe_str(
+            click.get("index")
+        )
+    st.rerun()
 
 
 def prepare_sortable_summary_table_v68_46(
@@ -4941,12 +5219,14 @@ def render_sortable_summary_table_v68_46(
     *,
     columns: List[str],
     max_visible_rows: int,
-) -> None:
+    key: Optional[str] = None,
+    clickable_columns: Optional[Dict[str, str]] = None,
+):
     """Render a Summary table with native ascending/descending header sorting."""
     table = prepare_sortable_summary_table_v68_46(df, columns)
     if table.empty:
         st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
-        return
+        return {}
 
     column_config = {}
     for column in table.columns:
@@ -4962,15 +5242,36 @@ def render_sortable_summary_table_v68_46(
             display_text=r"https://(?:www\.)?(?:tiktok\.com/@|instagram\.com/)([^/?#]+)",
             pinned=True,
         )
+    if "Edit" in table.columns:
+        column_config["Edit"] = st.column_config.TextColumn(
+            "Edit",
+            help="Select this cell, then use the edit button below the table.",
+            pinned=True,
+        )
+    if "Narrative" in table.columns:
+        column_config["Narrative"] = st.column_config.TextColumn(
+            "Narrative",
+            help="The post's storyline or narrative angle.",
+            width="large",
+        )
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
-    st.dataframe(
+    interactive = bool(key and clickable_columns)
+    event = st.dataframe(
         table,
         hide_index=True,
         width="stretch",
         height=38 + (visible_rows * 35),
         column_config=column_config,
+        key=key,
+        on_select="rerun" if interactive else "ignore",
+        selection_mode="single-cell" if interactive else "multi-row",
     )
+    selected = _summary_selected_cell_v68_71(event, table) if interactive else {}
+    if not selected or selected.get("column") not in clickable_columns:
+        return selected
+    selected["filter_column"] = clickable_columns[selected["column"]]
+    return selected
 
 
 def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
@@ -4979,10 +5280,21 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=TOP_POST_TABLE_COLUMNS_V68_46)
 
     top_posts = df.copy()
+    top_posts["Edit"] = "Edit"
     if "Market Display" in top_posts.columns:
         top_posts["Market"] = top_posts["Market Display"]
     if "Track Display" in top_posts.columns:
         top_posts["Track"] = top_posts["Track Display"]
+    top_posts["Narrative"] = top_posts.get(
+        "Narrative",
+        pd.Series("", index=top_posts.index, dtype=str),
+    ).map(lambda value: display_empty(value, "Not specified"))
+    if "Drama Content Category Display" in top_posts.columns:
+        top_posts["Content Subtype"] = top_posts["Drama Content Category Display"].replace(
+            "Not applicable", ""
+        )
+    elif "Drama Content Category" in top_posts.columns:
+        top_posts["Content Subtype"] = top_posts["Drama Content Category"]
 
     for column in ["Followers", "Total Engagement"]:
         if column not in top_posts.columns:
@@ -5787,13 +6099,7 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             for profile_error in profile_errors:
                 st.warning(profile_error)
 
-        display_table = creator_table.rename(columns={
-            "Posts": "Batch Posts",
-            "Total Views": "Batch Views",
-            "Total Engagement": "Batch Engagement",
-            "Average Engagement": "Batch Average Engagement",
-            "Average Engagement Rate": "Batch Average Engagement Rate",
-        }).copy()
+        display_table = creator_table.copy()
         display_table = _apply_creator_profile_aliases_v68_67(
             display_table,
             creator_aliases,
@@ -5804,7 +6110,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         )
 
         profile_metrics = st.session_state.get("creator_profile_metrics_v68_51", pd.DataFrame())
-        profile_columns = []
         if isinstance(profile_metrics, pd.DataFrame) and not profile_metrics.empty:
             profile_metrics = profile_metrics.copy()
             if "Profile History Mode" not in profile_metrics.columns:
@@ -5826,21 +6131,56 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
                 on=["Platform", "Creator Key"],
                 how="left",
             )
-            profile_columns = [
-                "Current Followers", "Profile Posts", "Profile Average Views",
-                "Profile Average Engagement", "Profile Average Engagement Rate",
-                "Profile Data Status",
-            ]
 
-        render_sortable_summary_table_v68_46(
-            display_table,
-            columns=[
-                "Creator Profile", "Market", "Platform", "Batch Posts",
-                "Batch Views", "Batch Engagement", "Batch Average Engagement",
-                "Batch Average Engagement Rate", *profile_columns,
-            ],
-            max_visible_rows=15,
+        current_followers = pd.to_numeric(
+            display_table.get(
+                "Current Followers",
+                pd.Series(pd.NA, index=display_table.index, dtype="Float64"),
+            ),
+            errors="coerce",
         )
+        batch_followers = pd.to_numeric(
+            display_table.get(
+                "Followers",
+                pd.Series(pd.NA, index=display_table.index, dtype="Float64"),
+            ),
+            errors="coerce",
+        )
+        display_table["Followers"] = current_followers.where(
+            current_followers.gt(0), batch_followers
+        )
+        def current_kol_size(row) -> str:
+            calculated = kol_size_for_market(row.get("Followers"), row.get("Market"))
+            return (
+                calculated
+                if calculated != "Unknown"
+                else display_empty(row.get("KOL Size"), "Unknown")
+            )
+
+        display_table["KOL Size"] = display_table.apply(current_kol_size, axis=1)
+        display_table = display_table.rename(columns={
+            "Market": "Country",
+            "Profile Posts": "Posts (3m)",
+            "Profile Average Views": "Avg. Views (3m)",
+            "Profile Average Engagement Rate": "Avg. ER (3m)",
+            "Average Engagement Rate": "Avg. ER",
+        })
+        for profile_column in ["Posts (3m)", "Avg. Views (3m)", "Avg. ER (3m)"]:
+            if profile_column not in display_table.columns:
+                display_table[profile_column] = pd.NA
+
+        creator_click = render_sortable_summary_table_v68_46(
+            display_table,
+            columns=TOP_CREATOR_TABLE_COLUMNS_V68_71,
+            max_visible_rows=15,
+            key="summary_creator_table_v68_71",
+            clickable_columns={
+                "Country": "Market Display",
+                "Platform": "Platform Display",
+                "KOL Size": "KOL Size Display",
+            },
+        )
+        _consume_summary_table_click_v68_71(creator_click)
 
 
 def bar_list(df: pd.DataFrame, label_col: str, value_col: str, max_rows: int = 10, value_suffix: str = "", show_share: bool = False) -> str:
@@ -6866,6 +7206,10 @@ elif st.session_state.step == 5:
                 go(6)
         st.stop()
 
+    return_to_summary_v68_71 = int(
+        st.session_state.get("review_return_step_v68_71", 5) or 5
+    ) == 6
+
     pending_review_count = int(
         review_df.get(
             "Needs Review",
@@ -6898,7 +7242,11 @@ elif st.session_state.step == 5:
             unsafe_allow_html=True,
         )
     with nav3:
-        if st.button("Skip", width="stretch", key=f"review_skip_{original_idx}"):
+        if return_to_summary_v68_71:
+            if st.button("Back to Summary", width="stretch", key=f"review_summary_{original_idx}"):
+                st.session_state.review_return_step_v68_71 = 5
+                go(6)
+        elif st.button("Skip", width="stretch", key=f"review_skip_{original_idx}"):
             st.session_state.review_pointer = (pointer + 1) % len(review_df)
             st.rerun()
 
@@ -7280,15 +7628,29 @@ elif st.session_state.step == 5:
                         *metric_keys.values(), *drama_keys.values(),
                     ]:
                         st.session_state.pop(key, None)
+                    if return_to_summary_v68_71:
+                        st.session_state.review_return_step_v68_71 = 5
+                        _reset_summary_click_state_v68_71()
+                        go(6)
                     st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Back", width="stretch", key="review_back_v55"):
+        review_back_label = "Back to Summary" if return_to_summary_v68_71 else "Back"
+        if st.button(review_back_label, width="stretch", key="review_back_v55"):
+            if return_to_summary_v68_71:
+                st.session_state.review_return_step_v68_71 = 5
+                go(6)
             go(4)
     with c2:
-        if st.button("Continue to Summary", type="primary", width="stretch", key="review_continue_v55"):
+        continue_summary_label = (
+            "Save above or return to Summary"
+            if return_to_summary_v68_71
+            else "Continue to Summary"
+        )
+        if st.button(continue_summary_label, type="primary", width="stretch", key="review_continue_v55"):
+            st.session_state.review_return_step_v68_71 = 5
             go(6)
 
 # STEP 6: Summary and export
@@ -7451,65 +7813,71 @@ elif st.session_state.step == 6:
     work["Source Display"] = work["Source"].map(lambda x: display_empty(x, "Manual / pasted links"))
     work["Creative Type"] = work["Creative Type"].map(operational_creative_type)
     work["Primary Creative Type"] = work["Creative Type"].map(primary_creative_type)
+    if "Drama Content Category" not in work.columns:
+        work["Drama Content Category"] = ""
+    work["Drama Content Category Display"] = work.apply(
+        lambda row: (
+            display_empty(row.get("Drama Content Category"), "Not specified")
+            if "Movie/Tv/Drama Edits" in split_creative_labels(row.get("Creative Type"))
+            else "Not applicable"
+        ),
+        axis=1,
+    )
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Combined filters: users can focus by platform + source + market + track +
-    # creative type + creator size. Empty selections continue to mean All.
+    # Retain the existing combined filters. Clickable table cells below add a
+    # faster one-category drill-down without introducing another filter row.
     f0, f1, f2, f3, f4, f5 = st.columns(6)
     with f0:
-        platform_opts = sorted(work["Platform Display"].dropna().unique().tolist())
         platform_filters = st.multiselect(
             "Platform",
-            platform_opts,
+            sorted(work["Platform Display"].dropna().unique().tolist()),
             key="summary_platform_multi_v68_50",
             placeholder="All",
         )
     with f1:
-        source_opts = sorted(work["Source Display"].dropna().unique().tolist())
         source_filters = st.multiselect(
             "Source",
-            source_opts,
+            sorted(work["Source Display"].dropna().unique().tolist()),
             key="summary_source_multi_v68_50",
             placeholder="All",
         )
     with f2:
-        market_opts = sorted(work["Market Display"].dropna().unique().tolist())
         market_filters = st.multiselect(
             "Market",
-            market_opts,
+            sorted(work["Market Display"].dropna().unique().tolist()),
             key="summary_market_multi_v68_50",
             placeholder="All",
         )
     with f3:
-        track_opts = sorted(work["Track Display"].dropna().unique().tolist())
         track_filters = st.multiselect(
             "Track",
-            track_opts,
+            sorted(work["Track Display"].dropna().unique().tolist()),
             key="summary_track_multi_v68_50",
             placeholder="All",
         )
     with f4:
-        type_opts = sorted(work["Primary Creative Type"].dropna().unique().tolist())
         type_filters = st.multiselect(
             "Creative Type",
-            type_opts,
+            sorted(work["Primary Creative Type"].dropna().unique().tolist()),
             key="summary_type_multi_v68_50",
             placeholder="All",
         )
     with f5:
-        kol_size_opts = sorted(work["KOL Size Display"].dropna().unique().tolist())
         kol_size_filters = st.multiselect(
             "KOL Size",
-            kol_size_opts,
+            sorted(work["KOL Size Display"].dropna().unique().tolist()),
             key="summary_kol_size_multi_v68_51",
             placeholder="All",
         )
-    # Summary sections retain the former default order. Every Summary table
-    # can then be sorted directly from its column headings.
+
     focus_metric = "Views"
     sort_order = "Highest first"
-    st.caption("Choose one or more values in any filter. Empty means All. Click any table column heading to sort ascending or descending.")
-
+    st.caption(
+        "Choose one or more values above, or click a category in a table to "
+        "show matching posts. Click a heading to sort."
+    )
+    active_drilldown = st.session_state.get("summary_drilldown_v68_71", {})
     filtered = work.copy()
     for filter_column, selected_values in [
         ("Platform Display", platform_filters),
@@ -7524,6 +7892,17 @@ elif st.session_state.step == 6:
             filter_column,
             selected_values,
         )
+    filtered = _apply_summary_drilldown_v68_71(filtered, active_drilldown)
+    if isinstance(active_drilldown, dict) and safe_str(active_drilldown.get("value")):
+        drilldown_label = safe_str(active_drilldown.get("label")) or "Selection"
+        drilldown_value = safe_str(active_drilldown.get("value"))
+        drilldown_text, drilldown_clear = st.columns([5, 1])
+        with drilldown_text:
+            st.info(f"Showing {drilldown_label}: {drilldown_value}")
+        with drilldown_clear:
+            if st.button("Show all", width="stretch", key="summary_clear_drilldown_v68_71"):
+                _reset_summary_click_state_v68_71(clear_drilldown=True)
+                st.rerun()
 
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
@@ -7584,11 +7963,14 @@ elif st.session_state.step == 6:
             "Average_Saves_Rate": "Saves Rate",
         })
         platform_summary = sort_summary_performance_v68_18(platform_summary, focus_metric, sort_order)
-        render_sortable_summary_table_v68_46(
+        platform_click = render_sortable_summary_table_v68_46(
             platform_summary,
             columns=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
             max_visible_rows=4,
+            key="summary_platform_table_v68_71",
+            clickable_columns={"Platform": "Platform Display"},
         )
+        _consume_summary_table_click_v68_71(platform_click)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
@@ -7604,11 +7986,14 @@ elif st.session_state.step == 6:
         market_summary = sort_summary_performance_v68_18(
             market_summary, focus_metric, sort_order
         )
-        render_sortable_summary_table_v68_46(
+        market_click = render_sortable_summary_table_v68_46(
             market_summary,
             columns=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
             max_visible_rows=12,
+            key="summary_market_table_v68_71",
+            clickable_columns={"Market": "Market Display"},
         )
+        _consume_summary_table_click_v68_71(market_click)
     else:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -7626,11 +8011,14 @@ elif st.session_state.step == 6:
     campaign_summary = sort_summary_performance_v68_18(
         campaign_summary, focus_metric, sort_order
     )
-    render_sortable_summary_table_v68_46(
+    track_click = render_sortable_summary_table_v68_46(
         campaign_summary,
         columns=["Track", "Artist", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
         max_visible_rows=12,
+        key="summary_track_table_v68_71",
+        clickable_columns={"Track": "Track Display"},
     )
+    _consume_summary_table_click_v68_71(track_click)
     st.markdown("</div>", unsafe_allow_html=True)
 
     original_sound_values = filtered["Original Sound"].map(safe_str)
@@ -7658,7 +8046,7 @@ elif st.session_state.step == 6:
         sound_summary = sort_summary_performance_v68_18(
             sound_summary, focus_metric, sort_order
         )
-        render_sortable_summary_table_v68_46(
+        sound_click = render_sortable_summary_table_v68_46(
             sound_summary,
             columns=[
                 "Market", "Campaign Track", "Original Sound", "Posts",
@@ -7666,7 +8054,13 @@ elif st.session_state.step == 6:
                 "Shares Rate", "Saves Rate",
             ],
             max_visible_rows=12,
+            key="summary_sound_table_v68_71",
+            clickable_columns={
+                "Market": "Market Display",
+                "Campaign Track": "Track Display",
+            },
         )
+        _consume_summary_table_click_v68_71(sound_click)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Interactive creative-type summary. The mix retains post counts while the
@@ -7686,36 +8080,55 @@ elif st.session_state.step == 6:
             views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
             render_creative_type_views_doughnut_v68_49(views_mix)
 
-    # Source summary is useful when users mix uploaded files and pasted links.
-    if filtered["Source Display"].nunique() > 1:
-        st.markdown("<div class='card'>" + section_title("Source Summary", "#8b5cf6"), unsafe_allow_html=True)
-        source_summary = aggregate_summary_performance_v68_15(filtered, ["Source Display"]).rename(columns={
-            "Source Display": "Source",
-            "Average_Views": "Average Views",
-            "Average_Engagements": "Average Engagements",
-            "Average_Engagement_Rate": "Average Engagement Rate",
-            "Average_Shares_Rate": "Shares Rate",
-            "Average_Saves_Rate": "Saves Rate",
-        })
-        source_summary = sort_summary_performance_v68_18(
-            source_summary, focus_metric, sort_order
-        )
-        render_sortable_summary_table_v68_46(
-            source_summary,
-            columns=["Source", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
-            max_visible_rows=12,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
     if has_metrics:
         with st.container(border=True):
             st.markdown(section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
             top_posts = prepare_sortable_top_posts_v68_46(filtered)
-            render_sortable_summary_table_v68_46(
+            top_post_click = render_sortable_summary_table_v68_46(
                 top_posts,
                 columns=TOP_POST_TABLE_COLUMNS_V68_46,
                 max_visible_rows=15,
+                key="summary_top_posts_table_v68_71",
+                clickable_columns=SUMMARY_CLICK_FILTER_COLUMNS_V68_71,
             )
+            _consume_summary_table_click_v68_71(top_post_click)
+            selected_summary_post = safe_str(
+                st.session_state.get("summary_selected_post_index_v68_71")
+            )
+            st.caption(
+                "Click Platform, Creator, Market, Track, Creative Type, Content "
+                "Subtype, or KOL Size to show related posts and their narratives. "
+                "Select Edit to change that post's labels and details."
+            )
+            if selected_summary_post:
+                if st.button(
+                    "Edit selected post labels & details",
+                    type="primary",
+                    width="stretch",
+                    key="summary_edit_selected_post_v68_71",
+                ):
+                    _open_summary_post_in_review_v68_71(selected_summary_post)
+
+    drama_details = prepare_drama_detail_table_v68_71(filtered)
+    if not drama_details.empty:
+        with st.container(border=True):
+            st.markdown(section_title("Drama Details", "#f59e0b"), unsafe_allow_html=True)
+            st.caption(
+                "Creative Type is the broad label; Content Subtype and the fields "
+                "below provide the detailed drama classification."
+            )
+            drama_click = render_sortable_summary_table_v68_46(
+                drama_details,
+                columns=DRAMA_DETAIL_TABLE_COLUMNS_V68_71,
+                max_visible_rows=15,
+                key="summary_drama_details_table_v68_71",
+                clickable_columns={
+                    "Creative Type": "Primary Creative Type",
+                    "Content Subtype": "Drama Content Category Display",
+                    "Creator": "Creator",
+                },
+            )
+            _consume_summary_table_click_v68_71(drama_click)
 
     # Keep creator contribution last among the analytical sections.
     render_top_creator_performance_v68_47(filtered)

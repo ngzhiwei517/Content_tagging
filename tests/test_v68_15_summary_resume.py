@@ -85,7 +85,8 @@ class SummaryV6815Tests(unittest.TestCase):
             "Comments Rate", "Shares Rate", "Saves Rate",
         }
         namespace["TOP_POST_TABLE_COLUMNS_V68_46"] = [
-            "Platform", "Creator", "Market", "Track", "Creative Type",
+            "Edit", "Platform", "Creator", "Market", "Track", "Creative Type",
+            "Narrative", "Content Subtype",
             "Followers", "KOL Size", "Views", "Total Engagement",
             "Engagement Rate", "Link",
         ]
@@ -125,6 +126,12 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         cls.filter_summary = staticmethod(
             load_function("filter_summary_by_selected_values_v68_50", namespace)
+        )
+        cls.summary_drilldown_mask = staticmethod(
+            load_function(
+                "_summary_drilldown_mask_v68_71",
+                {"pd": pd, "safe_str": namespace["safe_str"]},
+            )
         )
         cls.rendered_chart_figures = []
         chart_namespace = {
@@ -208,48 +215,90 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
         self.assertNotIn("metric_for_chart = focus_metric", step_six)
 
-    def test_summary_filters_allow_multiple_values_and_empty_means_all(self):
+    def test_summary_click_drilldown_matches_one_category(self):
         rows = pd.DataFrame({
             "Market Display": ["SG", "MY", "TH"],
             "Primary Creative Type": ["Dance", "Lip Sync", "Dance"],
             "KOL Size Display": ["Micro", "Macro", "Nano"],
         })
-        all_rows = self.filter_summary(rows, "Market Display", [])
-        selected_markets = self.filter_summary(rows, "Market Display", ["SG", "TH"])
-        combined = self.filter_summary(
-            selected_markets,
-            "Primary Creative Type",
-            ["Dance"],
-        )
-        self.assertEqual(len(all_rows), 3)
-        self.assertEqual(selected_markets["Market Display"].tolist(), ["SG", "TH"])
-        self.assertEqual(combined["Market Display"].tolist(), ["SG", "TH"])
+        selected_market = rows.loc[
+            self.summary_drilldown_mask(rows, "Market Display", "MY")
+        ]
+        selected_type = rows.loc[
+            self.summary_drilldown_mask(rows, "Primary Creative Type", "Dance")
+        ]
+        self.assertEqual(selected_market["Market Display"].tolist(), ["MY"])
+        self.assertEqual(selected_type["Market Display"].tolist(), ["SG", "TH"])
 
-        selected_kol_sizes = self.filter_summary(
-            rows,
-            "KOL Size Display",
-            ["Micro", "Nano"],
-        )
-        self.assertEqual(selected_kol_sizes["KOL Size Display"].tolist(), ["Micro", "Nano"])
-
-    def test_summary_ui_uses_six_multiselect_filters_with_kol_size(self):
+    def test_summary_ui_keeps_dropdowns_and_adds_clickable_tables(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
-        filter_block = step_six.split("# Combined filters", 1)[1].split(
-            "# Summary sections retain", 1
-        )[0]
-        self.assertEqual(filter_block.count("st.multiselect("), 6)
-        self.assertNotIn("st.selectbox(", filter_block)
-        self.assertEqual(filter_block.count('placeholder="All"'), 6)
+        filter_block = step_six.split(
+            "# Retain the existing combined filters", 1
+        )[1].split("total_views =", 1)[0]
+        self.assertIn("st.multiselect(", filter_block)
+        self.assertIn("summary_drilldown_v68_71", filter_block)
+        self.assertIn('selection_mode="single-cell"', APP_SOURCE)
         for key in [
-            "summary_platform_multi_v68_50",
-            "summary_source_multi_v68_50",
-            "summary_market_multi_v68_50",
-            "summary_track_multi_v68_50",
-            "summary_type_multi_v68_50",
-            "summary_kol_size_multi_v68_51",
+            "summary_platform_table_v68_71",
+            "summary_market_table_v68_71",
+            "summary_track_table_v68_71",
+            "summary_top_posts_table_v68_71",
+            "summary_drama_details_table_v68_71",
         ]:
-            self.assertIn(key, filter_block)
-        self.assertIn('("KOL Size Display", kol_size_filters)', step_six)
+            self.assertIn(key, step_six)
+
+    def test_top_creator_table_uses_requested_profile_and_batch_columns(self):
+        expected = [
+            "Creator Profile", "Country", "Platform", "Followers", "KOL Size",
+            "Posts (3m)", "Avg. Views (3m)", "Avg. ER (3m)", "Posts",
+            "Total Views", "Total Engagement", "Avg. ER",
+        ]
+        assignment = APP_SOURCE.split(
+            "TOP_CREATOR_TABLE_COLUMNS_V68_71 =", 1
+        )[1].split("]", 1)[0]
+        for column in expected:
+            self.assertIn(f'"{column}"', assignment)
+        self.assertEqual(assignment.count('"') // 2, len(expected))
+        creator_section = APP_SOURCE.split(
+            "def render_top_creator_performance_v68_47", 1
+        )[1].split("def bar_list", 1)[0]
+        self.assertIn("columns=TOP_CREATOR_TABLE_COLUMNS_V68_71", creator_section)
+        self.assertIn('"Market": "Country"', creator_section)
+
+    def test_drama_details_use_separate_broad_label_and_subtype(self):
+        drama_namespace = {
+            "pd": pd,
+            "DRAMA_DETAIL_TABLE_COLUMNS_V68_71": [
+                "Creator", "Creative Type", "Content Subtype", "Visual Summary", "Drama Type",
+                "Edit Focus", "Format", "Country / Region",
+                "Drama / Show Title", "Detected Audio", "Audio Version", "Link",
+            ],
+            "split_creative_labels": lambda value: [
+                part.strip() for part in str(value).split(",") if part.strip()
+            ],
+            "safe_str": lambda value: "" if pd.isna(value) else str(value).strip(),
+            "display_empty": lambda value, fallback="Not specified": (
+                str(value).strip() if not pd.isna(value) and str(value).strip() else fallback
+            ),
+            "operational_creative_type": lambda value: str(value).strip() or "Others",
+        }
+        prepare_drama = load_function(
+            "prepare_drama_detail_table_v68_71",
+            drama_namespace,
+        )
+        details = prepare_drama(pd.DataFrame([{
+            "Creator": "actorfan", "Creative Type": "Movie/Tv/Drama Edits",
+            "Drama Content Category": "Drama Edit", "Drama Type": "General Drama",
+            "Drama Edit Focus": "Fictional Story", "Drama Format": "Long-form Drama",
+            "Drama Country/Region": "China", "Drama Title": "Never Ending Summer",
+            "Detected Audio": "The One That Got Away", "Audio Version": "Slowed",
+            "Content Details": "Visual Summary: An emotional drama montage.",
+            "Link": "https://example.com/post",
+        }]))
+        self.assertEqual(details.loc[0, "Creative Type"], "Movie/Tv/Drama Edits")
+        self.assertEqual(details.loc[0, "Content Subtype"], "Drama Edit")
+        self.assertEqual(details.loc[0, "Visual Summary"], "An emotional drama montage.")
+        self.assertEqual(details.loc[0, "Drama Type"], "General Drama")
 
     def test_creative_type_engagement_chart_uses_mean_rate_and_post_count(self):
         rows = pd.DataFrame({
@@ -340,12 +389,14 @@ class SummaryV6815Tests(unittest.TestCase):
             {
                 "Platform": "TikTok", "Creator": "a", "Market Display": "MY",
                 "Track Display": "Song", "Creative Type": "Performance",
+                "Narrative": "A creator performs the song for the camera.",
                 "Followers": "41,700", "KOL Size": "Micro", "Views": "8,300,000",
                 "Total Engagement": "84,583", "Link": "https://example.com/a",
             },
             {
                 "Platform": "TikTok", "Creator": "b", "Market Display": "SG",
                 "Track Display": "Song", "Creative Type": "Dance",
+                "Narrative": "Friends perform a coordinated dance.",
                 "Followers": "51,500", "KOL Size": "Macro", "Views": "8,200,000",
                 "Total Engagement": "61,659", "Link": "https://example.com/b",
             },
@@ -357,7 +408,17 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn(top_posts["Total Engagement"].dtype.kind, "iu")
         self.assertIn(top_posts["Engagement Rate"].dtype.kind, "f")
         self.assertEqual(top_posts.iloc[0]["Market"], "MY")
+        self.assertEqual(
+            top_posts.iloc[0]["Narrative"],
+            "A creator performs the song for the camera.",
+        )
         self.assertEqual(top_posts.iloc[0]["Link"], "https://example.com/a")
+
+    def test_narrative_is_shown_only_in_top_posts(self):
+        self.assertIn('"Creative Type",\n    "Narrative",\n    "Content Subtype",', APP_SOURCE)
+        creator_columns = APP_SOURCE.split("TOP_CREATOR_TABLE_COLUMNS_V68_71 = [", 1)[1].split("]", 1)[0]
+        self.assertNotIn('"Narrative"', creator_columns)
+        self.assertIn('column_config["Narrative"]', APP_SOURCE)
 
     def test_top_posts_use_native_clickable_header_table(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
@@ -371,7 +432,7 @@ class SummaryV6815Tests(unittest.TestCase):
 
     def test_every_summary_table_uses_clickable_header_sorting(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
-        for title in ["Platform Summary", "Market Summary", "Track Summary", "Sound Breakdown", "Source Summary"]:
+        for title in ["Platform Summary", "Market Summary", "Track Summary", "Sound Breakdown"]:
             with self.subTest(title=title):
                 section = step_six.split(f'section_title("{title}"', 1)[1]
                 self.assertIn("render_sortable_summary_table_v68_46(", section)
@@ -379,6 +440,7 @@ class SummaryV6815Tests(unittest.TestCase):
             "def bar_list", 1
         )[0]
         self.assertIn("render_sortable_summary_table_v68_46(", creator_function)
+        self.assertNotIn('section_title("Source Summary"', step_six)
 
     def test_creator_performance_groups_handles_and_uses_weighted_engagement(self):
         rows = pd.DataFrame([
