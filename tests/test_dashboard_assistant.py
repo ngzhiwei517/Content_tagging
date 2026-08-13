@@ -6,11 +6,16 @@ import pandas as pd
 
 from ugc_tagger.dashboard_assistant import (
     DASHBOARD_CHAT_SUGGESTIONS,
+    PAGE_CHAT_SUGGESTIONS,
     build_dashboard_context,
     build_dashboard_prompt,
+    build_page_assistant_prompt,
+    chat_history_markdown,
     dashboard_context_json,
     dashboard_context_signature,
     generate_dashboard_answer,
+    generate_page_assistant_answer,
+    page_help_answer,
 )
 
 
@@ -81,9 +86,13 @@ class DashboardAssistantTests(unittest.TestCase):
             [{"role": "user", "content": "What stands out?"}],
         )
         self.assertIn("Use only DASHBOARD_DATA", prompt)
-        self.assertIn("Do not use the web, external knowledge, saved memory", prompt)
+        self.assertIn("Do not use the web, saved memory, or unstated facts", prompt)
+        self.assertIn("general, timeless marketing knowledge", prompt)
         self.assertIn("recommendations or tests", prompt)
         self.assertIn("Suggest a campaign", prompt)
+        self.assertIn("AI suggestions", prompt)
+        self.assertIn("below 300 words", prompt)
+        self.assertIn("short Markdown headings and bullet points", prompt)
 
     def test_generation_can_be_validated_without_live_gemini_credit(self):
         captured = {}
@@ -111,15 +120,84 @@ class DashboardAssistantTests(unittest.TestCase):
             dashboard_context_signature(full), dashboard_context_signature(filtered)
         )
 
-    def test_app_renders_suggestions_and_keeps_chat_out_of_checkpoints(self):
+    def test_page_help_is_available_locally_on_each_workflow_step(self):
+        for step in range(2, 7):
+            self.assertTrue(PAGE_CHAT_SUGGESTIONS[step])
+            answer = page_help_answer(step, "How do I use this page?")
+            self.assertTrue(answer)
+        self.assertIn("CSV/XLSX", page_help_answer(2, "How do I use this page?"))
+        self.assertIn("Keep", page_help_answer(5, "Please guide me on this page"))
+
+    def test_page_prompt_is_grounded_in_current_workflow_step(self):
+        prompt = build_page_assistant_prompt(
+            step=2,
+            question="How should I upload my data?",
+            context_json=dashboard_context_json(pd.DataFrame()),
+        )
+        self.assertIn("CURRENT_PAGE: Add posts", prompt)
+        self.assertIn("Never ask for, repeat, or expose API keys", prompt)
+        self.assertIn("Use only DASHBOARD_DATA", prompt)
+
+    def test_page_generation_can_be_validated_without_live_credit(self):
+        captured = {}
+
+        def fake_request(model, prompt):
+            captured["prompt"] = prompt
+            return "Upload a file or paste one post link per line."
+
+        answer = generate_page_assistant_answer(
+            api_key="not-used",
+            model="fake-model",
+            step=2,
+            question="What should I do?",
+            context_json=dashboard_context_json(pd.DataFrame()),
+            request_fn=fake_request,
+        )
+        self.assertIn("Upload", answer)
+        self.assertIn("CURRENT_PAGE: Add posts", captured["prompt"])
+
+    def test_generated_markdown_keeps_line_breaks(self):
+        answer = generate_page_assistant_answer(
+            api_key="not-used",
+            model="fake-model",
+            step=6,
+            question="Suggest a campaign",
+            context_json=dashboard_context_json(self.sample_frame()),
+            request_fn=lambda _model, _prompt: (
+                "**Dashboard evidence**\n- Dance leads views.\n\n"
+                "**AI suggestions**\n- Test a creator-led challenge."
+            ),
+        )
+        self.assertIn("\n- Dance", answer)
+        self.assertIn("\n\n**AI suggestions**", answer)
+
+    def test_chat_history_can_be_exported_as_markdown(self):
+        exported = chat_history_markdown(
+            [
+                {"role": "user", "content": "Suggest a campaign"},
+                {"role": "assistant", "content": "**AI suggestions**\n- Test one idea."},
+            ],
+            page_title="Taggy - Summary and export",
+        )
+        self.assertIn("# Taggy - Summary and export", exported)
+        self.assertIn("## User", exported)
+        self.assertIn("## Taggy", exported)
+        self.assertIn("\n- Test one idea.", exported)
+
+    def test_app_renders_taggy_on_every_step_and_keeps_chat_out_of_checkpoints(self):
         self.assertGreaterEqual(len(DASHBOARD_CHAT_SUGGESTIONS), 4)
-        self.assertIn("render_dashboard_assistant_v68_72(filtered)", APP_SOURCE)
+        self.assertIn("render_taggy_assistant_v68_76(st.session_state.step", APP_SOURCE)
+        self.assertIn("render_taggy_assistant_v68_76(6, filtered)", APP_SOURCE)
+        self.assertIn("assets\" / \"taggy-assistant.png", APP_SOURCE)
+        self.assertIn('with st.popover(popover_label', APP_SOURCE)
         self.assertIn("st.chat_input(", APP_SOURCE)
         self.assertIn("st.chat_message(", APP_SOURCE)
+        self.assertIn('"Download chat"', APP_SOURCE)
+        self.assertIn("chat_history_markdown(", APP_SOURCE)
         checkpoint_block = APP_SOURCE.split(
             "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (", 1
         )[1].split(")", 1)[0]
-        self.assertNotIn("dashboard_chat_messages_v68_72", checkpoint_block)
+        self.assertNotIn("taggy_chat_messages_v68_76", checkpoint_block)
 
 
 if __name__ == "__main__":

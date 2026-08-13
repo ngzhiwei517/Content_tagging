@@ -22,6 +22,7 @@ outputs/
 *.jpg
 *.jpeg
 *.png
+!assets/taggy-assistant.png
 *.zip
 *.ndjson
 *.log

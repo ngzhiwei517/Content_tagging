@@ -29,9 +29,13 @@ import streamlit as st
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
 from ugc_tagger.dashboard_assistant import (
     DASHBOARD_CHAT_SUGGESTIONS,
+    PAGE_CHAT_SUGGESTIONS,
+    PAGE_TITLES,
+    chat_history_markdown,
     dashboard_context_json,
     dashboard_context_signature,
-    generate_dashboard_answer,
+    generate_page_assistant_answer,
+    page_help_answer,
 )
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
@@ -4755,6 +4759,47 @@ def filter_summary_by_selected_values_v68_50(
     return df[df[column].isin(selected_values)]
 
 
+def summary_creative_type_options_v68_75(df: pd.DataFrame) -> List[str]:
+    """Return every available creative label, including secondary labels."""
+    if df is None or df.empty or "Creative Type" not in df.columns:
+        return []
+    labels = {
+        label
+        for value in df["Creative Type"].fillna("").tolist()
+        for label in split_creative_labels(value)
+    }
+    return sorted(labels, key=str.casefold)
+
+
+def filter_summary_by_creative_types_v68_75(
+    df: pd.DataFrame,
+    selected_values: List[str],
+) -> pd.DataFrame:
+    """Match selected labels anywhere in a post's multi-label Creative Type."""
+    if df is None or df.empty or "Creative Type" not in df.columns or not selected_values:
+        return df
+    selected = {safe_str(value) for value in selected_values if safe_str(value)}
+    if not selected:
+        return df
+    mask = df["Creative Type"].fillna("").map(
+        lambda value: bool(selected.intersection(split_creative_labels(value)))
+    )
+    return df.loc[mask].copy()
+
+
+def _sync_summary_type_dropdown_from_quick_v68_75() -> None:
+    """Keep the one-click shortcut and existing Creative Type filter aligned."""
+    selected = safe_str(st.session_state.get("summary_type_quick_v68_75"))
+    st.session_state.summary_type_multi_v68_50 = [selected] if selected else []
+
+
+def _sync_summary_type_quick_from_dropdown_v68_75() -> None:
+    """Reflect a single dropdown choice in the shortcut; multi-select stays advanced."""
+    selected = st.session_state.get("summary_type_multi_v68_50", [])
+    selected = list(selected) if isinstance(selected, (list, tuple, set)) else []
+    st.session_state.summary_type_quick_v68_75 = selected[0] if len(selected) == 1 else None
+
+
 def summary_kpi_row(items: List[Tuple[str, str, str, str]]) -> str:
     """Colored KPI cards for marketing Summary page."""
     cards = []
@@ -4799,113 +4844,134 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
     )
 
 
-@st.fragment
-def render_dashboard_assistant_v68_72(filtered: pd.DataFrame) -> None:
-    """Render a session-only Gemini chat grounded in the filtered dashboard."""
-    context_json = dashboard_context_json(filtered)
-    context_signature = dashboard_context_signature(context_json)
-    signature_key = "dashboard_chat_context_signature_v68_72"
-    messages_key = "dashboard_chat_messages_v68_72"
-    suggestions_key = "dashboard_chat_suggestions_v68_72"
+TAGGY_ASSET_V68_76 = Path(__file__).resolve().parent / "assets" / "taggy-assistant.png"
 
-    if st.session_state.get(signature_key) != context_signature:
-        st.session_state[signature_key] = context_signature
+
+@st.fragment
+def render_taggy_assistant_v68_76(
+    step: int,
+    context_df: Optional[pd.DataFrame] = None,
+) -> None:
+    """Render the same compact, page-aware mascot assistant on every step."""
+    context_df = context_df if isinstance(context_df, pd.DataFrame) else pd.DataFrame()
+    context_json = dashboard_context_json(context_df)
+    context_signature = dashboard_context_signature(context_json)
+    signature_key = "taggy_chat_context_signature_v68_76"
+    messages_key = "taggy_chat_messages_v68_76"
+    suggestions_key = f"taggy_chat_suggestions_v68_76_{int(step)}"
+    popover_label = "Ask Taggy"
+
+    combined_signature = f"{int(step)}:{context_signature}"
+    if st.session_state.get(signature_key) != combined_signature:
+        st.session_state[signature_key] = combined_signature
         st.session_state[messages_key] = []
         st.session_state.pop(suggestions_key, None)
 
     messages = list(st.session_state.get(messages_key, []))
-    with st.container(border=True):
-        st.markdown(section_title("Ask this dashboard", "#2563eb"), unsafe_allow_html=True)
-        st.caption(
-            "Ask about the current filtered results or request a campaign idea. "
-            "Answers use this dashboard only and are not saved."
-        )
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        if TAGGY_ASSET_V68_76.exists():
+            st.image(str(TAGGY_ASSET_V68_76), width=62)
+        with st.popover(popover_label, icon=":material/chat:", width="content"):
+            st.markdown("### Hi, I’m Taggy")
+            st.caption("Ask how to use this page or ask about the available results.")
 
-        for message in messages:
-            role = safe_str(message.get("role"))
-            if role not in {"user", "assistant"}:
-                continue
-            avatar = ":material/auto_awesome:" if role == "assistant" else None
-            with st.chat_message(role, avatar=avatar):
-                st.markdown(safe_str(message.get("content")))
+            for message in messages[-8:]:
+                role = safe_str(message.get("role"))
+                if role not in {"user", "assistant"}:
+                    continue
+                avatar = str(TAGGY_ASSET_V68_76) if role == "assistant" else None
+                with st.chat_message(role, avatar=avatar):
+                    st.markdown(safe_str(message.get("content")))
 
-        suggested_question = None
-        if not messages:
-            suggested_label = st.pills(
-                "Try asking",
-                list(DASHBOARD_CHAT_SUGGESTIONS),
-                key=suggestions_key,
-                label_visibility="collapsed",
-                width="stretch",
-            )
-            if suggested_label:
-                suggested_question = DASHBOARD_CHAT_SUGGESTIONS.get(suggested_label)
-
-        typed_question = st.chat_input(
-            "Ask about these results or request a campaign idea",
-            key="dashboard_chat_input_v68_72",
-            max_chars=1000,
-        )
-        question = safe_str(typed_question) or safe_str(suggested_question)
-        if question:
-            prior_history = list(messages)
-            with st.chat_message("user"):
-                st.markdown(question)
-            messages.append({"role": "user", "content": question})
-
-            gemini_key = clean_api_secret(
-                st.session_state.get("gemini_key")
-                or _managed_api_secret_v68_43("GEMINI_API_KEY")
-            )
-            if not gemini_key:
-                answer = (
-                    "Add a Gemini API key in Streamlit Secrets to use this assistant. "
-                    "No scraping was started."
+            suggested_question = None
+            if not messages:
+                suggestions = PAGE_CHAT_SUGGESTIONS.get(
+                    int(step), DASHBOARD_CHAT_SUGGESTIONS
                 )
-            else:
-                try:
-                    with st.spinner("Reviewing the current dashboard..."):
-                        answer = generate_dashboard_answer(
-                            api_key=gemini_key,
-                            model=normalize_gemini_model(
-                                st.session_state.get(
-                                    "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
-                                )
-                            ),
-                            question=question,
-                            context_json=context_json,
-                            history=prior_history,
-                        )
-                except Exception as exc:
-                    LOGGER.warning(
-                        "Dashboard assistant request failed (%s)", type(exc).__name__
+                suggested_label = st.pills(
+                    "Try asking",
+                    list(suggestions),
+                    key=suggestions_key,
+                    label_visibility="collapsed",
+                    width="stretch",
+                )
+                if suggested_label:
+                    suggested_question = suggestions.get(suggested_label)
+
+            typed_question = st.chat_input(
+                "Ask Taggy a question",
+                key=f"taggy_chat_input_v68_76_{int(step)}",
+                max_chars=1000,
+            )
+            question = safe_str(typed_question) or safe_str(suggested_question)
+            if question:
+                prior_history = list(messages)
+                with st.chat_message("user"):
+                    st.markdown(question)
+                messages.append({"role": "user", "content": question})
+
+                answer = page_help_answer(int(step), question)
+                gemini_key = clean_api_secret(
+                    st.session_state.get("gemini_key")
+                    or _managed_api_secret_v68_43("GEMINI_API_KEY")
+                )
+                if not answer and not gemini_key:
+                    answer = (
+                        "I can guide you through this page, but an open-ended answer needs "
+                        "the Gemini API key configured in Streamlit Secrets. No scraping was started."
                     )
-                    error_text = safe_str(exc).lower()
-                    if any(
-                        marker in error_text
-                        for marker in ["quota", "429", "resource_exhausted"]
+                elif not answer:
+                    try:
+                        with st.spinner("Taggy is checking this page..."):
+                            answer = generate_page_assistant_answer(
+                                api_key=gemini_key,
+                                model=normalize_gemini_model(
+                                    st.session_state.get(
+                                        "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
+                                    )
+                                ),
+                                step=int(step),
+                                question=question,
+                                context_json=context_json,
+                                history=prior_history,
+                            )
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Taggy assistant request failed (%s)", type(exc).__name__
+                        )
+                        error_text = safe_str(exc).lower()
+                        if any(marker in error_text for marker in ["quota", "429", "resource_exhausted"]):
+                            answer = "The Gemini usage limit has been reached. Update the key, then ask again."
+                        else:
+                            answer = "I couldn't answer that right now. Your batch and results are unchanged."
+
+                avatar = str(TAGGY_ASSET_V68_76) if TAGGY_ASSET_V68_76.exists() else ":material/pets:"
+                with st.chat_message("assistant", avatar=avatar):
+                    st.markdown(answer)
+                messages.append({"role": "assistant", "content": answer})
+                st.session_state[messages_key] = messages[-40:]
+
+            if messages:
+                with st.container(horizontal=True, gap="small"):
+                    st.download_button(
+                        "Download chat",
+                        data=chat_history_markdown(
+                            messages,
+                            page_title=f"Taggy - {PAGE_TITLES.get(int(step), 'UGC tagging tool')}",
+                        ).encode("utf-8"),
+                        file_name=f"taggy-chat-step-{int(step)}.md",
+                        mime="text/markdown",
+                        icon=":material/download:",
+                        width="content",
+                        on_click="ignore",
+                        key=f"taggy_chat_download_v68_77_{int(step)}",
+                    )
+                    if st.button(
+                        "Clear chat", key="taggy_chat_clear_v68_76", width="content"
                     ):
-                        answer = (
-                            "The Gemini usage limit has been reached. Replace or refresh "
-                            "the Gemini key, then ask again."
-                        )
-                    else:
-                        answer = (
-                            "I couldn't answer this question right now. The dashboard "
-                            "results are unchanged, and no scraping was started."
-                        )
-
-            with st.chat_message("assistant", avatar=":material/auto_awesome:"):
-                st.markdown(answer)
-            messages.append({"role": "assistant", "content": answer})
-            st.session_state[messages_key] = messages[-12:]
-
-        if messages and st.button(
-            "Clear chat", key="dashboard_chat_clear_v68_72", width="content"
-        ):
-            st.session_state[messages_key] = []
-            st.session_state.pop(suggestions_key, None)
-            st.rerun()
+                        st.session_state[messages_key] = []
+                        st.session_state.pop(suggestions_key, None)
+                        st.rerun()
 
 
 def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
@@ -5388,16 +5454,21 @@ def render_sortable_summary_table_v68_46(
 
 
 def summary_creative_type_cell_v68_73(row: pd.Series) -> str:
-    """Show a drama subtype beneath its broad label without a second column."""
+    """Return the post's editable broad creative label."""
+    return operational_creative_type(row.get("Creative Type"))
+
+
+def summary_drama_detail_cell_v68_74(row: pd.Series) -> str:
+    """Return drama-only detail without adding empty text to other posts."""
     creative_type = operational_creative_type(row.get("Creative Type"))
     if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
-        return creative_type
+        return ""
     subtype = safe_str(row.get("Drama Content Category")) or safe_str(
         row.get("Drama Content Category Display")
     )
     if subtype in {"", "Not applicable", "Not specified"}:
-        return creative_type
-    return f"{creative_type}\n↳ {subtype}"
+        return ""
+    return subtype
 
 
 def _parse_summary_creative_type_cell_v68_73(value) -> Tuple[str, str]:
@@ -5437,12 +5508,75 @@ def apply_summary_post_edits_v68_73(
         original = original_table.loc[original_index]
         edited = edited_table.loc[original_index]
 
+        # Let users correct the post-level dimensions and raw metrics that feed
+        # the dashboard. Platform and Link remain protected because together
+        # they identify the scraped source post. KOL Size and Engagement Rate
+        # are recalculated from Market/Followers and Views/Engagement below.
+        for display_column, source_column in {
+            "Creator": "Creator",
+            "Market": "Market",
+            "Track": "Track",
+        }.items():
+            original_value = safe_str(original.get(display_column))
+            edited_value = safe_str(edited.get(display_column))
+            if edited_value != original_value:
+                updated.at[original_index, source_column] = edited_value
+                row_changed = True
+
+        for display_column, source_column in {
+            "Followers": "Followers",
+            "Total Engagement": "Total Engagement",
+        }.items():
+            original_value = clean_num(original.get(display_column))
+            edited_value = clean_num(edited.get(display_column))
+            if edited_value != original_value:
+                updated.at[original_index, source_column] = int(edited_value)
+                row_changed = True
+
+        original_views = pd.to_numeric(
+            pd.Series([original.get("Views")]), errors="coerce"
+        ).iloc[0]
+        edited_views = pd.to_numeric(
+            pd.Series([edited.get("Views")]), errors="coerce"
+        ).iloc[0]
+        views_changed = (
+            pd.isna(original_views) != pd.isna(edited_views)
+            or (
+                pd.notna(original_views)
+                and pd.notna(edited_views)
+                and float(original_views) != float(edited_views)
+            )
+        )
+        if views_changed:
+            updated.at[original_index, "Views"] = (
+                pd.NA if pd.isna(edited_views) else int(edited_views)
+            )
+            if pd.notna(edited_views):
+                unavailable = unavailable_metric_names(
+                    updated.at[original_index, "Metrics Unavailable"]
+                    if "Metrics Unavailable" in updated.columns
+                    else ""
+                )
+                unavailable.discard("views")
+                updated.at[original_index, "Metrics Unavailable"] = ", ".join(
+                    metric.title() for metric in sorted(unavailable)
+                )
+            row_changed = True
+
         original_type = safe_str(original.get("Creative Type"))
         edited_type = safe_str(edited.get("Creative Type"))
-        if edited_type != original_type:
-            creative_type, subtype = _parse_summary_creative_type_cell_v68_73(
+        original_drama_detail = safe_str(original.get("Drama Detail"))
+        edited_drama_detail = safe_str(edited.get("Drama Detail"))
+        if (
+            edited_type != original_type
+            or edited_drama_detail != original_drama_detail
+        ):
+            creative_type, legacy_subtype = _parse_summary_creative_type_cell_v68_73(
                 edited_type
             )
+            subtype = edited_drama_detail or legacy_subtype
+            if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
+                subtype = ""
             source_row = updated.loc[original_index]
             audit_fields = final_update2_review_audit_update(
                 source_row.get(
@@ -5479,10 +5613,18 @@ def apply_summary_post_edits_v68_73(
 
 
 def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
-    """Render direct label/narrative editing while keeping metrics read-only."""
+    """Render direct post-data editing while keeping derived fields consistent."""
+    editor_columns = list(TOP_POST_TABLE_COLUMNS_V68_46)
+    if (
+        "Creative Type" in top_posts.columns
+        and top_posts["Creative Type"].map(
+            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+        ).any()
+    ):
+        editor_columns.insert(editor_columns.index("Creative Type") + 1, "Drama Detail")
     table = prepare_sortable_summary_table_v68_46(
         top_posts,
-        TOP_POST_TABLE_COLUMNS_V68_46,
+        editor_columns,
     )
     if table.empty:
         st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
@@ -5492,6 +5634,16 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         column: st.column_config.NumberColumn(
             column,
             format="%.2f%%" if column in SUMMARY_PERCENT_COLUMNS_V68_46 else "localized",
+            min_value=(
+                0
+                if column in {"Followers", "Views", "Total Engagement"}
+                else None
+            ),
+            step=(
+                1
+                if column in {"Followers", "Views", "Total Engagement"}
+                else None
+            ),
         )
         for column in table.columns
         if column in SUMMARY_INTEGER_COLUMNS_V68_46
@@ -5499,9 +5651,18 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
     }
     column_config["Creative Type"] = st.column_config.TextColumn(
         "Creative Type",
-        help="Click a cell to edit. For drama posts, the smaller second line is the subtype.",
-        width="large",
+        help="Click to edit the post's broad creative label.",
+        width="medium",
     )
+    if "Drama Detail" in table.columns:
+        column_config["Drama Detail"] = st.column_config.TextColumn(
+            "Drama Detail",
+            help=(
+                "Specific drama classification. This appears only when the "
+                "current table contains drama posts."
+            ),
+            width="medium",
+        )
     column_config["Narrative"] = st.column_config.TextColumn(
         "Narrative",
         help="Click a cell to edit the post narrative.",
@@ -5526,7 +5687,18 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         disabled=[
             column
             for column in table.columns
-            if column not in {"Creative Type", "Narrative"}
+            if column
+            not in {
+                "Creator",
+                "Market",
+                "Track",
+                "Creative Type",
+                "Drama Detail",
+                "Narrative",
+                "Followers",
+                "Views",
+                "Total Engagement",
+            }
         ],
         num_rows="fixed",
         key=f"summary_top_posts_editor_v68_73_{index_signature}",
@@ -5564,6 +5736,10 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
         summary_creative_type_cell_v68_73,
         axis=1,
     )
+    top_posts["Drama Detail"] = top_posts.apply(
+        summary_drama_detail_cell_v68_74,
+        axis=1,
+    )
 
     for column in ["Followers", "Total Engagement"]:
         if column not in top_posts.columns:
@@ -5588,7 +5764,15 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
 
-    for column in TOP_POST_TABLE_COLUMNS_V68_46:
+    display_columns = list(TOP_POST_TABLE_COLUMNS_V68_46)
+    if top_posts["Creative Type"].map(
+        lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+    ).any():
+        display_columns.insert(
+            display_columns.index("Creative Type") + 1,
+            "Drama Detail",
+        )
+    for column in display_columns:
         if column not in top_posts.columns:
             top_posts[column] = ""
 
@@ -5596,7 +5780,7 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     # toggle ascending or descending order without separate controls.
     return prepare_sortable_summary_table_v68_46(
         top_posts,
-        TOP_POST_TABLE_COLUMNS_V68_46,
+        display_columns,
     ).sort_values(
         ["Views", "Total Engagement"],
         ascending=[False, False],
@@ -6459,6 +6643,17 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             if profile_column not in display_table.columns:
                 display_table[profile_column] = pd.NA
 
+        st.markdown(
+            "**How to read this table**  \n"
+            "**Latest 3-month profile:** **Posts (3m)** = reachable public profile "
+            "posts used; **Avg. Views (3m)** and **Avg. ER (3m)** are averages across "
+            "those posts.  \n"
+            "**Current filtered batch:** **Posts** = posts by the creator in this "
+            "dashboard; **Total Views** and **Total Engagement** are totals from those "
+            "batch posts; **Avg. ER** is their average engagement rate. Total Views is "
+            "not a three-month profile total."
+        )
+
         creator_click = render_sortable_summary_table_v68_46(
             display_table,
             columns=TOP_CREATOR_TABLE_COLUMNS_V68_71,
@@ -6549,6 +6744,17 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",
         unsafe_allow_html=True,
     )
+
+if st.session_state.step != 6:
+    if st.session_state.step in {2, 3}:
+        taggy_context_v68_76 = st.session_state.get("batch_df", pd.DataFrame())
+    elif st.session_state.step == 4:
+        taggy_context_v68_76 = st.session_state.get("tagged_df", pd.DataFrame())
+        if not isinstance(taggy_context_v68_76, pd.DataFrame) or taggy_context_v68_76.empty:
+            taggy_context_v68_76 = st.session_state.get("selected_df", pd.DataFrame())
+    else:
+        taggy_context_v68_76 = st.session_state.get("tagged_df", pd.DataFrame())
+    render_taggy_assistant_v68_76(st.session_state.step, taggy_context_v68_76)
 
 # STEP 2: Add posts
 if st.session_state.step == 2:
@@ -8115,8 +8321,22 @@ elif st.session_state.step == 6:
     )
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Retain the existing combined filters. Clickable table cells below add a
-    # faster one-category drill-down without introducing another filter row.
+    # Retain the existing combined filters. The shortcut below drives the same
+    # Creative Type state, so it cannot conflict with the advanced dropdown.
+    creative_type_options = summary_creative_type_options_v68_75(work)
+    stored_quick_type = safe_str(
+        st.session_state.get("summary_type_quick_v68_75")
+    )
+    if stored_quick_type and stored_quick_type not in creative_type_options:
+        st.session_state.summary_type_quick_v68_75 = None
+    if "summary_type_quick_v68_75" not in st.session_state:
+        stored_type_filters = st.session_state.get("summary_type_multi_v68_50", [])
+        if isinstance(stored_type_filters, (list, tuple)) and len(stored_type_filters) == 1:
+            selected_type = safe_str(stored_type_filters[0])
+            st.session_state.summary_type_quick_v68_75 = (
+                selected_type if selected_type in creative_type_options else None
+            )
+
     f0, f1, f2, f3, f4, f5 = st.columns(6)
     with f0:
         platform_filters = st.multiselect(
@@ -8149,9 +8369,10 @@ elif st.session_state.step == 6:
     with f4:
         type_filters = st.multiselect(
             "Creative Type",
-            sorted(work["Primary Creative Type"].dropna().unique().tolist()),
+            creative_type_options,
             key="summary_type_multi_v68_50",
             placeholder="All",
+            on_change=_sync_summary_type_quick_from_dropdown_v68_75,
         )
     with f5:
         kol_size_filters = st.multiselect(
@@ -8161,11 +8382,20 @@ elif st.session_state.step == 6:
             placeholder="All",
         )
 
+    st.pills(
+        "Quick creative type",
+        creative_type_options,
+        key="summary_type_quick_v68_75",
+        selection_mode="single",
+        on_change=_sync_summary_type_dropdown_from_quick_v68_75,
+        help="One-click shortcut for the Creative Type filter above. Click the selected type again to show all.",
+    )
+
     focus_metric = "Views"
     sort_order = "Highest first"
     st.caption(
-        "Choose one or more values above, or click a category in a table to "
-        "show matching posts. Click a heading to sort."
+        "Use the filters above or a Creative Type shortcut to update the whole "
+        "dashboard. Multi-label posts appear under every matching type."
     )
     active_drilldown = st.session_state.get("summary_drilldown_v68_71", {})
     filtered = work.copy()
@@ -8174,7 +8404,6 @@ elif st.session_state.step == 6:
         ("Source Display", source_filters),
         ("Market Display", market_filters),
         ("Track Display", track_filters),
-        ("Primary Creative Type", type_filters),
         ("KOL Size Display", kol_size_filters),
     ]:
         filtered = filter_summary_by_selected_values_v68_50(
@@ -8182,6 +8411,7 @@ elif st.session_state.step == 6:
             filter_column,
             selected_values,
         )
+    filtered = filter_summary_by_creative_types_v68_75(filtered, type_filters)
     filtered = _apply_summary_drilldown_v68_71(filtered, active_drilldown)
     if isinstance(active_drilldown, dict) and safe_str(active_drilldown.get("value")):
         drilldown_label = safe_str(active_drilldown.get("label")) or "Selection"
@@ -8376,8 +8606,9 @@ elif st.session_state.step == 6:
             top_posts = prepare_sortable_top_posts_v68_46(filtered)
             render_editable_top_posts_v68_73(top_posts)
             st.caption(
-                "Click a Creative Type or Narrative cell and type to edit it. "
-                "Changes save automatically; all performance metrics stay read-only."
+                "Click any editable cell and type to update it. KOL Size and "
+                "Engagement Rate recalculate automatically; Platform and Link "
+                "stay protected."
             )
 
     drama_details = prepare_drama_detail_table_v68_71(filtered)
@@ -8483,7 +8714,7 @@ elif st.session_state.step == 6:
         st.download_button("Download Review / QA Report", to_excel_bytes(report), f"review_qa_report_{export_model_slug}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    render_dashboard_assistant_v68_72(filtered)
+    render_taggy_assistant_v68_76(6, filtered)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -8498,9 +8729,11 @@ elif st.session_state.step == 6:
             st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.creator_profile_aliases_v68_67 = {}
             st.session_state.tiktok_follower_attempted_keys_v68_65 = []
-            st.session_state.dashboard_chat_messages_v68_72 = []
-            st.session_state.pop("dashboard_chat_context_signature_v68_72", None)
-            st.session_state.pop("dashboard_chat_suggestions_v68_72", None)
+            st.session_state.taggy_chat_messages_v68_76 = []
+            st.session_state.pop("taggy_chat_context_signature_v68_76", None)
+            for chat_key in list(st.session_state.keys()):
+                if safe_str(chat_key).startswith("taggy_chat_suggestions_v68_76_"):
+                    st.session_state.pop(chat_key, None)
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()
