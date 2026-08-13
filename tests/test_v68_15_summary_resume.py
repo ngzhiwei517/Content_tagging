@@ -60,7 +60,7 @@ class RuntimeCheckpointTests(unittest.TestCase):
 class SummaryV6815Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        namespace = {"pd": pd, "List": List, "re": re}
+        namespace = {"pd": pd, "List": List, "Tuple": Tuple, "re": re}
         for name in [
             "safe_str",
             "clean_num",
@@ -85,13 +85,32 @@ class SummaryV6815Tests(unittest.TestCase):
             "Comments Rate", "Shares Rate", "Saves Rate",
         }
         namespace["TOP_POST_TABLE_COLUMNS_V68_46"] = [
-            "Edit", "Platform", "Creator", "Market", "Track", "Creative Type",
-            "Narrative", "Content Subtype",
+            "Platform", "Creator", "Market", "Track", "Creative Type", "Narrative",
             "Followers", "KOL Size", "Views", "Total Engagement",
             "Engagement Rate", "Link",
         ]
         cls.prepare_summary_table = staticmethod(load_function("prepare_sortable_summary_table_v68_46", namespace))
         namespace["prepare_sortable_summary_table_v68_46"] = cls.prepare_summary_table
+        namespace["split_creative_labels"] = load_function("split_creative_labels", namespace)
+        namespace["RETIRED_CREATIVE_TYPES"] = set()
+        namespace["operational_creative_type"] = load_function("operational_creative_type", namespace)
+        cls.summary_creative_type_cell = staticmethod(
+            load_function("summary_creative_type_cell_v68_73", namespace)
+        )
+        namespace["summary_creative_type_cell_v68_73"] = cls.summary_creative_type_cell
+        cls.parse_summary_creative_type_cell = staticmethod(
+            load_function("_parse_summary_creative_type_cell_v68_73", namespace)
+        )
+        namespace["final_update2_review_audit_update"] = lambda original, final, history, **kwargs: {
+            "Original AI Labels": namespace["safe_str"](original),
+            "Final Labels": namespace["safe_str"](final),
+            "Human Reviewed": True,
+            "Human Edited": namespace["safe_str"](original) != namespace["safe_str"](final),
+            "Label History": "summary edit",
+        }
+        cls.apply_summary_post_edits = staticmethod(
+            load_function("apply_summary_post_edits_v68_73", namespace)
+        )
         cls.prepare_top_posts = staticmethod(load_function("prepare_sortable_top_posts_v68_46", namespace))
         namespace["Tuple"] = Tuple
         namespace["TIKTOK"] = "TikTok"
@@ -242,10 +261,10 @@ class SummaryV6815Tests(unittest.TestCase):
             "summary_platform_table_v68_71",
             "summary_market_table_v68_71",
             "summary_track_table_v68_71",
-            "summary_top_posts_table_v68_71",
             "summary_drama_details_table_v68_71",
         ]:
             self.assertIn(key, step_six)
+        self.assertIn("render_editable_top_posts_v68_73(top_posts)", step_six)
 
     def test_top_creator_table_uses_requested_profile_and_batch_columns(self):
         expected = [
@@ -415,20 +434,68 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(top_posts.iloc[0]["Link"], "https://example.com/a")
 
     def test_narrative_is_shown_only_in_top_posts(self):
-        self.assertIn('"Creative Type",\n    "Narrative",\n    "Content Subtype",', APP_SOURCE)
+        top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
+        self.assertIn('"Creative Type"', top_post_columns)
+        self.assertIn('"Narrative"', top_post_columns)
+        self.assertNotIn('"Content Subtype"', top_post_columns)
         creator_columns = APP_SOURCE.split("TOP_CREATOR_TABLE_COLUMNS_V68_71 = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"Narrative"', creator_columns)
         self.assertIn('column_config["Narrative"]', APP_SOURCE)
 
-    def test_top_posts_use_native_clickable_header_table(self):
+    def test_top_posts_are_directly_editable(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         top_posts_block = step_six.split('section_title("Top Posts"', 1)[1].split(
             "render_top_creator_performance_v68_47", 1
         )[0]
-        self.assertIn("render_sortable_summary_table_v68_46(", top_posts_block)
+        self.assertIn("render_editable_top_posts_v68_73(top_posts)", top_posts_block)
+        self.assertIn("st.data_editor(", APP_SOURCE)
+        self.assertIn('if column not in {"Creative Type", "Narrative"}', APP_SOURCE)
+        top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
+        self.assertNotIn('"Content Subtype"', top_post_columns)
         self.assertIn("st.dataframe(", APP_SOURCE)
         self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
         self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
+
+    def test_drama_subtype_is_folded_into_creative_type_cell(self):
+        row = pd.Series({
+            "Creative Type": "Movie/Tv/Drama Edits",
+            "Drama Content Category": "Micro-drama edits",
+        })
+        self.assertEqual(
+            self.summary_creative_type_cell(row),
+            "Movie/Tv/Drama Edits\n↳ Micro-drama edits",
+        )
+        self.assertEqual(
+            self.parse_summary_creative_type_cell(
+                "Movie/Tv/Drama Edits\nMicro-drama edits"
+            ),
+            ("Movie/Tv/Drama Edits", "Micro-drama edits"),
+        )
+
+    def test_direct_summary_edit_updates_source_row_and_audit_fields(self):
+        tagged = pd.DataFrame([{
+            "Creative Type": "Movie/Tv/Drama Edits",
+            "Drama Content Category": "Drama Edit",
+            "Narrative": "Old narrative",
+            "Original AI Labels": "Movie/Tv/Drama Edits",
+            "Label History": "",
+        }], index=[7])
+        original = pd.DataFrame([{
+            "Creative Type": "Movie/Tv/Drama Edits\nDrama Edit",
+            "Narrative": "Old narrative",
+        }], index=[7])
+        edited = original.copy()
+        edited.at[7, "Creative Type"] = "Movie/Tv/Drama Edits\nMicro-drama edits"
+        edited.at[7, "Narrative"] = "New narrative"
+
+        updated, changed = self.apply_summary_post_edits(tagged, original, edited)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(updated.at[7, "Creative Type"], "Movie/Tv/Drama Edits")
+        self.assertEqual(updated.at[7, "Drama Content Category"], "Micro-drama edits")
+        self.assertEqual(updated.at[7, "Narrative"], "New narrative")
+        self.assertEqual(updated.at[7, "Review Action"], "KEEP")
+        self.assertEqual(updated.at[7, "Review Note"], "Edited directly in Summary")
 
     def test_every_summary_table_uses_clickable_header_sorting(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
@@ -500,10 +567,10 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("fallback_token", creator_section)
         self.assertNotIn("Use Apify for", creator_section)
         self.assertNotIn("Paid fallback profiles", creator_section)
-        self.assertIn("st.number_input", creator_section)
+        self.assertIn("st.text_input", creator_section)
         self.assertIn('f"Top creators (max {max_creator_count})"', creator_section)
-        self.assertIn('min_value=1', creator_section)
-        self.assertIn('max_value=max_creator_count', creator_section)
+        self.assertIn('profile_count_is_valid = 1 <= profile_count <= max_creator_count', creator_section)
+        self.assertIn('disabled=not profile_count_is_valid', creator_section)
         self.assertIn('max_creator_count = min(100, len(target_candidates))', creator_section)
         self.assertNotIn('"Profiles to enrich"', creator_section)
         self.assertNotIn("maximum {max_post_results:,} post results", creator_section)
