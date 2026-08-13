@@ -60,6 +60,11 @@ class DashboardAssistantTests(unittest.TestCase):
             ]
         )
 
+    def test_app_reloads_stale_dashboard_assistant_api(self):
+        self.assertIn("import ugc_tagger.dashboard_assistant as _dashboard_assistant", APP_SOURCE)
+        self.assertIn("importlib.reload(_dashboard_assistant)", APP_SOURCE)
+        self.assertIn('"PAGE_CHAT_SUGGESTIONS"', APP_SOURCE)
+
     def test_context_is_compact_allowlisted_and_uses_filtered_rows(self):
         context = build_dashboard_context(self.sample_frame().iloc[:1])
         self.assertEqual(1, context["totals"]["posts"])
