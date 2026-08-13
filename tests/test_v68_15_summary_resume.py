@@ -92,24 +92,25 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.prepare_summary_table = staticmethod(load_function("prepare_sortable_summary_table_v68_46", namespace))
         namespace["prepare_sortable_summary_table_v68_46"] = cls.prepare_summary_table
         namespace["split_creative_labels"] = load_function("split_creative_labels", namespace)
+        namespace["RETIRED_CREATIVE_TYPES"] = set()
+        namespace["operational_creative_type"] = load_function("operational_creative_type", namespace)
+        cls.summary_drama_detail_cell = staticmethod(
+            load_function("summary_drama_detail_cell_v68_74", namespace)
+        )
+        namespace["summary_drama_detail_cell_v68_74"] = cls.summary_drama_detail_cell
+        cls.summary_creative_type_cell = staticmethod(
+            load_function("summary_creative_type_cell_v68_73", namespace)
+        )
+        namespace["summary_creative_type_cell_v68_73"] = cls.summary_creative_type_cell
+        cls.parse_summary_creative_type_cell = staticmethod(
+            load_function("_parse_summary_creative_type_cell_v68_73", namespace)
+        )
+        namespace["_parse_summary_creative_type_cell_v68_73"] = cls.parse_summary_creative_type_cell
         cls.summary_local_filter_options = staticmethod(
             load_function("summary_local_filter_options_v68_81", namespace)
         )
         cls.filter_summary_table_rows = staticmethod(
             load_function("filter_summary_table_rows_v68_81", namespace)
-        )
-        namespace["RETIRED_CREATIVE_TYPES"] = set()
-        namespace["operational_creative_type"] = load_function("operational_creative_type", namespace)
-        cls.summary_creative_type_cell = staticmethod(
-            load_function("summary_creative_type_cell_v68_73", namespace)
-        )
-        namespace["summary_creative_type_cell_v68_73"] = cls.summary_creative_type_cell
-        cls.summary_drama_detail_cell = staticmethod(
-            load_function("summary_drama_detail_cell_v68_74", namespace)
-        )
-        namespace["summary_drama_detail_cell_v68_74"] = cls.summary_drama_detail_cell
-        cls.parse_summary_creative_type_cell = staticmethod(
-            load_function("_parse_summary_creative_type_cell_v68_73", namespace)
         )
         namespace["final_update2_review_audit_update"] = lambda original, final, history, **kwargs: {
             "Original AI Labels": namespace["safe_str"](original),
@@ -561,6 +562,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Platform and Link", top_posts_block)
         top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"Content Subtype"', top_post_columns)
+        self.assertNotIn('"Drama Detail"', top_post_columns)
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
         self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
@@ -572,7 +574,7 @@ class SummaryV6815Tests(unittest.TestCase):
         })
         self.assertEqual(
             self.summary_creative_type_cell(row),
-            "Movie/Tv/Drama Edits",
+            "Movie/Tv/Drama Edits\n↳ Micro-drama edits",
         )
         self.assertEqual(self.summary_drama_detail_cell(row), "Micro-drama edits")
         self.assertEqual(
@@ -587,6 +589,11 @@ class SummaryV6815Tests(unittest.TestCase):
             ),
             ("Movie/Tv/Drama Edits", "Micro-drama edits"),
         )
+        top_posts_renderer = APP_SOURCE.split(
+            "def render_editable_top_posts_v68_73", 1
+        )[1].split("def prepare_sortable_top_posts_v68_46", 1)[0]
+        self.assertNotIn('column_config["Drama Detail"]', top_posts_renderer)
+        self.assertNotIn('"Drama Detail",', top_posts_renderer)
 
     def test_direct_summary_edit_updates_source_row_and_audit_fields(self):
         tagged = pd.DataFrame([{
@@ -597,12 +604,13 @@ class SummaryV6815Tests(unittest.TestCase):
             "Label History": "",
         }], index=[7])
         original = pd.DataFrame([{
-            "Creative Type": "Movie/Tv/Drama Edits",
-            "Drama Detail": "Drama Edit",
+            "Creative Type": "Movie/Tv/Drama Edits\n↳ Drama Edit",
             "Narrative": "Old narrative",
         }], index=[7])
         edited = original.copy()
-        edited.at[7, "Drama Detail"] = "Micro-drama edits"
+        edited.at[7, "Creative Type"] = (
+            "Movie/Tv/Drama Edits\n↳ Micro-drama edits"
+        )
         edited.at[7, "Narrative"] = "New narrative"
 
         updated, changed = self.apply_summary_post_edits(tagged, original, edited)

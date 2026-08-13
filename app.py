@@ -5263,9 +5263,11 @@ SUMMARY_COLUMN_HELP_V68_80 = {
     "Campaign Track": "Campaign track assigned to these posts.",
     "Artist": "Artist assigned to the campaign track.",
     "Original Sound": "Original platform sound detected on the post.",
-    "Creative Type": "Broad creative label assigned to the post.",
+    "Creative Type": (
+        "Broad creative label assigned to the post. Drama posts show their "
+        "specific subtype on a second line in the same cell."
+    ),
     "Content Subtype": "More specific classification for a drama-related post.",
-    "Drama Detail": "More specific classification for a drama-related post.",
     "Narrative": "Short description of the post's storyline or angle.",
     "Visual Summary": "Short description of what is visually shown.",
     "Drama Type": "Drama genre or production type detected in the post.",
@@ -5622,7 +5624,9 @@ def summary_local_filter_options_v68_81(
         values = {
             label
             for value in table[column].fillna("").tolist()
-            for label in split_creative_labels(value)
+            for label in split_creative_labels(
+                _parse_summary_creative_type_cell_v68_73(value)[0]
+            )
             if safe_str(label)
         }
     else:
@@ -5645,7 +5649,10 @@ def filter_summary_table_rows_v68_81(
         return table.copy()
     if column == "Creative Type":
         mask = table[column].fillna("").map(
-            lambda value: selected in split_creative_labels(value)
+            lambda value: selected
+            in split_creative_labels(
+                _parse_summary_creative_type_cell_v68_73(value)[0]
+            )
         )
     else:
         mask = table[column].map(safe_str).eq(selected)
@@ -5752,8 +5759,10 @@ def render_sortable_summary_table_v68_46(
 
 
 def summary_creative_type_cell_v68_73(row: pd.Series) -> str:
-    """Return the post's editable broad creative label."""
-    return operational_creative_type(row.get("Creative Type"))
+    """Return one editable cell with a drama-only subtype on line two."""
+    creative_type = operational_creative_type(row.get("Creative Type"))
+    subtype = summary_drama_detail_cell_v68_74(row)
+    return f"{creative_type}\n↳ {subtype}" if subtype else creative_type
 
 
 def summary_drama_detail_cell_v68_74(row: pd.Series) -> str:
@@ -5863,16 +5872,10 @@ def apply_summary_post_edits_v68_73(
 
         original_type = safe_str(original.get("Creative Type"))
         edited_type = safe_str(edited.get("Creative Type"))
-        original_drama_detail = safe_str(original.get("Drama Detail"))
-        edited_drama_detail = safe_str(edited.get("Drama Detail"))
-        if (
-            edited_type != original_type
-            or edited_drama_detail != original_drama_detail
-        ):
-            creative_type, legacy_subtype = _parse_summary_creative_type_cell_v68_73(
+        if edited_type != original_type:
+            creative_type, subtype = _parse_summary_creative_type_cell_v68_73(
                 edited_type
             )
-            subtype = edited_drama_detail or legacy_subtype
             if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
                 subtype = ""
             source_row = updated.loc[original_index]
@@ -5913,13 +5916,6 @@ def apply_summary_post_edits_v68_73(
 def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
     """Render direct post-data editing while keeping derived fields consistent."""
     editor_columns = list(TOP_POST_TABLE_COLUMNS_V68_46)
-    if (
-        "Creative Type" in top_posts.columns
-        and top_posts["Creative Type"].map(
-            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
-        ).any()
-    ):
-        editor_columns.insert(editor_columns.index("Creative Type") + 1, "Drama Detail")
     table = prepare_sortable_summary_table_v68_46(
         top_posts,
         editor_columns,
@@ -5973,15 +5969,6 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         help=summary_column_help_v68_80("Creative Type"),
         width="medium",
     )
-    if "Drama Detail" in table.columns:
-        column_config["Drama Detail"] = st.column_config.TextColumn(
-            "Drama Detail",
-            help=(
-                "Specific drama classification. This appears only when the "
-                "current table contains drama posts."
-            ),
-            width="medium",
-        )
     column_config["Narrative"] = st.column_config.TextColumn(
         "Narrative",
         help=summary_column_help_v68_80("Narrative"),
@@ -6013,7 +6000,6 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
                 "Market",
                 "Track",
                 "Creative Type",
-                "Drama Detail",
                 "Narrative",
                 "Followers",
                 "Views",
@@ -6059,11 +6045,6 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
         summary_creative_type_cell_v68_73,
         axis=1,
     )
-    top_posts["Drama Detail"] = top_posts.apply(
-        summary_drama_detail_cell_v68_74,
-        axis=1,
-    )
-
     for column in ["Followers", "Total Engagement"]:
         if column not in top_posts.columns:
             top_posts[column] = 0
@@ -6088,13 +6069,6 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     display_columns = list(TOP_POST_TABLE_COLUMNS_V68_46)
-    if top_posts["Creative Type"].map(
-        lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
-    ).any():
-        display_columns.insert(
-            display_columns.index("Creative Type") + 1,
-            "Drama Detail",
-        )
     for column in display_columns:
         if column not in top_posts.columns:
             top_posts[column] = ""
