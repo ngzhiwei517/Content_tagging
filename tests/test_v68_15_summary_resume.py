@@ -106,6 +106,9 @@ class SummaryV6815Tests(unittest.TestCase):
             load_function("_parse_summary_creative_type_cell_v68_73", namespace)
         )
         namespace["_parse_summary_creative_type_cell_v68_73"] = cls.parse_summary_creative_type_cell
+        cls.summary_selected_cell = staticmethod(
+            load_function("_summary_selected_cell_v68_71", namespace)
+        )
         cls.summary_local_filter_options = staticmethod(
             load_function("summary_local_filter_options_v68_81", namespace)
         )
@@ -299,7 +302,7 @@ class SummaryV6815Tests(unittest.TestCase):
             filter_block,
         )
 
-    def test_summary_ui_keeps_dropdowns_and_uses_editable_tables(self):
+    def test_summary_ui_keeps_dropdowns_and_uses_clickable_editable_tables(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         filter_block = step_six.split(
             "# Retain the existing combined dashboard filters", 1
@@ -307,7 +310,10 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("st.multiselect(", filter_block)
         self.assertNotIn("summary_drilldown_v68_71", filter_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
-        self.assertIn("render_local_summary_filter_v68_81(", APP_SOURCE)
+        self.assertIn("render_summary_table_toolbar_v68_82(", APP_SOURCE)
+        self.assertIn("apply_summary_table_cell_filter_v68_82(", APP_SOURCE)
+        self.assertIn('selection_mode="single-cell"', APP_SOURCE)
+        self.assertNotIn('"Filter this table by"', APP_SOURCE)
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         for key in [
             "summary_platform_table_v68_71",
@@ -341,6 +347,30 @@ class SummaryV6815Tests(unittest.TestCase):
             self.filter_summary_table_rows(rows, "Platform", "TikTok").index.tolist(),
             [0, 2],
         )
+        self.assertEqual(
+            self.filter_summary_table_rows(
+                rows,
+                "Creative Type",
+                "Comedy, Slice of Life",
+            ).index.tolist(),
+            [0],
+        )
+
+    def test_summary_cell_selection_returns_clicked_value(self):
+        rows = pd.DataFrame(
+            {
+                "Platform": ["TikTok", "Instagram Reels"],
+                "Market": ["ID", "PH"],
+            },
+            index=[10, 20],
+        )
+        event = SimpleNamespace(
+            selection=SimpleNamespace(cells=[(1, "Market")])
+        )
+        selected = self.summary_selected_cell(event, rows)
+        self.assertEqual(selected["column"], "Market")
+        self.assertEqual(selected["value"], "PH")
+        self.assertEqual(selected["index"], 20)
 
     def test_each_summary_table_declares_local_filter_columns(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
@@ -675,12 +705,17 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("render_sortable_summary_table_v68_46(", creator_function)
         self.assertNotIn('section_title("Source Summary"', step_six)
 
-    def test_summary_tables_are_editable_with_compact_header_help(self):
+    def test_summary_tables_switch_between_click_filter_and_edit_modes(self):
         renderer = APP_SOURCE.split(
             "def render_sortable_summary_table_v68_46", 1
         )[1].split("def summary_creative_type_cell_v68_73", 1)[0]
         self.assertIn("st.data_editor(", renderer)
-        self.assertNotIn("st.dataframe(", renderer)
+        self.assertIn("st.dataframe(", renderer)
+        self.assertIn('on_select="rerun"', renderer)
+        self.assertIn('selection_mode="single-cell"', renderer)
+        self.assertIn('edit_label = ":material/check: Done"', APP_SOURCE)
+        self.assertIn('else ":material/edit: Edit"', APP_SOURCE)
+        self.assertIn('"Show all"', APP_SOURCE)
         self.assertIn("summary_column_config_v68_80(table)", renderer)
         self.assertIn("SUMMARY_COLUMN_HELP_V68_80 =", APP_SOURCE)
         self.assertIn('"Posts (3m)"', APP_SOURCE)

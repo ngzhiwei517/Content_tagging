@@ -5648,76 +5648,179 @@ def filter_summary_table_rows_v68_81(
     if table is None or table.empty or column not in table.columns or not selected:
         return table.copy()
     if column == "Creative Type":
-        mask = table[column].fillna("").map(
-            lambda value: selected
-            in split_creative_labels(
-                _parse_summary_creative_type_cell_v68_73(value)[0]
+        selected_labels = split_creative_labels(selected)
+        if len(selected_labels) > 1:
+            selected_set = set(selected_labels)
+            mask = table[column].fillna("").map(
+                lambda value: set(
+                    split_creative_labels(
+                        _parse_summary_creative_type_cell_v68_73(value)[0]
+                    )
+                )
+                == selected_set
             )
-        )
+        else:
+            selected_label = selected_labels[0] if selected_labels else selected
+            mask = table[column].fillna("").map(
+                lambda value: selected_label
+                in split_creative_labels(
+                    _parse_summary_creative_type_cell_v68_73(value)[0]
+                )
+            )
     else:
         mask = table[column].map(safe_str).eq(selected)
     return table.loc[mask].copy()
 
 
-def render_local_summary_filter_v68_81(
+def _summary_table_filter_state_key_v68_82(key: str) -> str:
+    return f"{key}_cell_filter_v68_82"
+
+
+def _summary_table_edit_state_key_v68_82(key: str) -> str:
+    return f"{key}_edit_mode_v68_82"
+
+
+def _summary_table_filter_value_v68_82(column: str, value) -> str:
+    """Normalize one clicked cell into a stable table-local filter value."""
+    selected = safe_str(value)
+    if column == "Creative Type":
+        selected = _parse_summary_creative_type_cell_v68_73(value)[0]
+    return selected
+
+
+def _active_summary_table_filter_v68_82(
     table: pd.DataFrame,
     *,
     key: str,
     filter_columns: List[str],
-) -> Tuple[pd.DataFrame, str]:
-    """Render a filter that belongs only to the table immediately below it."""
-    available_columns = [
-        column
-        for column in filter_columns
-        if len(summary_local_filter_options_v68_81(table, column)) > 1
-    ]
-    if not available_columns:
-        return table.copy(), "all"
-
-    column_key = f"{key}_local_filter_column_v68_81"
-    if st.session_state.get(column_key) not in available_columns:
-        st.session_state.pop(column_key, None)
-    selector_col, value_col = st.columns([1, 3], vertical_alignment="bottom")
-    with selector_col:
-        selected_column = st.selectbox(
-            "Filter this table by",
-            available_columns,
-            key=column_key,
-            help="This selection changes only this table.",
-        )
-
-    options = summary_local_filter_options_v68_81(table, selected_column)
-    column_token = hashlib.sha1(selected_column.encode("utf-8")).hexdigest()[:8]
-    value_key = f"{key}_local_filter_value_v68_81_{column_token}"
-    selected_value = st.session_state.get(value_key)
-    if safe_str(selected_value) not in options:
-        st.session_state.pop(value_key, None)
-    with value_col:
-        if len(options) <= 14:
-            selected_value = st.pills(
-                f"Show {selected_column}",
-                options,
-                selection_mode="single",
-                key=value_key,
-                help="Choose one value to narrow this table. Click it again to show all rows.",
-                width="stretch",
-            )
-        else:
-            selected_value = st.selectbox(
-                f"Show {selected_column}",
-                ["All"] + options,
-                key=value_key,
-                help="Choose one value to narrow this table.",
-            )
-            if selected_value == "All":
-                selected_value = None
-
-    signature_source = f"{selected_column}|{safe_str(selected_value) or 'all'}"
-    signature = hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:10]
-    return (
-        filter_summary_table_rows_v68_81(table, selected_column, selected_value),
-        signature,
+) -> Dict[str, str]:
+    """Return one valid filter owned by this table, clearing stale state."""
+    state_key = _summary_table_filter_state_key_v68_82(key)
+    active_filter = st.session_state.get(state_key, {})
+    if not isinstance(active_filter, dict):
+        st.session_state.pop(state_key, None)
+        return {}
+    column = safe_str(active_filter.get("column"))
+    value = _summary_table_filter_value_v68_82(
+        column,
+        active_filter.get("value"),
     )
+    available_columns = [
+        candidate
+        for candidate in filter_columns
+        if candidate in table.columns
+    ]
+    if column not in available_columns or not value:
+        st.session_state.pop(state_key, None)
+        return {}
+    filtered = filter_summary_table_rows_v68_81(table, column, value)
+    if filtered.empty:
+        st.session_state.pop(state_key, None)
+        return {}
+    return {"column": column, "value": value}
+
+
+def render_summary_table_toolbar_v68_82(
+    table: pd.DataFrame,
+    *,
+    key: str,
+    filter_columns: List[str],
+) -> Tuple[pd.DataFrame, bool, str, List[str]]:
+    """Render only table mode controls; filtering itself happens by cell click."""
+    available_columns = [
+        column for column in filter_columns if column in table.columns
+    ]
+    active_filter = _active_summary_table_filter_v68_82(
+        table,
+        key=key,
+        filter_columns=available_columns,
+    )
+    edit_state_key = _summary_table_edit_state_key_v68_82(key)
+    editing = bool(st.session_state.get(edit_state_key, False))
+
+    status_col, clear_col, edit_col = st.columns(
+        [5, 1, 1],
+        vertical_alignment="center",
+    )
+    with status_col:
+        if active_filter:
+            st.caption(
+                f"Showing {active_filter['column']}: {active_filter['value']}"
+            )
+        elif editing:
+            st.caption("Edit mode is on. Click a cell and type to update it.")
+        else:
+            st.caption(
+                "Click a category cell to filter this table, or use the pencil to edit."
+            )
+    with clear_col:
+        if active_filter and st.button(
+            "Show all",
+            key=f"{key}_show_all_v68_82",
+            type="tertiary",
+            help="Clear this table's filter only.",
+            width="stretch",
+        ):
+            st.session_state.pop(_summary_table_filter_state_key_v68_82(key), None)
+            st.rerun()
+    with edit_col:
+        edit_label = ":material/check: Done" if editing else ":material/edit: Edit"
+        if st.button(
+            edit_label,
+            key=f"{key}_toggle_edit_v68_82",
+            type="tertiary",
+            help=(
+                "Finish editing and return to click-to-filter mode."
+                if editing
+                else "Switch this table to edit mode."
+            ),
+            width="stretch",
+        ):
+            st.session_state[edit_state_key] = not editing
+            st.rerun()
+
+    filtered = table.copy()
+    if active_filter:
+        filtered = filter_summary_table_rows_v68_81(
+            table,
+            active_filter["column"],
+            active_filter["value"],
+        )
+    signature_source = (
+        f"{active_filter.get('column', 'all')}|"
+        f"{active_filter.get('value', 'all')}"
+    )
+    signature = hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:10]
+    return filtered, editing, signature, available_columns
+
+
+def apply_summary_table_cell_filter_v68_82(
+    event,
+    table: pd.DataFrame,
+    *,
+    key: str,
+    filter_columns: List[str],
+) -> bool:
+    """Store a clicked categorical value as this table's only local filter."""
+    selected_cell = _summary_selected_cell_v68_71(event, table)
+    column = safe_str(selected_cell.get("column"))
+    if column not in filter_columns:
+        return False
+    value = _summary_table_filter_value_v68_82(
+        column,
+        selected_cell.get("value"),
+    )
+    if not value or value in {"None", "nan", "<NA>"}:
+        return False
+
+    state_key = _summary_table_filter_state_key_v68_82(key)
+    current_filter = st.session_state.get(state_key, {})
+    next_filter = {"column": column, "value": value}
+    if current_filter == next_filter:
+        st.session_state.pop(state_key, None)
+    else:
+        st.session_state[state_key] = next_filter
+    return True
 
 
 def render_sortable_summary_table_v68_46(
@@ -5728,12 +5831,15 @@ def render_sortable_summary_table_v68_46(
     key: Optional[str] = None,
     local_filter_columns: Optional[List[str]] = None,
 ):
-    """Render an editable Summary table with native sortable headers."""
+    """Render a click-to-filter table that switches to editing via its pencil."""
     table = prepare_sortable_summary_table_v68_46(df, columns)
-    table, filter_signature = render_local_summary_filter_v68_81(
-        table,
-        key=key or "summary_table",
-        filter_columns=local_filter_columns or [],
+    table_key = key or "summary_table"
+    table, editing, filter_signature, clickable_columns = (
+        render_summary_table_toolbar_v68_82(
+            table,
+            key=table_key,
+            filter_columns=local_filter_columns or [],
+        )
     )
     if table.empty:
         st.markdown(
@@ -5745,16 +5851,34 @@ def render_sortable_summary_table_v68_46(
     column_config = summary_column_config_v68_80(table)
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
-    editor_key = f"{key or 'summary_table'}_editor_v68_81_{filter_signature}"
-    st.data_editor(
-        table,
-        hide_index=True,
-        width="stretch",
-        height=38 + (visible_rows * 35),
-        column_config=column_config,
-        num_rows="fixed",
-        key=editor_key,
-    )
+    if editing:
+        st.data_editor(
+            table,
+            hide_index=True,
+            width="stretch",
+            height=38 + (visible_rows * 35),
+            column_config=column_config,
+            num_rows="fixed",
+            key=f"{table_key}_editor_v68_82_{filter_signature}",
+        )
+    else:
+        event = st.dataframe(
+            table,
+            hide_index=True,
+            width="stretch",
+            height=38 + (visible_rows * 35),
+            column_config=column_config,
+            key=f"{table_key}_view_v68_82_{filter_signature}",
+            on_select="rerun",
+            selection_mode="single-cell",
+        )
+        if apply_summary_table_cell_filter_v68_82(
+            event,
+            table,
+            key=table_key,
+            filter_columns=clickable_columns,
+        ):
+            st.rerun()
     return {}
 
 
@@ -5914,23 +6038,26 @@ def apply_summary_post_edits_v68_73(
 
 
 def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
-    """Render direct post-data editing while keeping derived fields consistent."""
+    """Render click-to-filter posts with explicit direct-edit mode."""
     editor_columns = list(TOP_POST_TABLE_COLUMNS_V68_46)
     table = prepare_sortable_summary_table_v68_46(
         top_posts,
         editor_columns,
     )
-    table, filter_signature = render_local_summary_filter_v68_81(
-        table,
-        key="summary_top_posts_table_v68_71",
-        filter_columns=[
+    table_key = "summary_top_posts_table_v68_71"
+    table, editing, filter_signature, clickable_columns = (
+        render_summary_table_toolbar_v68_82(
+            table,
+            key=table_key,
+            filter_columns=[
             "Creative Type",
             "Platform",
             "Market",
             "Track",
             "KOL Size",
             "Creator",
-        ],
+            ],
+        )
     )
     if table.empty:
         st.markdown(
@@ -5984,11 +6111,36 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
     index_signature = hashlib.sha1(
         "|".join(safe_str(index) for index in table.index).encode("utf-8")
     ).hexdigest()[:12]
+    table_height = 38 + (min(max(len(table), 1), 15) * 62)
+    if not editing:
+        event = st.dataframe(
+            table,
+            hide_index=True,
+            width="stretch",
+            height=table_height,
+            row_height=62,
+            column_config=column_config,
+            key=(
+                "summary_top_posts_view_v68_82_"
+                f"{filter_signature}_{index_signature}"
+            ),
+            on_select="rerun",
+            selection_mode="single-cell",
+        )
+        if apply_summary_table_cell_filter_v68_82(
+            event,
+            table,
+            key=table_key,
+            filter_columns=clickable_columns,
+        ):
+            st.rerun()
+        return
+
     edited_table = st.data_editor(
         table,
         hide_index=True,
         width="stretch",
-        height=38 + (min(max(len(table), 1), 15) * 62),
+        height=table_height,
         row_height=62,
         column_config=column_config,
         disabled=[
@@ -6008,7 +6160,7 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         ],
         num_rows="fixed",
         key=(
-            "summary_top_posts_editor_v68_81_"
+            "summary_top_posts_editor_v68_82_"
             f"{filter_signature}_{index_signature}"
         ),
     )
@@ -8653,8 +8805,8 @@ elif st.session_state.step == 6:
     focus_metric = "Views"
     sort_order = "Highest first"
     st.caption(
-        "The filters above update the whole dashboard. Filters placed directly "
-        "above a table update only that table."
+        "The filters above update the whole dashboard. In each table, click a "
+        "category cell to filter only that table; use its pencil to edit."
     )
     filtered = work.copy()
     for filter_column, selected_values in [
@@ -8846,9 +8998,9 @@ elif st.session_state.step == 6:
             top_posts = prepare_sortable_top_posts_v68_46(filtered)
             render_editable_top_posts_v68_73(top_posts)
             st.caption(
-                "Click any editable cell and type to update it. KOL Size and "
-                "Engagement Rate recalculate automatically; Platform and Link "
-                "stay protected."
+                "Click a category cell to filter this table. Use Edit to update "
+                "post fields. KOL Size and Engagement Rate recalculate automatically; "
+                "Platform and Link stay protected."
             )
 
     drama_details = prepare_drama_detail_table_v68_71(filtered)
@@ -8868,7 +9020,7 @@ elif st.session_state.step == 6:
                     "Creative Type",
                     "Content Subtype",
                     "Drama Type",
-                    "Country/Region",
+                    "Country / Region",
                     "Creator",
                 ],
             )

@@ -173,13 +173,16 @@ class SummaryCopyContractTests(unittest.TestCase):
         ]:
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)
-        self.assertIn("render_local_summary_filter_v68_81", APP_SOURCE)
+        self.assertIn("render_summary_table_toolbar_v68_82", APP_SOURCE)
+        self.assertIn("apply_summary_table_cell_filter_v68_82", APP_SOURCE)
+        self.assertNotIn('"Filter this table by"', APP_SOURCE)
         self.assertNotIn('"Quick creative type"', APP_SOURCE)
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         renderer = APP_SOURCE.split(
             "def render_sortable_summary_table_v68_46", 1
         )[1].split("def summary_creative_type_cell_v68_73", 1)[0]
         self.assertIn("st.data_editor(", renderer)
+        self.assertIn("st.dataframe(", renderer)
 
     def test_separate_summary_sort_controls_are_removed(self):
         self.assertNotIn('"Sort post table by"', APP_SOURCE)
