@@ -1,9 +1,16 @@
+import ast
 import os
+import re
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import requests
 
 from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
+from ugc_tagger.final_update2_backend import SOURCE_PATH
 from ugc_tagger.final_update2_adapter import _resolved_creator_handle, scrape_links
 
 
@@ -37,6 +44,12 @@ def _video_info(url):
         "save_count": 7,
         "duration": 9,
         "thumbnail": "https://cdn.example/cover.jpg",
+        "http_headers": {
+            "User-Agent": "public-browser-agent",
+            "Referer": "https://www.tiktok.com/",
+            "Cookie": "must-not-be-stored",
+            "Authorization": "must-not-be-stored",
+        },
     }
 
 
@@ -53,11 +66,20 @@ class DirectPostScraperTests(unittest.TestCase):
         self.assertEqual(fallback, [])
         self.assertEqual(before, after)
         self.assertEqual(records[0]["_scrape_provider"], "direct_yt_dlp")
-        self.assertEqual(records[0]["mediaUrls"], [link])
+        self.assertEqual(records[0]["mediaUrls"], ["https://cdn.example/video.mp4"])
+        self.assertEqual(records[0]["videoMeta.downloadAddr"], "https://cdn.example/video.mp4")
+        self.assertEqual(records[0]["videoMeta.fallbackDownloadAddr"], link)
         self.assertEqual(records[0]["playCount"], 123)
         self.assertEqual(records[0]["collectCount"], 7)
         self.assertEqual(records[0]["videoMeta.duration"], 9)
         self.assertEqual(records[0]["authorMeta.name"], "creator")
+        self.assertEqual(
+            records[0]["mediaRequestHeaders"],
+            {
+                "User-Agent": "public-browser-agent",
+                "Referer": "https://www.tiktok.com/",
+            },
+        )
 
     def test_numeric_account_id_never_replaces_public_username(self):
         link = "https://www.tiktok.com/@public.handle/video/123"
@@ -180,6 +202,115 @@ class DirectPostScraperTests(unittest.TestCase):
             records = scrape_links([link], "token")
 
         self.assertEqual(records, [])
+
+
+class DirectMediaReuseTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = SOURCE_PATH.read_text(encoding="utf-8")
+        selected_names = {
+            "get_media_request_headers",
+            "is_public_tiktok_post_url",
+            "download_video",
+        }
+        parsed = ast.parse(source, filename=str(SOURCE_PATH))
+        module = ast.Module(
+            body=[
+                node
+                for node in parsed.body
+                if isinstance(node, ast.FunctionDef) and node.name in selected_names
+            ],
+            type_ignores=[],
+        )
+        ast.fix_missing_locations(module)
+        namespace = {"os": os, "re": re, "requests": requests}
+        exec(compile(module, str(SOURCE_PATH), "exec"), namespace, namespace)
+        cls.backend = SimpleNamespace(**namespace)
+
+    def test_flattened_media_headers_are_filtered_case_insensitively(self):
+        headers = self.backend.get_media_request_headers({
+            "mediaRequestHeaders.user-agent": "browser-agent",
+            "mediaRequestHeaders.Referer": "https://www.tiktok.com/",
+            "mediaRequestHeaders.Cookie": "must-not-be-used",
+            "mediaRequestHeaders.Authorization": "must-not-be-used",
+        })
+        self.assertEqual(
+            headers,
+            {
+                "User-Agent": "browser-agent",
+                "Referer": "https://www.tiktok.com/",
+            },
+        )
+
+    def test_tiktok_cdn_url_is_downloaded_without_second_yt_dlp_extraction(self):
+        response = Mock()
+        response.content = b"direct-video"
+        response.raise_for_status.return_value = None
+        cdn_url = "https://v16-webapp-prime.tiktok.com/video/tos/example.mp4"
+        public_url = "https://www.tiktok.com/@creator/video/123"
+
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, "video.mp4")
+            with patch.object(self.backend.requests, "get", return_value=response) as get:
+                result = self.backend.download_video(
+                    cdn_url,
+                    output_path,
+                    "",
+                    fallback_url=public_url,
+                    request_headers={"Referer": "https://www.tiktok.com/"},
+                )
+            with open(output_path, "rb") as video:
+                saved = video.read()
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(saved, b"direct-video")
+        get.assert_called_once_with(
+            cdn_url,
+            headers={"Referer": "https://www.tiktok.com/"},
+            timeout=90,
+        )
+
+    def test_expired_cdn_url_falls_back_to_public_post(self):
+        extracted_urls = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, url, download):
+                extracted_urls.append((url, download))
+                with open(self.options["outtmpl"], "wb") as video:
+                    video.write(b"fallback-video")
+
+        cdn_url = "https://v16-webapp-prime.tiktok.com/video/tos/expired.mp4"
+        public_url = "https://www.tiktok.com/@creator/video/123"
+        fake_module = SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, "video.mp4")
+            with patch.object(
+                self.backend.requests,
+                "get",
+                side_effect=RuntimeError("expired"),
+            ), patch.dict(sys.modules, {"yt_dlp": fake_module}):
+                result = self.backend.download_video(
+                    cdn_url,
+                    output_path,
+                    "",
+                    fallback_url=public_url,
+                )
+            with open(output_path, "rb") as video:
+                saved = video.read()
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(saved, b"fallback-video")
+        self.assertEqual(extracted_urls, [(public_url, True)])
 
 
 if __name__ == "__main__":
