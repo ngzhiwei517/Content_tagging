@@ -50,6 +50,8 @@ class RuntimeCheckpointTests(unittest.TestCase):
         self.assertIn('"batch_df"', checkpoint_block)
         self.assertIn('"tagged_df"', checkpoint_block)
         self.assertIn('"tiktok_follower_attempted_keys_v68_65"', checkpoint_block)
+        self.assertIn('"creator_profile_metrics_v68_51"', checkpoint_block)
+        self.assertIn('"creator_profile_aliases_v68_67"', checkpoint_block)
 
     def test_url_tracks_batch_and_step_for_reconnect(self):
         self.assertIn('st.query_params["run"] = run_id', APP_SOURCE)

@@ -602,6 +602,65 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             f"https://tagging.example.com/app?run={recovery_id}&step=4",
         )
 
+    def test_plain_url_reopens_recovery_id_remembered_by_same_browser(self):
+        recovery_id = "d" * 32
+
+        class FakeStreamlit:
+            query_params = {}
+            session_state = {}
+
+            @staticmethod
+            def rerun():
+                raise RuntimeError("rerun")
+
+            @staticmethod
+            def stop():
+                raise AssertionError("browser pointer was already ready")
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_browser_recovery_pointer_v68_80": lambda: (True, recovery_id),
+            "_valid_runtime_id_v68_15": lambda value: value if value == recovery_id else "",
+            "_runtime_query_value_v68_15": lambda name: "",
+            "_runtime_checkpoint_candidates_v68_44": lambda run_id: [{"state": {"batch_df": {"data": [[1]]}}}],
+        }
+        restore = load_function("_restore_browser_recovery_pointer_v68_80", namespace)
+
+        with self.assertRaisesRegex(RuntimeError, "rerun"):
+            restore()
+
+        self.assertEqual(FakeStreamlit.query_params["run"], recovery_id)
+        self.assertEqual(FakeStreamlit.query_params["step"], "2")
+
+    def test_explicit_recovery_url_wins_over_browser_pointer(self):
+        explicit_id = "a" * 32
+        remembered_id = "b" * 32
+
+        class FakeStreamlit:
+            query_params = {"run": explicit_id}
+            session_state = {}
+
+            @staticmethod
+            def rerun():
+                raise AssertionError("explicit URL should not be replaced")
+
+            @staticmethod
+            def stop():
+                raise AssertionError("component is already ready")
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_browser_recovery_pointer_v68_80": lambda: (True, remembered_id),
+            "_valid_runtime_id_v68_15": lambda value: value if value in {explicit_id, remembered_id} else "",
+            "_runtime_query_value_v68_15": lambda name: explicit_id if name == "run" else "",
+            "_runtime_checkpoint_candidates_v68_44": lambda run_id: [{"state": {}}],
+        }
+        restore = load_function("_restore_browser_recovery_pointer_v68_80", namespace)
+
+        restore()
+
+        self.assertEqual(FakeStreamlit.query_params["run"], explicit_id)
+
 
 if __name__ == "__main__":
     unittest.main()

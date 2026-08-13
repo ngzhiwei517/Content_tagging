@@ -1039,8 +1039,8 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
-    # Public profile metrics are session-only metadata. They are intentionally
-    # excluded from restart checkpoints and never contain API tokens or media.
+    # Public profile metrics never contain API tokens or media and are included
+    # in restart checkpoints so completed profile enrichment is not lost.
     "creator_profile_metrics_v68_51": pd.DataFrame(),
     "creator_profile_updated_at_v68_51": "",
     "creator_profile_aliases_v68_67": {},
@@ -1295,6 +1295,41 @@ REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
 TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
 TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
+BROWSER_RECOVERY_POINTER_KEY_V68_80 = "ugc_tagger_latest_recovery_id_v1"
+_BROWSER_RECOVERY_POINTER_V68_80 = st.components.v2.component(
+    "ugc_tagger_browser_recovery_pointer_v68_81",
+    html="""
+<span aria-hidden="true"></span>
+""",
+    css="""
+:host { display: none; }
+""",
+    js="""
+export default function (component) {
+  const { data, setStateValue } = component
+  const activeId = String(data?.active_id ?? "").trim()
+  const storageKey = String(data?.storage_key ?? "ugc_tagger_latest_recovery_id_v1")
+  const validId = /^[a-f0-9]{32}$/
+  let rememberedId = ""
+
+  try {
+    if (validId.test(activeId)) {
+      window.localStorage.setItem(storageKey, activeId)
+      rememberedId = activeId
+    } else {
+      const storedId = String(window.localStorage.getItem(storageKey) ?? "").trim()
+      rememberedId = validId.test(storedId) ? storedId : ""
+      if (storedId && !rememberedId) window.localStorage.removeItem(storageKey)
+    }
+  } catch (_error) {
+    rememberedId = ""
+  }
+
+  setStateValue("recovery_id", rememberedId)
+  setStateValue("ready", true)
+}
+""",
+)
 RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "step",
     "mode",
@@ -1327,8 +1362,16 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_started_utc_v68_41_4",
     "comparison_run_elapsed_v68_41_4",
     "tiktok_follower_attempted_keys_v68_65",
+    "creator_profile_metrics_v68_51",
+    "creator_profile_updated_at_v68_51",
+    "creator_profile_aliases_v68_67",
 )
-RUNTIME_DATAFRAME_KEYS_V68_15 = {"batch_df", "selected_df", "tagged_df"}
+RUNTIME_DATAFRAME_KEYS_V68_15 = {
+    "batch_df",
+    "selected_df",
+    "tagged_df",
+    "creator_profile_metrics_v68_51",
+}
 RUNTIME_BLOCKED_COLUMN_V68_44 = re.compile(
     r"api[ _-]*key|token|secret|password|authorization|database[ _-]*url|connection[ _-]*string|"
     r"download(?:ed)?[ _-]*media|(?:media|video|image|audio)[ _-]*(?:bytes|blob)|"
@@ -1415,6 +1458,54 @@ def _runtime_query_value_v68_15(name: str) -> str:
     if isinstance(value, list):
         value = value[0] if value else ""
     return safe_str(value)
+
+
+def _browser_recovery_pointer_v68_80() -> Tuple[bool, str]:
+    """Read or update the latest recovery id remembered by this browser only."""
+    active_id = _valid_runtime_id_v68_15(
+        _runtime_query_value_v68_15("run")
+        or st.session_state.get("runtime_run_id_v68_15")
+    )
+    result = _BROWSER_RECOVERY_POINTER_V68_80(
+        key="browser_recovery_pointer_v68_80",
+        data={
+            "active_id": active_id,
+            "storage_key": BROWSER_RECOVERY_POINTER_KEY_V68_80,
+        },
+        default={"ready": False, "recovery_id": ""},
+        width=1,
+        height=1,
+        on_ready_change=lambda: None,
+        on_recovery_id_change=lambda: None,
+    )
+    return (
+        bool(getattr(result, "ready", False)),
+        _valid_runtime_id_v68_15(getattr(result, "recovery_id", "")),
+    )
+
+
+def _restore_browser_recovery_pointer_v68_80() -> None:
+    """Reopen the latest saved batch when the same browser visits the plain URL."""
+    ready, remembered_id = _browser_recovery_pointer_v68_80()
+    has_explicit_run = bool(_valid_runtime_id_v68_15(_runtime_query_value_v68_15("run")))
+    has_session_run = bool(
+        _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
+    )
+    if has_explicit_run or has_session_run:
+        return
+    if not ready:
+        # Wait for the tiny browser component to read localStorage. It triggers
+        # the next rerun immediately and prevents a new empty id from replacing
+        # the user's remembered batch in the meantime.
+        st.stop()
+    if not remembered_id or not _runtime_checkpoint_candidates_v68_44(remembered_id):
+        return
+    try:
+        st.query_params["run"] = remembered_id
+        st.query_params["step"] = "2"
+    except Exception:
+        return
+    st.rerun()
 
 
 def _clear_tagging_continue_query_v68_55() -> None:
@@ -7261,6 +7352,7 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
 # -----------------------------------------------------------------------------
 # Application shell and workflow pages
 # -----------------------------------------------------------------------------
+_restore_browser_recovery_pointer_v68_80()
 _restore_runtime_checkpoint_v68_15()
 # Step 1 was the retired credential page. Existing bookmarked sessions and
 # checkpoints should reopen on Add Posts instead of rendering an empty route.
