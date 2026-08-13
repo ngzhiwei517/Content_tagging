@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 from urllib.parse import urlencode
@@ -217,6 +218,60 @@ class PersistentLargeBatchTests(unittest.TestCase):
             self.assertEqual(len(restored), 1)
             self.assertEqual(restored.iloc[0]["Creative Type"], "Dance")
 
+    def test_twenty_five_saved_rows_resume_at_post_twenty_six_after_container_restart(self):
+        selected = pd.DataFrame([
+            {
+                "Link": f"https://www.tiktok.com/@creator/video/{7500 + index}",
+                "Platform": "TikTok",
+            }
+            for index in range(50)
+        ])
+        remote = MemoryObjectStore()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tagging_jobs"
+            runtime_id = "9" * 32
+            store = BatchCheckpointStore(root, chunk_size=50, persistent_store=remote)
+            manifest = store.prepare(
+                runtime_id,
+                selected,
+                model="gemini-test",
+                comparison_run_id="twenty-five-restart",
+                comparison_started_utc="2026-08-13T00:00:00+00:00",
+            )
+            for position in range(25):
+                store.save_partial_row(
+                    manifest["job_id"],
+                    0,
+                    position,
+                    {
+                        "Link": selected.iloc[position]["Link"],
+                        "Creative Type": "Others",
+                    },
+                )
+            manifest = store.mark_continuation_ready(manifest)
+            self.assertEqual(manifest["saved_rows"], 25)
+
+            # Model a Streamlit Cloud container replacement: all local files
+            # disappear, while the persistent checkpoint remains available.
+            shutil.rmtree(root)
+            restarted = BatchCheckpointStore(root, chunk_size=50, persistent_store=remote)
+            resumed = restarted.find(runtime_id, selected, model="gemini-test")
+            restored = restarted.load_saved_results(resumed)
+            saved_positions = restarted.partial_positions(resumed["job_id"], 0)
+            remaining_positions = [
+                position for position in range(50) if position not in saved_positions
+            ]
+
+            self.assertEqual(resumed["saved_rows"], 25)
+            self.assertEqual(len(restored), 25)
+            self.assertEqual(saved_positions, list(range(25)))
+            self.assertEqual(remaining_positions[0], 25)
+            self.assertEqual(
+                restored.iloc[-1]["Link"],
+                selected.iloc[24]["Link"],
+            )
+            self.assertTrue(resumed["continuation_ready"])
+
     def test_remote_rows_exclude_secrets_and_downloaded_media(self):
         remote = MemoryObjectStore()
         with tempfile.TemporaryDirectory() as directory:
@@ -403,9 +458,114 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertFalse(has_posts(empty_state))
         self.assertTrue(has_posts(populated_state))
         self.assertIn(
-            "if not _runtime_checkpoint_has_posts_v68_44(state_payload):",
+            "if not has_posts:",
             APP_SOURCE,
         )
+
+    def test_reconnect_prefers_populated_checkpoint_over_newer_empty_shell(self):
+        namespace = {
+            "pd": pd,
+            "datetime": datetime,
+            "timezone": timezone,
+            "safe_str": lambda value: str(value or "").strip(),
+            "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df", "selected_df", "tagged_df"},
+            "Tuple": tuple,
+        }
+        namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+            "_runtime_checkpoint_has_posts_v68_44",
+            namespace,
+        )
+        namespace["_checkpoint_saved_at_v68_44"] = load_function(
+            "_checkpoint_saved_at_v68_44",
+            namespace,
+        )
+        rank = load_function(
+            "_runtime_checkpoint_candidate_rank_v68_79",
+            namespace,
+        )
+        populated_remote = {
+            "saved_at": "2026-08-13T13:56:00+00:00",
+            "state": {
+                "selected_df": {
+                    "columns": ["Link"],
+                    "index": [0],
+                    "data": [["https://example.com/saved-post"]],
+                },
+            },
+        }
+        newer_empty_session = {
+            "saved_at": "2026-08-13T13:57:39+00:00",
+            "state": {
+                "selected_df": {
+                    "columns": ["Link"],
+                    "index": [],
+                    "data": [],
+                },
+            },
+        }
+
+        chosen = max([newer_empty_session, populated_remote], key=rank)
+        self.assertIs(chosen, populated_remote)
+        self.assertIn("preserve_existing", APP_SOURCE)
+        self.assertIn(
+            "runtime_restore_checked_v68_15 = bool(restored or not requested_id)",
+            APP_SOURCE,
+        )
+
+    def test_reconnect_empty_session_does_not_overwrite_populated_local_state(self):
+        recovery_id = "8" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            checkpoint_path = checkpoint_dir / f"{recovery_id}.json"
+            populated = {
+                "version": "test",
+                "saved_at": "2026-08-13T13:56:00+00:00",
+                "state": {
+                    "batch_df": {
+                        "columns": ["Link"],
+                        "index": [0],
+                        "data": [["https://example.com/saved-post"]],
+                    },
+                },
+            }
+            checkpoint_path.write_text(json.dumps(populated), encoding="utf-8")
+
+            class FakeStreamlit:
+                session_state = {
+                    "runtime_run_id_v68_15": recovery_id,
+                    "batch_df": pd.DataFrame(),
+                }
+
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "datetime": datetime,
+                "timezone": timezone,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": ("batch_df",),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df"},
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_checkpoint_dataframe_to_payload_v68_15": self.to_payload,
+                "_runtime_checkpoint_path_v68_15": lambda run_id: checkpoint_dir / f"{run_id}.json",
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: json.loads(
+                    (checkpoint_dir / f"{run_id}.json").read_text(encoding="utf-8")
+                ),
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: None,
+            }
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            persist()
+
+            after = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(after, populated)
 
     def test_managed_secrets_and_automatic_recovery_remain_without_manual_controls(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)

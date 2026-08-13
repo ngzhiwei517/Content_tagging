@@ -231,7 +231,15 @@ def _group_summary(frame: pd.DataFrame, column: str, label: str) -> List[Dict[st
 
 
 def _date_range(frame: pd.DataFrame) -> Dict[str, Optional[str]]:
-    dates = pd.to_datetime(_series(frame, "Date"), errors="coerce", utc=True)
+    # Uploaded files can legitimately mix ISO dates, locale-style dates and
+    # timestamps. Pandas 2.x requires the explicit mixed parser to avoid a
+    # noisy per-value fallback warning on every Streamlit rerun.
+    dates = pd.to_datetime(
+        _series(frame, "Date"),
+        errors="coerce",
+        utc=True,
+        format="mixed",
+    )
     if not dates.notna().any():
         return {"start": None, "end": None}
     return {

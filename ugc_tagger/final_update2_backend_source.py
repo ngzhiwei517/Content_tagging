@@ -4679,7 +4679,15 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
 # -----------------------------------------------------------------------------
 
 
-def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id='', log_list=None):
+def run_drama_enrichment_pass(
+    result,
+    row,
+    gemini_key,
+    apify_token='',
+    vid_id='',
+    log_list=None,
+    media_cache=None,
+):
     """Run a visual second pass only after the broad drama label is final."""
     if not has_drama_label(result):
         return result
@@ -4692,30 +4700,58 @@ def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id=''
     evidence_source = 'metadata'
     audio_comparison = {}
     verified_itunes = {}
+    response = {
+        'parse_error': True,
+        'review_reason': 'No video media was available for drama enrichment',
+    }
+    media_cache = media_cache if isinstance(media_cache, dict) else {}
+    cached_video_bytes = media_cache.get('video_bytes')
+    if not isinstance(cached_video_bytes, bytes):
+        cached_video_bytes = b''
+    cached_frame_bytes = [
+        value for value in media_cache.get('frame_bytes', [])
+        if isinstance(value, bytes) and value
+    ]
 
     # Drama/CP distinctions are temporal, so prefer scene-spanning frames.  This
-    # extra media call is made only for already-confirmed drama edits.
+    # extra Gemini call is made only for already-confirmed drama edits. Reuse
+    # media from the broad temporal pass when available so the same post is not
+    # downloaded and decoded twice.
     video_url = get_video_url(row)
-    if video_url:
+    if cached_frame_bytes or cached_video_bytes or video_url:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 video_path = os.path.join(tmp, f'{vid_id or "drama"}.mp4')
-                download_video(
-                    video_url,
-                    video_path,
-                    apify_token,
-                    fallback_url=get_video_fallback_url(row),
-                    request_headers=get_media_request_headers(row),
-                )
-                frame_paths = extract_frames(video_path, os.path.join(tmp, 'drama_frames'), FRAME_POINTS_9)
-                for frame_path in frame_paths:
-                    with open(frame_path, 'rb') as handle:
-                        contents.append(gtypes.Part.from_bytes(data=handle.read(), mime_type='image/jpeg'))
-                if frame_paths:
-                    evidence_source = f'{len(frame_paths)} scene frames'
+                if cached_video_bytes:
+                    with open(video_path, 'wb') as handle:
+                        handle.write(cached_video_bytes)
+                elif video_url:
+                    download_video(
+                        video_url,
+                        video_path,
+                        apify_token,
+                        fallback_url=get_video_fallback_url(row),
+                        request_headers=get_media_request_headers(row),
+                    )
+
+                if cached_frame_bytes:
+                    for frame_bytes in cached_frame_bytes:
+                        contents.append(gtypes.Part.from_bytes(data=frame_bytes, mime_type='image/jpeg'))
+                    evidence_source = f'{len(cached_frame_bytes)} cached scene frames'
+                elif os.path.exists(video_path):
+                    frame_paths = extract_frames(
+                        video_path,
+                        os.path.join(tmp, 'drama_frames'),
+                        FRAME_POINTS_9,
+                    )
+                    for frame_path in frame_paths:
+                        with open(frame_path, 'rb') as handle:
+                            contents.append(gtypes.Part.from_bytes(data=handle.read(), mime_type='image/jpeg'))
+                    if frame_paths:
+                        evidence_source = f'{len(frame_paths)} scene frames'
                 response = call_drama_enrichment_gemini(contents, gemini_key)
                 campaign_track = str(row.get('_campaign_track', '') or '').strip()
-                if campaign_track:
+                if campaign_track and os.path.exists(video_path):
                     verified_itunes = fetch_itunes_preview(campaign_track)
                     preview_url = verified_itunes.get('preview_url', '')
                     if preview_url:
@@ -4728,9 +4764,6 @@ def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id=''
         except Exception as exc:
             log_list.append(f"  -> Drama scene-frame pass unavailable: {exc}")
             response = {'parse_error': True, 'review_reason': str(exc)}
-    else:
-        response = {'parse_error': True, 'review_reason': 'No video media was available for drama enrichment'}
-
     if response.get('parse_error'):
         cover_url = get_cover_url(row)
         if cover_url:
@@ -5109,6 +5142,10 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
     df = pd.json_normalize(records)
     results = []
     for i, (_, row) in enumerate(df.iterrows()):
+        # Temporary in-memory evidence only. It is never included in output or
+        # checkpoints and is released after this row completes.
+        drama_media_cache = {}
+        frame_paths_9 = []
         raw_source = raw_records_by_index.get(i, {})
         row_id_val = row.get('id', '')
         try:
@@ -5496,6 +5533,21 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                                 result, status, score, issues = resultv, statusv, scorev, issuesv
                         elif unresolved_after_frames:
                             log_list.append("  → Tier 2C skipped in runtime-safe mode (prevents long full-video upload waits).")
+
+                        if has_drama_label(result):
+                            try:
+                                with open(video_path, 'rb') as handle:
+                                    drama_media_cache['video_bytes'] = handle.read()
+                                if frame_paths_9:
+                                    cached_frames = []
+                                    for frame_path in frame_paths_9:
+                                        with open(frame_path, 'rb') as handle:
+                                            cached_frames.append(handle.read())
+                                    drama_media_cache['frame_bytes'] = cached_frames
+                            except Exception:
+                                # Cache reuse is an optimisation only; the
+                                # established drama fallback remains available.
+                                drama_media_cache = {}
                 except GeminiQuotaExhaustedError:
                     raise
                 except Exception as e:
@@ -5602,6 +5654,7 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
             apify_token,
             vid_id=vid_id,
             log_list=log_list,
+            media_cache=drama_media_cache,
         )
         # Non-drama carousel results do not enter the conditional detail pass,
         # so apply the same Thailand ambiguity gate once more at the pipeline

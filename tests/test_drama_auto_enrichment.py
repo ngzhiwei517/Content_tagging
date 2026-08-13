@@ -1,4 +1,6 @@
 import unittest
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2400,6 +2402,71 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         )
         self.assertLess(comparison_call, default_call)
         self.assertLess(default_call, review_call)
+
+    def test_drama_pass_reuses_broad_pass_media_without_redownloading(self):
+        from ugc_tagger.final_update2_backend import load_backend
+
+        with patch.dict(sys.modules, {"cv2": types.ModuleType("cv2")}):
+            backend = load_backend()
+        google_module = types.ModuleType("google")
+        genai_module = types.ModuleType("google.genai")
+        genai_module.types = types.SimpleNamespace(
+            Part=types.SimpleNamespace(
+                from_bytes=lambda **kwargs: kwargs,
+            ),
+        )
+        google_module.genai = genai_module
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama scene montage",
+            "content_details": "A fictional scene.",
+            "confidence": 0.9,
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "drama_format": "Long-form Drama",
+            "country_region": "China",
+            "drama_title": "Example Drama",
+            "detected_audio": "Unknown",
+            "campaign_song_match": "Unknown",
+            "audio_version": "Unknown",
+        }
+        calls = {"download": 0, "gemini": 0}
+
+        def fail_download(*_args, **_kwargs):
+            calls["download"] += 1
+            raise AssertionError("cached frames should avoid a second media download")
+
+        def fake_gemini(contents, _key, max_retries=2):
+            del max_retries
+            calls["gemini"] += 1
+            self.assertGreaterEqual(len(contents), 3)
+            return response
+
+        function_globals = backend.run_drama_enrichment_pass.__globals__
+        original_download = function_globals["download_video"]
+        original_gemini = function_globals["call_drama_enrichment_gemini"]
+        try:
+            function_globals["download_video"] = fail_download
+            function_globals["call_drama_enrichment_gemini"] = fake_gemini
+            with patch.dict(
+                sys.modules,
+                {"google": google_module, "google.genai": genai_module},
+            ):
+                enriched = backend.run_drama_enrichment_pass(
+                    result,
+                    {"videoUrl": "https://example.test/video.mp4"},
+                    "fake-key",
+                    media_cache={"frame_bytes": [b"frame-one", b"frame-two"]},
+                )
+        finally:
+            function_globals["download_video"] = original_download
+            function_globals["call_drama_enrichment_gemini"] = original_gemini
+
+        self.assertEqual(calls, {"download": 0, "gemini": 1})
+        self.assertEqual(enriched["_drama_evidence_source"], "2 cached scene frames")
 
     def test_resolved_kpop_show_cut_clears_stale_low_confidence_review(self):
         from ugc_tagger.drama_analysis import clear_resolved_drama_soft_review_flags

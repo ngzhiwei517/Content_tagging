@@ -1,5 +1,6 @@
 import json
 import unittest
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -83,6 +84,19 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIsNone(context["totals"]["total_views"])
         self.assertIsNone(context["totals"]["average_engagement_rate_percent"])
         self.assertEqual(1, context["totals"]["posts_without_views"])
+
+    def test_mixed_uploaded_dates_do_not_warn_on_streamlit_reruns(self):
+        frame = self.sample_frame().copy()
+        frame["Date"] = ["2026-08-01", "13/08/2026"]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            context = build_dashboard_context(frame)
+
+        self.assertEqual("2026-08-01", context["totals"]["date_range"]["start"])
+        self.assertEqual("2026-08-13", context["totals"]["date_range"]["end"])
+        self.assertFalse(
+            any("Could not infer format" in str(item.message) for item in caught)
+        )
 
     def test_prompt_forbids_external_knowledge_and_labels_recommendations(self):
         prompt = build_dashboard_prompt(
@@ -194,7 +208,11 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("render_taggy_assistant_v68_76(st.session_state.step", APP_SOURCE)
         self.assertIn("render_taggy_assistant_v68_76(6, filtered)", APP_SOURCE)
         self.assertIn("assets\" / \"taggy-assistant.png", APP_SOURCE)
-        self.assertIn('with st.popover(popover_label', APP_SOURCE)
+        self.assertIn('key="taggy_floating_launcher_v68_78"', APP_SOURCE)
+        self.assertIn('st.caption("May I help?")', APP_SOURCE)
+        self.assertIn("position:fixed !important", APP_SOURCE)
+        self.assertIn("bottom:max(76px", APP_SOURCE)
+        self.assertIn("assistant_popover = st.popover(", APP_SOURCE)
         self.assertIn("st.chat_input(", APP_SOURCE)
         self.assertIn("st.chat_message(", APP_SOURCE)
         self.assertIn('"Download chat"', APP_SOURCE)
