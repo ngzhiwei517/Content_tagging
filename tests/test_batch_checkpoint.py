@@ -377,13 +377,10 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "app.py"
         ).read_text(encoding="utf-8")
 
-    def test_large_batch_uses_bounded_scrapes_and_fresh_reruns(self):
+    def test_every_tagging_run_uses_bounded_scrapes_and_fresh_reruns(self):
         self.assertIn("DEFAULT_CHUNK_SIZE", self.source)
         self.assertIn("MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25", self.source)
-        self.assertIn(
-            "len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54",
-            self.source,
-        )
+        self.assertIn("and not selected.empty", self.source)
         self.assertIn("MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5", self.source)
         self.assertIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5", self.source)
         self.assertIn(
@@ -399,15 +396,12 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
 
-    def test_large_batch_protection_also_applies_to_top_posts(self):
+    def test_restart_protection_applies_to_every_non_empty_selection(self):
         helper = self.source.split(
             "def _uses_large_batch_checkpoints_v68_43",
             1,
         )[1].split("def _large_batch_manifest_v68_43", 1)[0]
-        self.assertIn(
-            "len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54",
-            helper,
-        )
+        self.assertIn("and not selected.empty", helper)
         self.assertNotIn("selection_mode", helper)
 
     def test_scraped_records_are_saved_before_the_next_window(self):

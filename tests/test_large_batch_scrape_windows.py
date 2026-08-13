@@ -539,6 +539,124 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         self.assertNotIn("gemini-key", persisted)
         self.assertNotIn("apify-token", persisted)
 
+    def test_sub_25_restart_does_not_repeat_paid_work(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "Platform": "TikTok",
+                    "Source": "small-restart simulation",
+                    "Link": f"https://www.tiktok.com/@creator/video/{980000 + index}",
+                    "Market": "SG",
+                    "Track": "Small restart track",
+                    "Creator": f"creator_{index}",
+                }
+                for index in range(12)
+            ]
+        )
+        scrape_sizes = []
+        tag_calls = Counter()
+        remote = _MemoryCheckpointObjects()
+        crashed = False
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tagging_jobs"
+
+            def scrape(links, _token, **_kwargs):
+                scrape_sizes.append(len(links))
+                return [
+                    {"submittedVideoUrl": link, "webVideoUrl": link}
+                    for link in links
+                ]
+
+            def tag_rows(
+                remaining,
+                _records,
+                _gemini_key,
+                _apify_token,
+                _model,
+                _logs,
+                _remaining_positions,
+                _saved_positions,
+                on_result,
+                on_progress,
+            ):
+                nonlocal crashed
+                for position, (_, row) in enumerate(remaining.iterrows()):
+                    link = row["Link"]
+                    tag_calls[link] += 1
+                    tagged = row.to_dict() | {
+                        "Creative Type": "Others",
+                        "Content Details": "Synthetic result",
+                    }
+                    on_result(position, tagged, "tier1_cover")
+                    on_progress(position + 1, len(remaining), "tier1_cover")
+                    if not crashed and position == 2:
+                        crashed = True
+                        raise SystemExit("simulated small process replacement")
+
+            fake_st = _Streamlit()
+            namespace = {
+                "BatchCheckpointStore": BatchCheckpointStore,
+                "Dict": Dict,
+                "List": List,
+                "LOGGER": logging.getLogger("small-restart-test"),
+                "MAX_APIFY_POSTS_PER_EXECUTION_V68_54": 25,
+                "MAX_LIVE_POSTS_PER_EXECUTION_V68_52": 5,
+                "Optional": Optional,
+                "REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52": 5,
+                "_attach_comparison_metadata_v68_43": lambda frame, _manifest: frame,
+                "_final_update2_adapter": adapter,
+                "_is_quota_interruption_v68_43": lambda _exc: False,
+                "_large_batch_error_code_v68_43": lambda _exc: "TEST_ERROR",
+                "_large_batch_store_v68_43": lambda: BatchCheckpointStore(
+                    root,
+                    persistent_store=remote,
+                ),
+                "_persist_runtime_checkpoint_v68_15": lambda: None,
+                "_render_run_log_v45": lambda *_args: None,
+                "_route_sensitive_for_selection_v56": lambda frame, _mode: (frame, 0),
+                "_tag_remaining_with_row_isolation_v68_43": tag_rows,
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "datetime": datetime,
+                "final_update2_review_cache": adapter.review_cache,
+                "final_update2_scrape_links": scrape,
+                "gemini_model_slug": lambda _model: "test-model",
+                "is_supported_link": lambda _link: True,
+                "pd": pd,
+                "platform_for_url": adapter.detect_platform,
+                "safe_str": lambda value: "" if value is None else str(value),
+                "st": fake_st,
+                "time": time,
+                "timezone": timezone,
+                "uuid": uuid,
+            }
+            runner = _load_runner(namespace)
+
+            with self.assertRaisesRegex(SystemExit, "small process replacement"):
+                runner(selected, "gemini-key", "apify-token", "test-model")
+
+            # A new container has no local files or Session State, but the
+            # per-row remote checkpoints must prevent repeated Gemini calls.
+            shutil.rmtree(root)
+            namespace["st"] = _Streamlit()
+
+            result = None
+            execution_count = 0
+            while result is None and execution_count < 20:
+                result = runner(
+                    selected,
+                    "replacement-gemini-key",
+                    "apify-token",
+                    "test-model",
+                )
+                execution_count += 1
+
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 12)
+        self.assertEqual(scrape_sizes, [12])
+        self.assertEqual(len(tag_calls), 12)
+        self.assertTrue(all(count == 1 for count in tag_calls.values()))
+
     def test_remote_checkpoint_failure_pauses_before_second_paid_tag(self):
         selected = pd.DataFrame(
             [
