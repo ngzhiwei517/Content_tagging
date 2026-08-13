@@ -719,6 +719,67 @@ table.clean-table tr:hover td{background:#eef6ff !important;}
 .good-note{background:linear-gradient(135deg,#ecfdf5,#ffffff) !important;}
 .soft-note{background:linear-gradient(135deg,#eef2ff,#ffffff) !important;}
 .warn-note{background:linear-gradient(135deg,#fffbeb,#ffffff) !important;}
+
+/* Taggy stays within reach without taking space from the workflow. */
+.st-key-taggy_floating_launcher_v68_78{
+  position:fixed !important;
+  right:max(18px, env(safe-area-inset-right)) !important;
+  bottom:max(76px, calc(env(safe-area-inset-bottom) + 18px)) !important;
+  z-index:1000000 !important;
+  width:min(250px, calc(100vw - 32px)) !important;
+  pointer-events:none;
+}
+.st-key-taggy_floating_launcher_v68_78 > div{
+  align-items:flex-end !important;
+  gap:7px !important;
+}
+.st-key-taggy_floating_launcher_v68_78 [data-testid="stCaptionContainer"],
+.st-key-taggy_floating_launcher_v68_78 .st-key-taggy_floating_actions_v68_78{
+  pointer-events:auto;
+}
+.st-key-taggy_floating_launcher_v68_78 [data-testid="stCaptionContainer"]{
+  width:max-content !important;
+  max-width:210px !important;
+  margin-left:auto !important;
+  padding:9px 14px !important;
+  border:1px solid rgba(148,163,184,.28);
+  border-radius:15px 15px 4px 15px;
+  background:rgba(255,255,255,.96);
+  box-shadow:0 10px 28px rgba(15,23,42,.16);
+  backdrop-filter:blur(10px);
+}
+.st-key-taggy_floating_launcher_v68_78 [data-testid="stCaptionContainer"] p{
+  color:#334155 !important;
+  font-size:14px !important;
+  font-weight:700 !important;
+}
+.st-key-taggy_floating_actions_v68_78{
+  width:max-content !important;
+  margin-left:auto !important;
+  padding:5px 7px 5px 5px !important;
+  border:1px solid rgba(148,163,184,.30);
+  border-radius:22px;
+  background:rgba(255,255,255,.95);
+  box-shadow:0 12px 32px rgba(15,23,42,.18);
+  backdrop-filter:blur(12px);
+}
+.st-key-taggy_floating_actions_v68_78 [data-testid="stImage"] img{
+  filter:drop-shadow(0 5px 8px rgba(91,80,232,.22));
+}
+.st-key-taggy_floating_actions_v68_78 [data-testid="stPopover"] button{
+  border-color:#cbd5e1 !important;
+  border-radius:15px !important;
+  background:#ffffff !important;
+  box-shadow:none !important;
+}
+@media (max-width:640px){
+  .st-key-taggy_floating_launcher_v68_78{
+    right:12px !important;
+    bottom:68px !important;
+    width:210px !important;
+  }
+  .st-key-taggy_floating_launcher_v68_78 [data-testid="stCaptionContainer"]{display:none;}
+}
 @media (max-width:900px){.hero-badge{margin-top:14px;width:100%;}.hero-v37{display:block !important}.hero-chips{margin-bottom:10px}}
 </style>
 """,
@@ -1501,6 +1562,21 @@ def _runtime_checkpoint_candidates_v68_44(run_id: str) -> List[Dict]:
     ]
 
 
+def _runtime_checkpoint_candidate_rank_v68_79(payload) -> Tuple[int, datetime]:
+    """Prefer populated recovery state before comparing checkpoint timestamps.
+
+    A replacement Streamlit session can briefly fail to reach the optional
+    remote store, then write a newer empty local shell for the bookmarked run.
+    The empty shell must never shadow an older populated Supabase/Postgres
+    checkpoint on the next retry.
+    """
+    state = payload.get("state", {}) if isinstance(payload, dict) else {}
+    return (
+        int(_runtime_checkpoint_has_posts_v68_44(state)),
+        _checkpoint_saved_at_v68_44(payload),
+    )
+
+
 def _new_runtime_recovery_id_v68_44() -> str:
     _clear_tagging_continue_query_v68_55()
     run_id = uuid.uuid4().hex
@@ -1570,19 +1646,30 @@ def _persist_runtime_checkpoint_v68_15() -> None:
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
+    has_posts = _runtime_checkpoint_has_posts_v68_44(state_payload)
     try:
         RUNTIME_CHECKPOINT_DIR_V68_15.mkdir(parents=True, exist_ok=True)
         destination = _runtime_checkpoint_path_v68_15(run_id)
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-        os.replace(temporary, destination)
+        existing = _load_local_runtime_checkpoint_v68_44(run_id)
+        existing_state = existing.get("state", {}) if isinstance(existing, dict) else {}
+        # Do not replace useful recovery data with the default empty state from
+        # a newly-created websocket session. A later restore retry can still
+        # choose the populated local or remote payload.
+        preserve_existing = (
+            not has_posts
+            and _runtime_checkpoint_has_posts_v68_44(existing_state)
+        )
+        if not preserve_existing:
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+            os.replace(temporary, destination)
         _sync_runtime_query_v68_15()
     except Exception:
         # A checkpoint must never block the tagging workflow.
         pass
     # Do not create remote rows for anonymous visits or empty test sessions.
     # Local checkpointing remains available from the first render.
-    if not _runtime_checkpoint_has_posts_v68_44(state_payload):
+    if not has_posts:
         return
     remote_store = _checkpoint_objects_v68_44(run_id)
     if remote_store is not None:
@@ -1605,7 +1692,11 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     if requested_id:
         try:
             candidates = _runtime_checkpoint_candidates_v68_44(run_id)
-            payload = max(candidates, key=_checkpoint_saved_at_v68_44) if candidates else {}
+            payload = (
+                max(candidates, key=_runtime_checkpoint_candidate_rank_v68_79)
+                if candidates
+                else {}
+            )
             saved_state = payload.get("state", {}) if isinstance(payload, dict) else {}
             if isinstance(saved_state, dict):
                 for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
@@ -1681,7 +1772,10 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     else:
         st.session_state.runtime_resume_notice_v68_15 = True
 
-    st.session_state.runtime_restore_checked_v68_15 = True
+    # A bookmarked run with no restored rows may have hit a transient remote
+    # read failure. Keep retrying on later reruns instead of permanently
+    # accepting an empty replacement session.
+    st.session_state.runtime_restore_checked_v68_15 = bool(restored or not requested_id)
     _sync_runtime_query_v68_15()
     _persist_runtime_checkpoint_v68_15()
 
@@ -4889,10 +4983,29 @@ def render_taggy_assistant_v68_76(
         st.session_state.pop(suggestions_key, None)
 
     messages = list(st.session_state.get(messages_key, []))
-    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-        if TAGGY_ASSET_V68_76.exists():
-            st.image(str(TAGGY_ASSET_V68_76), width=62)
-        with st.popover(popover_label, icon=":material/chat:", width="content"):
+    with st.container(
+        key="taggy_floating_launcher_v68_78",
+        width="content",
+        horizontal_alignment="right",
+        gap=None,
+    ):
+        st.caption("May I help?")
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="small",
+            key="taggy_floating_actions_v68_78",
+            width="content",
+        ):
+            if TAGGY_ASSET_V68_76.exists():
+                st.image(str(TAGGY_ASSET_V68_76), width=56)
+            assistant_popover = st.popover(
+                popover_label,
+                icon=":material/chat:",
+                width="content",
+            )
+
+        with assistant_popover:
             st.markdown("### Hi, I’m Taggy")
             st.caption("Ask how to use this page or ask about the available results.")
 
