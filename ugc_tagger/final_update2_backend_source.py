@@ -1248,6 +1248,49 @@ def get_video_url(row):
         return media[0]
     return row.get('videoMeta.downloadAddr', '')
 
+def get_video_fallback_url(row):
+    """Return the stable public post URL behind a temporary direct media URL."""
+    return (
+        row.get('videoMeta.fallbackDownloadAddr', '')
+        or row.get('submittedVideoUrl', '')
+        or row.get('webVideoUrl', '')
+    )
+
+def get_media_request_headers(row):
+    """Recover the safe public headers emitted by the direct metadata scraper."""
+    allowed = {
+        'accept': 'Accept',
+        'accept-language': 'Accept-Language',
+        'origin': 'Origin',
+        'referer': 'Referer',
+        'user-agent': 'User-Agent',
+    }
+    headers = {}
+    nested = row.get('mediaRequestHeaders', {})
+    if isinstance(nested, dict):
+        for name, value in nested.items():
+            safe_name = allowed.get(str(name).strip().lower())
+            if safe_name and value:
+                headers[safe_name] = str(value)
+    prefix = 'mediarequestheaders.'
+    for name, value in row.items():
+        flattened_name = str(name).strip()
+        if not flattened_name.lower().startswith(prefix) or not value:
+            continue
+        safe_name = allowed.get(flattened_name[len(prefix):].strip().lower())
+        if safe_name:
+            headers[safe_name] = str(value)
+    return headers
+
+def is_public_tiktok_post_url(url):
+    """True only for a TikTok page URL, not a temporary TikTok CDN URL."""
+    value = str(url or '').strip().lower()
+    return bool(
+        re.search(r'https?://(?:www\.|m\.)?tiktok\.com/@[^/?#]+/(?:video|photo)/', value)
+        or re.search(r'https?://(?:vm|vt)\.tiktok\.com/', value)
+        or re.search(r'https?://(?:www\.)?tiktok\.com/t/', value)
+    )
+
 def download_image_bytes(url, apify_token):
     headers = {}
     if 'api.apify.com' in url:
@@ -1261,11 +1304,17 @@ def download_image_bytes(url, apify_token):
     r.raise_for_status()
     return r.content
 
-def download_video(video_url, output_path, apify_token):
+def download_video(
+    video_url,
+    output_path,
+    apify_token,
+    fallback_url='',
+    request_headers=None,
+):
     # Clockworks media can require the Apify bearer token. Instagram's actor
     # returns a direct CDN URL, where an unrelated Authorization header can be
     # rejected by the CDN.
-    if 'tiktok.com' in str(video_url).lower():
+    if is_public_tiktok_post_url(video_url):
         try:
             import yt_dlp
         except ImportError as exc:
@@ -1287,12 +1336,22 @@ def download_video(video_url, output_path, apify_token):
             raise RuntimeError('Direct TikTok media download did not produce a file.')
         return output_path
 
-    headers = {'Authorization': f'Bearer {apify_token}'} if 'api.apify.com' in str(video_url) else {}
-    r = requests.get(video_url, headers=headers, timeout=90)
-    r.raise_for_status()
-    with open(output_path, 'wb') as f:
-        f.write(r.content)
-    return output_path
+    headers = {'Authorization': f'Bearer {apify_token}'} if 'api.apify.com' in str(video_url) else dict(request_headers or {})
+    try:
+        r = requests.get(video_url, headers=headers, timeout=90)
+        r.raise_for_status()
+        with open(output_path, 'wb') as f:
+            f.write(r.content)
+        return output_path
+    except Exception:
+        stable_fallback = str(fallback_url or '').strip()
+        if stable_fallback and stable_fallback != str(video_url or '').strip():
+            return download_video(
+                stable_fallback,
+                output_path,
+                apify_token,
+            )
+        raise
 
 # Frame sampling presets
 # 3-frame mode is fast and works well for static / text / lifestyle content.
@@ -4641,7 +4700,13 @@ def run_drama_enrichment_pass(result, row, gemini_key, apify_token='', vid_id=''
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 video_path = os.path.join(tmp, f'{vid_id or "drama"}.mp4')
-                download_video(video_url, video_path, apify_token)
+                download_video(
+                    video_url,
+                    video_path,
+                    apify_token,
+                    fallback_url=get_video_fallback_url(row),
+                    request_headers=get_media_request_headers(row),
+                )
                 frame_paths = extract_frames(video_path, os.path.join(tmp, 'drama_frames'), FRAME_POINTS_9)
                 for frame_path in frame_paths:
                     with open(frame_path, 'rb') as handle:
@@ -5209,7 +5274,13 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         video_path = os.path.join(tmp, f'{vid_id}.mp4')
-                        download_video(video_url, video_path, apify_token)
+                        download_video(
+                            video_url,
+                            video_path,
+                            apify_token,
+                            fallback_url=get_video_fallback_url(row),
+                            request_headers=get_media_request_headers(row),
+                        )
                         frame_paths = extract_frames(video_path, os.path.join(tmp, 'frames'))
                         contents_v = [vague_prompt]
                         for fp in frame_paths:
@@ -5321,7 +5392,13 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         video_path = os.path.join(tmp, f'{vid_id}.mp4')
-                        download_video(video_url, video_path, apify_token)
+                        download_video(
+                            video_url,
+                            video_path,
+                            apify_token,
+                            fallback_url=get_video_fallback_url(row),
+                            request_headers=get_media_request_headers(row),
+                        )
 
                         # Tier 2A: fast default pass using 3 frames.
                         frame_paths = extract_frames(video_path, os.path.join(tmp, 'frames_3'), FRAME_POINTS_3)
@@ -6386,7 +6463,13 @@ elif page == "Review Flagged":
                         try:
                             with tempfile.TemporaryDirectory() as tmp:
                                 video_path = os.path.join(tmp, f"review_{row['id']}.mp4")
-                                download_video(s_video, video_path, apify_token_r)
+                                download_video(
+                                    s_video,
+                                    video_path,
+                                    apify_token_r,
+                                    fallback_url=get_video_fallback_url(source_row),
+                                    request_headers=get_media_request_headers(source_row),
+                                )
                                 frame_paths = extract_frames(video_path, os.path.join(tmp, 'frames'))
                                 for fp in frame_paths:
                                     with open(fp, 'rb') as f:

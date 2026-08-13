@@ -103,6 +103,21 @@ def _non_numeric_handle(*values) -> str:
 
 def _direct_record(requested_url: str, info: Dict) -> Dict:
     canonical_url = str(info.get("webpage_url") or requested_url).strip()
+    direct_media_url = str(info.get("url") or "").strip()
+    raw_headers = info.get("http_headers")
+    media_request_headers = {}
+    if isinstance(raw_headers, dict):
+        # Keep only ordinary public request headers. Cookies and authorization
+        # values must never enter a checkpoint or exported review payload.
+        allowed_headers = {
+            "accept", "accept-language", "origin", "referer", "user-agent",
+        }
+        media_request_headers = {
+            str(key): str(value)
+            for key, value in raw_headers.items()
+            if str(key).strip().casefold() in allowed_headers
+            and str(value or "").strip()
+        }
     uploader_id = _non_numeric_handle(
         _tiktok_handle_from_url(canonical_url),
         _tiktok_handle_from_url(requested_url),
@@ -148,7 +163,11 @@ def _direct_record(requested_url: str, info: Dict) -> Dict:
             "duration": info.get("duration") or 0,
             "width": info.get("width") or 0,
             "height": info.get("height") or 0,
-            "downloadAddr": canonical_url,
+            # Reuse the media URL resolved by this metadata extraction. The
+            # backend falls back to the public post URL if this temporary URL
+            # expires before a resumed chunk downloads it.
+            "downloadAddr": direct_media_url or canonical_url,
+            "fallbackDownloadAddr": canonical_url,
             "coverUrl": thumbnail,
             "originalCoverUrl": thumbnail,
             "webVideoUrl": canonical_url,
@@ -161,12 +180,12 @@ def _direct_record(requested_url: str, info: Dict) -> Dict:
         "videoMeta.duration": info.get("duration") or 0,
         "videoMeta.width": info.get("width") or 0,
         "videoMeta.height": info.get("height") or 0,
-        "videoMeta.downloadAddr": canonical_url,
+        "videoMeta.downloadAddr": direct_media_url or canonical_url,
+        "videoMeta.fallbackDownloadAddr": canonical_url,
         "videoMeta.coverUrl": thumbnail,
         "videoMeta.originalCoverUrl": thumbnail,
-        # The backend recognises the original post URL and lets yt-dlp place
-        # the media directly in its TemporaryDirectory. No media is checkpointed.
-        "mediaUrls": [canonical_url],
+        "mediaUrls": [direct_media_url or canonical_url],
+        "mediaRequestHeaders": media_request_headers,
         "isSlideshow": False,
     }
     return record
