@@ -7,6 +7,7 @@ keep reusable tagging rules in the backend modules rather than in page code.
 
 import io
 import csv
+import importlib
 import re
 import html
 import hashlib
@@ -27,16 +28,36 @@ import pandas as pd
 import streamlit as st
 
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
-from ugc_tagger.dashboard_assistant import (
-    DASHBOARD_CHAT_SUGGESTIONS,
-    PAGE_CHAT_SUGGESTIONS,
-    PAGE_TITLES,
-    chat_history_markdown,
-    dashboard_context_json,
-    dashboard_context_signature,
-    generate_page_assistant_answer,
-    page_help_answer,
+import ugc_tagger.dashboard_assistant as _dashboard_assistant
+
+# Streamlit Cloud can hot-reload ``app.py`` while an older imported helper
+# module is still cached. Reload the small, side-effect-free helper once when
+# its current public API is missing so a rolling deployment cannot leave the
+# app with a mixed pair of module versions.
+_DASHBOARD_ASSISTANT_API = (
+    "DASHBOARD_CHAT_SUGGESTIONS",
+    "PAGE_CHAT_SUGGESTIONS",
+    "PAGE_TITLES",
+    "chat_history_markdown",
+    "dashboard_context_json",
+    "dashboard_context_signature",
+    "generate_page_assistant_answer",
+    "page_help_answer",
 )
+if any(
+    not hasattr(_dashboard_assistant, name)
+    for name in _DASHBOARD_ASSISTANT_API
+):
+    _dashboard_assistant = importlib.reload(_dashboard_assistant)
+
+DASHBOARD_CHAT_SUGGESTIONS = _dashboard_assistant.DASHBOARD_CHAT_SUGGESTIONS
+PAGE_CHAT_SUGGESTIONS = _dashboard_assistant.PAGE_CHAT_SUGGESTIONS
+PAGE_TITLES = _dashboard_assistant.PAGE_TITLES
+chat_history_markdown = _dashboard_assistant.chat_history_markdown
+dashboard_context_json = _dashboard_assistant.dashboard_context_json
+dashboard_context_signature = _dashboard_assistant.dashboard_context_signature
+generate_page_assistant_answer = _dashboard_assistant.generate_page_assistant_answer
+page_help_answer = _dashboard_assistant.page_help_answer
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
