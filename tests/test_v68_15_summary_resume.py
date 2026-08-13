@@ -319,10 +319,11 @@ class SummaryV6815Tests(unittest.TestCase):
             "summary_platform_table_v68_71",
             "summary_market_table_v68_71",
             "summary_track_table_v68_71",
-            "summary_drama_details_table_v68_71",
         ]:
             self.assertIn(key, step_six)
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", step_six)
+        self.assertNotIn('section_title("Drama Details"', step_six)
+        self.assertIn("render_drama_details_dialog_v68_83", APP_SOURCE)
 
     def test_table_local_filter_matches_exact_and_multilabel_values(self):
         rows = pd.DataFrame({
@@ -379,12 +380,15 @@ class SummaryV6815Tests(unittest.TestCase):
             "Market Summary",
             "Track Summary",
             "Sound Breakdown",
-            "Top Posts",
-            "Drama Details",
         ]:
             with self.subTest(title=title):
                 section = step_six.split(f'section_title("{title}"', 1)[1]
                 self.assertIn("local_filter_columns", section)
+        top_posts_renderer = APP_SOURCE.split(
+            "def render_editable_top_posts_v68_73", 1
+        )[1].split("def prepare_sortable_top_posts_v68_46", 1)[0]
+        self.assertIn("filter_columns=[", top_posts_renderer)
+        self.assertIn('"Creative Type"', top_posts_renderer)
         creator_function = APP_SOURCE.split(
             "def render_top_creator_performance_v68_47", 1
         )[1].split("def bar_list", 1)[0]
@@ -589,7 +593,7 @@ class SummaryV6815Tests(unittest.TestCase):
             self.assertIn(f'"{column}"', APP_SOURCE)
         self.assertIn("KOL Size and", top_posts_block)
         self.assertIn("Engagement Rate recalculate automatically", top_posts_block)
-        self.assertIn("Platform and Link", top_posts_block)
+        self.assertIn("full drama analysis", top_posts_block)
         top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"Content Subtype"', top_post_columns)
         self.assertNotIn('"Drama Detail"', top_post_columns)
@@ -604,7 +608,7 @@ class SummaryV6815Tests(unittest.TestCase):
         })
         self.assertEqual(
             self.summary_creative_type_cell(row),
-            "Movie/Tv/Drama Edits\n↳ Micro-drama edits",
+            "Movie/Tv/Drama Edits\nMicro-drama edits",
         )
         self.assertEqual(self.summary_drama_detail_cell(row), "Micro-drama edits")
         self.assertEqual(
@@ -624,6 +628,9 @@ class SummaryV6815Tests(unittest.TestCase):
         )[1].split("def prepare_sortable_top_posts_v68_46", 1)[0]
         self.assertNotIn('column_config["Drama Detail"]', top_posts_renderer)
         self.assertNotIn('"Drama Detail",', top_posts_renderer)
+        self.assertIn("render_drama_details_dialog_v68_83", top_posts_renderer)
+        self.assertIn('view_table["Creative Type"]', top_posts_renderer)
+        self.assertIn("_summary_source_row_v68_83", top_posts_renderer)
 
     def test_direct_summary_edit_updates_source_row_and_audit_fields(self):
         tagged = pd.DataFrame([{

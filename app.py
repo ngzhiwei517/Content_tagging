@@ -5544,6 +5544,82 @@ def prepare_drama_detail_table_v68_71(df: pd.DataFrame) -> pd.DataFrame:
     return details[DRAMA_DETAIL_TABLE_COLUMNS_V68_71]
 
 
+def _dismiss_summary_drama_details_v68_83() -> None:
+    """Reset the selected-cell widget after a drama detail dialog closes."""
+    state_key = "summary_top_posts_click_nonce_v68_83"
+    st.session_state[state_key] = int(st.session_state.get(state_key, 0)) + 1
+
+
+@st.dialog(
+    "Drama post details",
+    width="large",
+    icon=":material/movie_info:",
+    on_dismiss=_dismiss_summary_drama_details_v68_83,
+)
+def render_drama_details_dialog_v68_83(source_row: pd.Series) -> None:
+    """Show structured drama analysis without adding more table columns."""
+    if source_row is None or not isinstance(source_row, pd.Series):
+        st.warning("Drama details are not available for this post.")
+        return
+
+    source_index = source_row.name if source_row.name is not None else 0
+    details = prepare_drama_detail_table_v68_71(
+        pd.DataFrame([source_row.to_dict()], index=[source_index])
+    )
+    if details.empty:
+        st.warning("Drama details are not available for this post.")
+        return
+
+    detail = details.iloc[0]
+    creator = display_empty(detail.get("Creator"), "Unknown creator")
+    subtype = display_empty(detail.get("Content Subtype"), "Not specified")
+    st.markdown(f"**{creator}** · Movie/Tv/Drama Edits")
+    st.markdown(f":orange-badge[{subtype}]")
+
+    visual_summary = display_empty(
+        detail.get("Visual Summary"),
+        "No visual summary is available.",
+    )
+    with st.container(border=True):
+        st.markdown("**Visual summary**")
+        st.write(visual_summary)
+
+    field_groups = [
+        [
+            ("Drama type", "Drama Type"),
+            ("Edit focus", "Edit Focus"),
+            ("Format", "Format"),
+        ],
+        [
+            ("Country / region", "Country / Region"),
+            ("Drama / show title", "Drama / Show Title"),
+            ("Detected audio", "Detected Audio"),
+            ("Audio version", "Audio Version"),
+        ],
+    ]
+    columns = st.columns(2)
+    for container, fields in zip(columns, field_groups):
+        with container:
+            for label, column in fields:
+                st.markdown(f"**{label}**")
+                st.write(display_empty(detail.get(column), "Not specified"))
+
+    link = safe_str(detail.get("Link"))
+    if link:
+        st.link_button("Open post", link, icon=":material/open_in_new:")
+
+
+def _summary_source_row_v68_83(original_index) -> Optional[pd.Series]:
+    """Return the original tagged row behind a Summary table selection."""
+    tagged_df = st.session_state.get("tagged_df", pd.DataFrame())
+    if tagged_df is None or tagged_df.empty or original_index not in tagged_df.index:
+        return None
+    source_row = tagged_df.loc[original_index]
+    if isinstance(source_row, pd.DataFrame):
+        source_row = source_row.iloc[0]
+    return source_row.copy() if isinstance(source_row, pd.Series) else None
+
+
 def _consume_summary_table_click_v68_71(
     click: Dict[str, object],
 ) -> None:
@@ -5886,7 +5962,7 @@ def summary_creative_type_cell_v68_73(row: pd.Series) -> str:
     """Return one editable cell with a drama-only subtype on line two."""
     creative_type = operational_creative_type(row.get("Creative Type"))
     subtype = summary_drama_detail_cell_v68_74(row)
-    return f"{creative_type}\n↳ {subtype}" if subtype else creative_type
+    return f"{creative_type}\n{subtype}" if subtype else creative_type
 
 
 def summary_drama_detail_cell_v68_74(row: pd.Series) -> str:
@@ -5914,6 +5990,18 @@ def _parse_summary_creative_type_cell_v68_73(value) -> Tuple[str, str]:
     if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
         subtype = ""
     return creative_type, subtype
+
+
+def _is_drama_creative_type_selection_v68_83(
+    selected_cell: Dict[str, object],
+) -> bool:
+    """Identify a drama Creative Type cell that should open the detail dialog."""
+    if safe_str(selected_cell.get("column")) != "Creative Type":
+        return False
+    broad_label = _parse_summary_creative_type_cell_v68_73(
+        selected_cell.get("value")
+    )[0]
+    return "Movie/Tv/Drama Edits" in split_creative_labels(broad_label)
 
 
 def apply_summary_post_edits_v68_73(
@@ -6113,23 +6201,45 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
     ).hexdigest()[:12]
     table_height = 38 + (min(max(len(table), 1), 15) * 62)
     if not editing:
+        view_table = table.copy()
+        view_table["Creative Type"] = view_table["Creative Type"].map(
+            lambda value: _parse_summary_creative_type_cell_v68_73(value)[0]
+        )
+        view_column_config = summary_column_config_v68_80(view_table)
+        view_column_config["Creative Type"] = st.column_config.TextColumn(
+            "Creative Type",
+            help=(
+                "Broad creative label. Click a drama label to open its full "
+                "analysis; click another label to filter this table."
+            ),
+            width="medium",
+        )
+        click_nonce = int(
+            st.session_state.get("summary_top_posts_click_nonce_v68_83", 0)
+        )
         event = st.dataframe(
-            table,
+            view_table,
             hide_index=True,
             width="stretch",
             height=table_height,
             row_height=62,
-            column_config=column_config,
+            column_config=view_column_config,
             key=(
                 "summary_top_posts_view_v68_82_"
-                f"{filter_signature}_{index_signature}"
+                f"{filter_signature}_{index_signature}_{click_nonce}"
             ),
             on_select="rerun",
             selection_mode="single-cell",
         )
+        selected_cell = _summary_selected_cell_v68_71(event, view_table)
+        if _is_drama_creative_type_selection_v68_83(selected_cell):
+            source_row = _summary_source_row_v68_83(selected_cell.get("index"))
+            if source_row is not None:
+                render_drama_details_dialog_v68_83(source_row)
+                return
         if apply_summary_table_cell_filter_v68_82(
             event,
-            table,
+            view_table,
             key=table_key,
             filter_columns=clickable_columns,
         ):
@@ -8998,31 +9108,9 @@ elif st.session_state.step == 6:
             top_posts = prepare_sortable_top_posts_v68_46(filtered)
             render_editable_top_posts_v68_73(top_posts)
             st.caption(
-                "Click a category cell to filter this table. Use Edit to update "
-                "post fields. KOL Size and Engagement Rate recalculate automatically; "
-                "Platform and Link stay protected."
-            )
-
-    drama_details = prepare_drama_detail_table_v68_71(filtered)
-    if not drama_details.empty:
-        with st.container(border=True):
-            st.markdown(section_title("Drama Details", "#f59e0b"), unsafe_allow_html=True)
-            st.caption(
-                "Creative Type is the broad label; Content Subtype and the fields "
-                "below provide the detailed drama classification."
-            )
-            render_sortable_summary_table_v68_46(
-                drama_details,
-                columns=DRAMA_DETAIL_TABLE_COLUMNS_V68_71,
-                max_visible_rows=15,
-                key="summary_drama_details_table_v68_71",
-                local_filter_columns=[
-                    "Creative Type",
-                    "Content Subtype",
-                    "Drama Type",
-                    "Country / Region",
-                    "Creator",
-                ],
+                "Click a category cell to filter this table. For drama posts, click "
+                "Creative Type to open the full drama analysis. Use Edit to update "
+                "post fields; KOL Size and Engagement Rate recalculate automatically."
             )
 
     # Keep creator contribution last among the analytical sections.
