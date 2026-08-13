@@ -162,7 +162,7 @@ class SummaryCopyContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertNotIn(phrase, APP_SOURCE)
 
-    def test_summary_dropdown_filters_remain_with_click_drilldown(self):
+    def test_summary_dropdown_filters_remain_with_editable_tables(self):
         for widget_key in [
             "summary_platform_multi_v68_50",
             "summary_source_multi_v68_50",
@@ -174,7 +174,11 @@ class SummaryCopyContractTests(unittest.TestCase):
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)
         self.assertIn("summary_drilldown_v68_71", APP_SOURCE)
-        self.assertIn('selection_mode="single-cell"', APP_SOURCE)
+        self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
+        renderer = APP_SOURCE.split(
+            "def render_sortable_summary_table_v68_46", 1
+        )[1].split("def summary_creative_type_cell_v68_73", 1)[0]
+        self.assertIn("st.data_editor(", renderer)
 
     def test_separate_summary_sort_controls_are_removed(self):
         self.assertNotIn('"Sort post table by"', APP_SOURCE)

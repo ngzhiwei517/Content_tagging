@@ -292,14 +292,15 @@ class SummaryV6815Tests(unittest.TestCase):
             filter_block,
         )
 
-    def test_summary_ui_keeps_dropdowns_and_adds_clickable_tables(self):
+    def test_summary_ui_keeps_dropdowns_and_uses_editable_tables(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         filter_block = step_six.split(
             "# Retain the existing combined filters", 1
         )[1].split("total_views =", 1)[0]
         self.assertIn("st.multiselect(", filter_block)
         self.assertIn("summary_drilldown_v68_71", filter_block)
-        self.assertIn('selection_mode="single-cell"', APP_SOURCE)
+        self.assertIn("st.data_editor(", APP_SOURCE)
+        self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         for key in [
             "summary_platform_table_v68_71",
             "summary_market_table_v68_71",
@@ -326,10 +327,15 @@ class SummaryV6815Tests(unittest.TestCase):
         )[1].split("def bar_list", 1)[0]
         self.assertIn("columns=TOP_CREATOR_TABLE_COLUMNS_V68_71", creator_section)
         self.assertIn('"Market": "Country"', creator_section)
-        self.assertIn("Latest 3-month profile", creator_section)
-        self.assertIn("Current filtered batch", creator_section)
-        self.assertIn("Total Views is", creator_section)
-        self.assertIn("not a three-month profile total", creator_section)
+        help_block = APP_SOURCE.split(
+            "SUMMARY_COLUMN_HELP_V68_80 =", 1
+        )[1].split("def summary_column_help_v68_80", 1)[0]
+        self.assertIn('"Posts (3m)"', help_block)
+        self.assertIn('"Avg. Views (3m)"', help_block)
+        self.assertIn('"Avg. ER (3m)"', help_block)
+        self.assertIn('"Total Views"', help_block)
+        self.assertIn("current filtered dashboard", help_block)
+        self.assertIn("not a three-month profile total", help_block)
 
     def test_drama_details_use_separate_broad_label_and_subtype(self):
         drama_namespace = {
@@ -506,7 +512,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Platform and Link", top_posts_block)
         top_post_columns = APP_SOURCE.split("TOP_POST_TABLE_COLUMNS_V68_46 = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"Content Subtype"', top_post_columns)
-        self.assertIn("st.dataframe(", APP_SOURCE)
+        self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
         self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
 
@@ -611,6 +617,18 @@ class SummaryV6815Tests(unittest.TestCase):
         )[0]
         self.assertIn("render_sortable_summary_table_v68_46(", creator_function)
         self.assertNotIn('section_title("Source Summary"', step_six)
+
+    def test_summary_tables_are_editable_with_compact_header_help(self):
+        renderer = APP_SOURCE.split(
+            "def render_sortable_summary_table_v68_46", 1
+        )[1].split("def summary_creative_type_cell_v68_73", 1)[0]
+        self.assertIn("st.data_editor(", renderer)
+        self.assertNotIn("st.dataframe(", renderer)
+        self.assertIn("summary_column_config_v68_80(table)", renderer)
+        self.assertIn("SUMMARY_COLUMN_HELP_V68_80 =", APP_SOURCE)
+        self.assertIn('"Posts (3m)"', APP_SOURCE)
+        self.assertIn('"Total Views"', APP_SOURCE)
+        self.assertNotIn("**How to read this table**", APP_SOURCE)
 
     def test_creator_performance_groups_handles_and_uses_weighted_engagement(self):
         rows = pd.DataFrame([

@@ -5266,6 +5266,102 @@ TOP_CREATOR_TABLE_COLUMNS_V68_71 = [
     "Avg. ER",
 ]
 
+SUMMARY_COLUMN_HELP_V68_80 = {
+    "Platform": "Platform represented by this row.",
+    "Creator": "Creator account associated with this row.",
+    "Creator Profile": "Open the creator's public profile.",
+    "Country": "Market or country assigned to the creator in this batch.",
+    "Market": "Market assigned to the posts in this row.",
+    "Track": "Campaign track assigned to these posts.",
+    "Campaign Track": "Campaign track assigned to these posts.",
+    "Artist": "Artist assigned to the campaign track.",
+    "Original Sound": "Original platform sound detected on the post.",
+    "Creative Type": "Broad creative label assigned to the post.",
+    "Content Subtype": "More specific classification for a drama-related post.",
+    "Drama Detail": "More specific classification for a drama-related post.",
+    "Narrative": "Short description of the post's storyline or angle.",
+    "Visual Summary": "Short description of what is visually shown.",
+    "Drama Type": "Drama genre or production type detected in the post.",
+    "Edit Focus": "Main focus of the drama edit.",
+    "Format": "Video or storytelling format detected in the post.",
+    "Country / Region": "Country or region associated with the drama content.",
+    "Drama / Show Title": "Detected title of the drama or show.",
+    "Detected Audio": "Audio or track detected in the post.",
+    "Audio Version": "Detected version of the audio, such as original or sped up.",
+    "Followers": "Follower count available for the creator.",
+    "Current Followers": "Latest follower count retrieved from the creator profile.",
+    "KOL Size": "Creator tier calculated from follower count and market rules.",
+    "Posts (3m)": "Reachable public profile posts used from the latest three months.",
+    "Avg. Views (3m)": "Average views across the creator's reachable profile posts from the latest three months.",
+    "Avg. ER (3m)": "Average engagement rate across the creator's reachable profile posts from the latest three months.",
+    "Posts": "Number of posts represented by this row in the current filtered dashboard.",
+    "Views": "Views returned for this post.",
+    "Total Views": "Total views from this creator's posts in the current filtered dashboard, not a three-month profile total.",
+    "Average Views": "Average views per post represented by this row.",
+    "Likes": "Likes returned for this post.",
+    "Comments": "Comments returned for this post.",
+    "Shares": "Shares returned for this post when the platform provides them.",
+    "Saves": "Saves returned for this post when the platform provides them.",
+    "Total Engagement": "Total available engagement from the posts represented by this row.",
+    "Average Engagement": "Average available engagement per post represented by this row.",
+    "Average Engagements": "Average available engagement per post represented by this row.",
+    "Engagement Rate": "Available engagement divided by views for this post.",
+    "Average Engagement Rate": "Average post-level engagement rate for this row.",
+    "Avg. ER": "Average engagement rate across this creator's posts in the current filtered dashboard.",
+    "Likes Rate": "Average likes as a percentage of views.",
+    "Comments Rate": "Average comments as a percentage of views.",
+    "Shares Rate": "Average shares as a percentage of views when available.",
+    "Saves Rate": "Average saves as a percentage of views when available.",
+    "Link": "Open or update the source post link.",
+}
+
+
+def summary_column_help_v68_80(column: str) -> str:
+    """Return concise native header help for every Summary table column."""
+    return SUMMARY_COLUMN_HELP_V68_80.get(
+        column,
+        f"{column} shown for this summary row.",
+    )
+
+
+def summary_column_config_v68_80(table: pd.DataFrame) -> Dict[str, object]:
+    """Build editable column definitions with a help tooltip on every header."""
+    column_config: Dict[str, object] = {}
+    for column in table.columns:
+        help_text = summary_column_help_v68_80(column)
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(
+                column,
+                format="localized",
+                help=help_text,
+            )
+        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
+            column_config[column] = st.column_config.NumberColumn(
+                column,
+                format="%.2f%%",
+                help=help_text,
+            )
+        elif column == "Link":
+            column_config[column] = st.column_config.LinkColumn(
+                "Link",
+                display_text="Open post",
+                help=help_text,
+            )
+        elif column == "Creator Profile":
+            column_config[column] = st.column_config.LinkColumn(
+                "Creator",
+                display_text=r"https://(?:www\.)?(?:tiktok\.com/@|instagram\.com/)([^/?#]+)",
+                pinned=True,
+                help=help_text,
+            )
+        else:
+            column_config[column] = st.column_config.TextColumn(
+                column,
+                help=help_text,
+                width="large" if column in {"Narrative", "Visual Summary"} else None,
+            )
+    return column_config
+
 
 def _summary_selected_cell_v68_71(event, table: pd.DataFrame) -> Dict[str, object]:
     """Return one safe table value from a native Streamlit cell selection."""
@@ -5536,56 +5632,26 @@ def render_sortable_summary_table_v68_46(
     key: Optional[str] = None,
     clickable_columns: Optional[Dict[str, str]] = None,
 ):
-    """Render a Summary table with native ascending/descending header sorting."""
+    """Render an editable Summary table with native sortable headers."""
     table = prepare_sortable_summary_table_v68_46(df, columns)
     if table.empty:
         st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
         return {}
 
-    column_config = {}
-    for column in table.columns:
-        if column in SUMMARY_INTEGER_COLUMNS_V68_46:
-            column_config[column] = st.column_config.NumberColumn(column, format="localized")
-        elif column in SUMMARY_PERCENT_COLUMNS_V68_46:
-            column_config[column] = st.column_config.NumberColumn(column, format="%.2f%%")
-    if "Link" in table.columns:
-        column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open post")
-    if "Creator Profile" in table.columns:
-        column_config["Creator Profile"] = st.column_config.LinkColumn(
-            "Creator",
-            display_text=r"https://(?:www\.)?(?:tiktok\.com/@|instagram\.com/)([^/?#]+)",
-            pinned=True,
-        )
-    if "Edit" in table.columns:
-        column_config["Edit"] = st.column_config.TextColumn(
-            "Edit",
-            help="Select this cell, then use the edit button below the table.",
-            pinned=True,
-        )
-    if "Narrative" in table.columns:
-        column_config["Narrative"] = st.column_config.TextColumn(
-            "Narrative",
-            help="The post's storyline or narrative angle.",
-            width="large",
-        )
+    column_config = summary_column_config_v68_80(table)
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
-    interactive = bool(key and clickable_columns)
-    event = st.dataframe(
+    editor_key = f"{key or 'summary_table'}_editor_v68_80"
+    st.data_editor(
         table,
         hide_index=True,
         width="stretch",
         height=38 + (visible_rows * 35),
         column_config=column_config,
-        key=key,
-        on_select="rerun" if interactive else "ignore",
-        selection_mode="single-cell" if interactive else "multi-row",
+        num_rows="fixed",
+        key=editor_key,
     )
-    selected = _summary_selected_cell_v68_71(event, table) if interactive else {}
-    if not selected or selected.get("column") not in clickable_columns:
-        return selected
-    selected["filter_column"] = clickable_columns[selected["column"]]
-    return selected
+    return {}
 
 
 def summary_creative_type_cell_v68_73(row: pd.Series) -> str:
@@ -5765,28 +5831,34 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
         return
 
-    column_config = {
-        column: st.column_config.NumberColumn(
-            column,
-            format="%.2f%%" if column in SUMMARY_PERCENT_COLUMNS_V68_46 else "localized",
-            min_value=(
-                0
-                if column in {"Followers", "Views", "Total Engagement"}
-                else None
-            ),
-            step=(
-                1
-                if column in {"Followers", "Views", "Total Engagement"}
-                else None
-            ),
-        )
-        for column in table.columns
-        if column in SUMMARY_INTEGER_COLUMNS_V68_46
-        or column in SUMMARY_PERCENT_COLUMNS_V68_46
-    }
+    column_config = summary_column_config_v68_80(table)
+    for column in table.columns:
+        if (
+            column in SUMMARY_INTEGER_COLUMNS_V68_46
+            or column in SUMMARY_PERCENT_COLUMNS_V68_46
+        ):
+            column_config[column] = st.column_config.NumberColumn(
+                column,
+                format=(
+                    "%.2f%%"
+                    if column in SUMMARY_PERCENT_COLUMNS_V68_46
+                    else "localized"
+                ),
+                help=summary_column_help_v68_80(column),
+                min_value=(
+                    0
+                    if column in {"Followers", "Views", "Total Engagement"}
+                    else None
+                ),
+                step=(
+                    1
+                    if column in {"Followers", "Views", "Total Engagement"}
+                    else None
+                ),
+            )
     column_config["Creative Type"] = st.column_config.TextColumn(
         "Creative Type",
-        help="Click to edit the post's broad creative label.",
+        help=summary_column_help_v68_80("Creative Type"),
         width="medium",
     )
     if "Drama Detail" in table.columns:
@@ -5800,13 +5872,14 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         )
     column_config["Narrative"] = st.column_config.TextColumn(
         "Narrative",
-        help="Click a cell to edit the post narrative.",
+        help=summary_column_help_v68_80("Narrative"),
         width="large",
     )
     if "Link" in table.columns:
         column_config["Link"] = st.column_config.LinkColumn(
             "Link",
             display_text="Open post",
+            help=summary_column_help_v68_80("Link"),
         )
 
     index_signature = hashlib.sha1(
@@ -6777,17 +6850,6 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         for profile_column in ["Posts (3m)", "Avg. Views (3m)", "Avg. ER (3m)"]:
             if profile_column not in display_table.columns:
                 display_table[profile_column] = pd.NA
-
-        st.markdown(
-            "**How to read this table**  \n"
-            "**Latest 3-month profile:** **Posts (3m)** = reachable public profile "
-            "posts used; **Avg. Views (3m)** and **Avg. ER (3m)** are averages across "
-            "those posts.  \n"
-            "**Current filtered batch:** **Posts** = posts by the creator in this "
-            "dashboard; **Total Views** and **Total Engagement** are totals from those "
-            "batch posts; **Avg. ER** is their average engagement rate. Total Views is "
-            "not a three-month profile total."
-        )
 
         creator_click = render_sortable_summary_table_v68_46(
             display_table,
