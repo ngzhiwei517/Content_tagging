@@ -5352,7 +5352,7 @@ def summary_column_config_v68_80(table: pd.DataFrame) -> Dict[str, object]:
     return column_config
 
 
-def _summary_selected_cell_v68_71(event, table: pd.DataFrame) -> Dict[str, object]:
+def _summary_selected_cell_v68_71(event, table: pd.DataFrame) -> dict[str, object]:
     """Return one safe table value from a native Streamlit cell selection."""
     if event is None or table is None or table.empty:
         return {}
