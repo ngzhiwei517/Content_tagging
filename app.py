@@ -4899,19 +4899,6 @@ def filter_summary_by_creative_types_v68_75(
     return df.loc[mask].copy()
 
 
-def _sync_summary_type_dropdown_from_quick_v68_75() -> None:
-    """Keep the one-click shortcut and existing Creative Type filter aligned."""
-    selected = safe_str(st.session_state.get("summary_type_quick_v68_75"))
-    st.session_state.summary_type_multi_v68_50 = [selected] if selected else []
-
-
-def _sync_summary_type_quick_from_dropdown_v68_75() -> None:
-    """Reflect a single dropdown choice in the shortcut; multi-select stays advanced."""
-    selected = st.session_state.get("summary_type_multi_v68_50", [])
-    selected = list(selected) if isinstance(selected, (list, tuple, set)) else []
-    st.session_state.summary_type_quick_v68_75 = selected[0] if len(selected) == 1 else None
-
-
 def summary_kpi_row(items: List[Tuple[str, str, str, str]]) -> str:
     """Colored KPI cards for marketing Summary page."""
     cards = []
@@ -5624,24 +5611,134 @@ def prepare_sortable_summary_table_v68_46(
     return table
 
 
+def summary_local_filter_options_v68_81(
+    table: pd.DataFrame,
+    column: str,
+) -> List[str]:
+    """Return compact, user-facing values for one table-local filter."""
+    if table is None or table.empty or column not in table.columns:
+        return []
+    if column == "Creative Type":
+        values = {
+            label
+            for value in table[column].fillna("").tolist()
+            for label in split_creative_labels(value)
+            if safe_str(label)
+        }
+    else:
+        values = {
+            safe_str(value)
+            for value in table[column].tolist()
+            if safe_str(value) and safe_str(value) not in {"None", "nan", "<NA>"}
+        }
+    return sorted(values, key=str.casefold)
+
+
+def filter_summary_table_rows_v68_81(
+    table: pd.DataFrame,
+    column: str,
+    selected_value,
+) -> pd.DataFrame:
+    """Filter one Summary grid without changing dashboard-wide data."""
+    selected = safe_str(selected_value)
+    if table is None or table.empty or column not in table.columns or not selected:
+        return table.copy()
+    if column == "Creative Type":
+        mask = table[column].fillna("").map(
+            lambda value: selected in split_creative_labels(value)
+        )
+    else:
+        mask = table[column].map(safe_str).eq(selected)
+    return table.loc[mask].copy()
+
+
+def render_local_summary_filter_v68_81(
+    table: pd.DataFrame,
+    *,
+    key: str,
+    filter_columns: List[str],
+) -> Tuple[pd.DataFrame, str]:
+    """Render a filter that belongs only to the table immediately below it."""
+    available_columns = [
+        column
+        for column in filter_columns
+        if len(summary_local_filter_options_v68_81(table, column)) > 1
+    ]
+    if not available_columns:
+        return table.copy(), "all"
+
+    column_key = f"{key}_local_filter_column_v68_81"
+    if st.session_state.get(column_key) not in available_columns:
+        st.session_state.pop(column_key, None)
+    selector_col, value_col = st.columns([1, 3], vertical_alignment="bottom")
+    with selector_col:
+        selected_column = st.selectbox(
+            "Filter this table by",
+            available_columns,
+            key=column_key,
+            help="This selection changes only this table.",
+        )
+
+    options = summary_local_filter_options_v68_81(table, selected_column)
+    column_token = hashlib.sha1(selected_column.encode("utf-8")).hexdigest()[:8]
+    value_key = f"{key}_local_filter_value_v68_81_{column_token}"
+    selected_value = st.session_state.get(value_key)
+    if safe_str(selected_value) not in options:
+        st.session_state.pop(value_key, None)
+    with value_col:
+        if len(options) <= 14:
+            selected_value = st.pills(
+                f"Show {selected_column}",
+                options,
+                selection_mode="single",
+                key=value_key,
+                help="Choose one value to narrow this table. Click it again to show all rows.",
+                width="stretch",
+            )
+        else:
+            selected_value = st.selectbox(
+                f"Show {selected_column}",
+                ["All"] + options,
+                key=value_key,
+                help="Choose one value to narrow this table.",
+            )
+            if selected_value == "All":
+                selected_value = None
+
+    signature_source = f"{selected_column}|{safe_str(selected_value) or 'all'}"
+    signature = hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:10]
+    return (
+        filter_summary_table_rows_v68_81(table, selected_column, selected_value),
+        signature,
+    )
+
+
 def render_sortable_summary_table_v68_46(
     df: pd.DataFrame,
     *,
     columns: List[str],
     max_visible_rows: int,
     key: Optional[str] = None,
-    clickable_columns: Optional[Dict[str, str]] = None,
+    local_filter_columns: Optional[List[str]] = None,
 ):
     """Render an editable Summary table with native sortable headers."""
     table = prepare_sortable_summary_table_v68_46(df, columns)
+    table, filter_signature = render_local_summary_filter_v68_81(
+        table,
+        key=key or "summary_table",
+        filter_columns=local_filter_columns or [],
+    )
     if table.empty:
-        st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='empty-panel'>No rows match this table filter.</div>",
+            unsafe_allow_html=True,
+        )
         return {}
 
     column_config = summary_column_config_v68_80(table)
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
-    editor_key = f"{key or 'summary_table'}_editor_v68_80"
+    editor_key = f"{key or 'summary_table'}_editor_v68_81_{filter_signature}"
     st.data_editor(
         table,
         hide_index=True,
@@ -5827,8 +5924,23 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
         top_posts,
         editor_columns,
     )
+    table, filter_signature = render_local_summary_filter_v68_81(
+        table,
+        key="summary_top_posts_table_v68_71",
+        filter_columns=[
+            "Creative Type",
+            "Platform",
+            "Market",
+            "Track",
+            "KOL Size",
+            "Creator",
+        ],
+    )
     if table.empty:
-        st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='empty-panel'>No rows match this table filter.</div>",
+            unsafe_allow_html=True,
+        )
         return
 
     column_config = summary_column_config_v68_80(table)
@@ -5909,7 +6021,10 @@ def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
             }
         ],
         num_rows="fixed",
-        key=f"summary_top_posts_editor_v68_73_{index_signature}",
+        key=(
+            "summary_top_posts_editor_v68_81_"
+            f"{filter_signature}_{index_signature}"
+        ),
     )
     updated, changed_rows = apply_summary_post_edits_v68_73(
         st.session_state.get("tagged_df", pd.DataFrame()),
@@ -6851,18 +6966,13 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             if profile_column not in display_table.columns:
                 display_table[profile_column] = pd.NA
 
-        creator_click = render_sortable_summary_table_v68_46(
+        render_sortable_summary_table_v68_46(
             display_table,
             columns=TOP_CREATOR_TABLE_COLUMNS_V68_71,
             max_visible_rows=15,
             key="summary_creator_table_v68_71",
-            clickable_columns={
-                "Country": "Market Display",
-                "Platform": "Platform Display",
-                "KOL Size": "KOL Size Display",
-            },
+            local_filter_columns=["Platform", "Country", "KOL Size", "Creator"],
         )
-        _consume_summary_table_click_v68_71(creator_click)
 
 
 def bar_list(df: pd.DataFrame, label_col: str, value_col: str, max_rows: int = 10, value_suffix: str = "", show_share: bool = False) -> str:
@@ -8518,21 +8628,9 @@ elif st.session_state.step == 6:
     )
     work["KOL Size Display"] = work["KOL Size"].map(lambda x: display_empty(x, "Unknown"))
 
-    # Retain the existing combined filters. The shortcut below drives the same
-    # Creative Type state, so it cannot conflict with the advanced dropdown.
+    # Retain the existing combined dashboard filters. Each table also has its
+    # own local filter, which never changes these dashboard-wide results.
     creative_type_options = summary_creative_type_options_v68_75(work)
-    stored_quick_type = safe_str(
-        st.session_state.get("summary_type_quick_v68_75")
-    )
-    if stored_quick_type and stored_quick_type not in creative_type_options:
-        st.session_state.summary_type_quick_v68_75 = None
-    if "summary_type_quick_v68_75" not in st.session_state:
-        stored_type_filters = st.session_state.get("summary_type_multi_v68_50", [])
-        if isinstance(stored_type_filters, (list, tuple)) and len(stored_type_filters) == 1:
-            selected_type = safe_str(stored_type_filters[0])
-            st.session_state.summary_type_quick_v68_75 = (
-                selected_type if selected_type in creative_type_options else None
-            )
 
     f0, f1, f2, f3, f4, f5 = st.columns(6)
     with f0:
@@ -8569,7 +8667,6 @@ elif st.session_state.step == 6:
             creative_type_options,
             key="summary_type_multi_v68_50",
             placeholder="All",
-            on_change=_sync_summary_type_quick_from_dropdown_v68_75,
         )
     with f5:
         kol_size_filters = st.multiselect(
@@ -8579,22 +8676,12 @@ elif st.session_state.step == 6:
             placeholder="All",
         )
 
-    st.pills(
-        "Quick creative type",
-        creative_type_options,
-        key="summary_type_quick_v68_75",
-        selection_mode="single",
-        on_change=_sync_summary_type_dropdown_from_quick_v68_75,
-        help="One-click shortcut for the Creative Type filter above. Click the selected type again to show all.",
-    )
-
     focus_metric = "Views"
     sort_order = "Highest first"
     st.caption(
-        "Use the filters above or a Creative Type shortcut to update the whole "
-        "dashboard. Multi-label posts appear under every matching type."
+        "The filters above update the whole dashboard. Filters placed directly "
+        "above a table update only that table."
     )
-    active_drilldown = st.session_state.get("summary_drilldown_v68_71", {})
     filtered = work.copy()
     for filter_column, selected_values in [
         ("Platform Display", platform_filters),
@@ -8609,17 +8696,6 @@ elif st.session_state.step == 6:
             selected_values,
         )
     filtered = filter_summary_by_creative_types_v68_75(filtered, type_filters)
-    filtered = _apply_summary_drilldown_v68_71(filtered, active_drilldown)
-    if isinstance(active_drilldown, dict) and safe_str(active_drilldown.get("value")):
-        drilldown_label = safe_str(active_drilldown.get("label")) or "Selection"
-        drilldown_value = safe_str(active_drilldown.get("value"))
-        drilldown_text, drilldown_clear = st.columns([5, 1])
-        with drilldown_text:
-            st.info(f"Showing {drilldown_label}: {drilldown_value}")
-        with drilldown_clear:
-            if st.button("Show all", width="stretch", key="summary_clear_drilldown_v68_71"):
-                _reset_summary_click_state_v68_71(clear_drilldown=True)
-                st.rerun()
 
     total_views = int(filtered["Views"].sum())
     total_eng = int(filtered["Total Engagement"].sum())
@@ -8680,14 +8756,13 @@ elif st.session_state.step == 6:
             "Average_Saves_Rate": "Saves Rate",
         })
         platform_summary = sort_summary_performance_v68_18(platform_summary, focus_metric, sort_order)
-        platform_click = render_sortable_summary_table_v68_46(
+        render_sortable_summary_table_v68_46(
             platform_summary,
             columns=["Platform", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
             max_visible_rows=4,
             key="summary_platform_table_v68_71",
-            clickable_columns={"Platform": "Platform Display"},
+            local_filter_columns=["Platform"],
         )
-        _consume_summary_table_click_v68_71(platform_click)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='card'>" + section_title("Market Summary", "#10b981"), unsafe_allow_html=True)
@@ -8703,14 +8778,13 @@ elif st.session_state.step == 6:
         market_summary = sort_summary_performance_v68_18(
             market_summary, focus_metric, sort_order
         )
-        market_click = render_sortable_summary_table_v68_46(
+        render_sortable_summary_table_v68_46(
             market_summary,
             columns=["Market", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
             max_visible_rows=12,
             key="summary_market_table_v68_71",
-            clickable_columns={"Market": "Market Display"},
+            local_filter_columns=["Market"],
         )
-        _consume_summary_table_click_v68_71(market_click)
     else:
         st.markdown("<div class='empty-panel'>No market data provided. Rows without market are grouped as Other.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -8728,14 +8802,13 @@ elif st.session_state.step == 6:
     campaign_summary = sort_summary_performance_v68_18(
         campaign_summary, focus_metric, sort_order
     )
-    track_click = render_sortable_summary_table_v68_46(
+    render_sortable_summary_table_v68_46(
         campaign_summary,
         columns=["Track", "Artist", "Posts", "Average Views", "Average Engagements", "Average Engagement Rate", "Shares Rate", "Saves Rate"],
         max_visible_rows=12,
         key="summary_track_table_v68_71",
-        clickable_columns={"Track": "Track Display"},
+        local_filter_columns=["Track", "Artist"],
     )
-    _consume_summary_table_click_v68_71(track_click)
     st.markdown("</div>", unsafe_allow_html=True)
 
     original_sound_values = filtered["Original Sound"].map(safe_str)
@@ -8763,7 +8836,7 @@ elif st.session_state.step == 6:
         sound_summary = sort_summary_performance_v68_18(
             sound_summary, focus_metric, sort_order
         )
-        sound_click = render_sortable_summary_table_v68_46(
+        render_sortable_summary_table_v68_46(
             sound_summary,
             columns=[
                 "Market", "Campaign Track", "Original Sound", "Posts",
@@ -8772,12 +8845,8 @@ elif st.session_state.step == 6:
             ],
             max_visible_rows=12,
             key="summary_sound_table_v68_71",
-            clickable_columns={
-                "Market": "Market Display",
-                "Campaign Track": "Track Display",
-            },
+            local_filter_columns=["Market", "Campaign Track", "Original Sound"],
         )
-        _consume_summary_table_click_v68_71(sound_click)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Interactive creative-type summary. The mix retains post counts while the
@@ -8816,18 +8885,19 @@ elif st.session_state.step == 6:
                 "Creative Type is the broad label; Content Subtype and the fields "
                 "below provide the detailed drama classification."
             )
-            drama_click = render_sortable_summary_table_v68_46(
+            render_sortable_summary_table_v68_46(
                 drama_details,
                 columns=DRAMA_DETAIL_TABLE_COLUMNS_V68_71,
                 max_visible_rows=15,
                 key="summary_drama_details_table_v68_71",
-                clickable_columns={
-                    "Creative Type": "Primary Creative Type",
-                    "Content Subtype": "Drama Content Category Display",
-                    "Creator": "Creator",
-                },
+                local_filter_columns=[
+                    "Creative Type",
+                    "Content Subtype",
+                    "Drama Type",
+                    "Country/Region",
+                    "Creator",
+                ],
             )
-            _consume_summary_table_click_v68_71(drama_click)
 
     # Keep creator contribution last among the analytical sections.
     render_top_creator_performance_v68_47(filtered)

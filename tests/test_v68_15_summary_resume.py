@@ -92,6 +92,12 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.prepare_summary_table = staticmethod(load_function("prepare_sortable_summary_table_v68_46", namespace))
         namespace["prepare_sortable_summary_table_v68_46"] = cls.prepare_summary_table
         namespace["split_creative_labels"] = load_function("split_creative_labels", namespace)
+        cls.summary_local_filter_options = staticmethod(
+            load_function("summary_local_filter_options_v68_81", namespace)
+        )
+        cls.filter_summary_table_rows = staticmethod(
+            load_function("filter_summary_table_rows_v68_81", namespace)
+        )
         namespace["RETIRED_CREATIVE_TYPES"] = set()
         namespace["operational_creative_type"] = load_function("operational_creative_type", namespace)
         cls.summary_creative_type_cell = staticmethod(
@@ -278,14 +284,14 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         self.assertEqual(filtered["Link"].tolist(), ["a", "b"])
 
-    def test_quick_creative_filter_is_synced_with_existing_dropdown(self):
+    def test_global_quick_filter_is_removed_and_dashboard_dropdown_remains(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         filter_block = step_six.split(
-            "# Retain the existing combined filters", 1
+            "# Retain the existing combined dashboard filters", 1
         )[1].split("total_views =", 1)[0]
-        self.assertIn('"Quick creative type"', filter_block)
-        self.assertIn('key="summary_type_quick_v68_75"', filter_block)
-        self.assertIn("_sync_summary_type_dropdown_from_quick_v68_75", filter_block)
+        self.assertNotIn('"Quick creative type"', filter_block)
+        self.assertNotIn('key="summary_type_quick_v68_75"', filter_block)
+        self.assertIn('key="summary_type_multi_v68_50"', filter_block)
         self.assertIn("filter_summary_by_creative_types_v68_75", filter_block)
         self.assertNotIn(
             '("Primary Creative Type", type_filters)',
@@ -295,11 +301,12 @@ class SummaryV6815Tests(unittest.TestCase):
     def test_summary_ui_keeps_dropdowns_and_uses_editable_tables(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         filter_block = step_six.split(
-            "# Retain the existing combined filters", 1
+            "# Retain the existing combined dashboard filters", 1
         )[1].split("total_views =", 1)[0]
         self.assertIn("st.multiselect(", filter_block)
-        self.assertIn("summary_drilldown_v68_71", filter_block)
+        self.assertNotIn("summary_drilldown_v68_71", filter_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
+        self.assertIn("render_local_summary_filter_v68_81(", APP_SOURCE)
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         for key in [
             "summary_platform_table_v68_71",
@@ -309,6 +316,48 @@ class SummaryV6815Tests(unittest.TestCase):
         ]:
             self.assertIn(key, step_six)
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", step_six)
+
+    def test_table_local_filter_matches_exact_and_multilabel_values(self):
+        rows = pd.DataFrame({
+            "Platform": ["TikTok", "Instagram Reels", "TikTok"],
+            "Creative Type": [
+                "Comedy, Slice of Life",
+                "Beauty",
+                "Slice of Life",
+            ],
+        })
+        self.assertEqual(
+            self.summary_local_filter_options(rows, "Creative Type"),
+            ["Beauty", "Comedy", "Slice of Life"],
+        )
+        self.assertEqual(
+            self.filter_summary_table_rows(
+                rows, "Creative Type", "Slice of Life"
+            ).index.tolist(),
+            [0, 2],
+        )
+        self.assertEqual(
+            self.filter_summary_table_rows(rows, "Platform", "TikTok").index.tolist(),
+            [0, 2],
+        )
+
+    def test_each_summary_table_declares_local_filter_columns(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        for title in [
+            "Platform Summary",
+            "Market Summary",
+            "Track Summary",
+            "Sound Breakdown",
+            "Top Posts",
+            "Drama Details",
+        ]:
+            with self.subTest(title=title):
+                section = step_six.split(f'section_title("{title}"', 1)[1]
+                self.assertIn("local_filter_columns", section)
+        creator_function = APP_SOURCE.split(
+            "def render_top_creator_performance_v68_47", 1
+        )[1].split("def bar_list", 1)[0]
+        self.assertIn("local_filter_columns", creator_function)
 
     def test_top_creator_table_uses_requested_profile_and_batch_columns(self):
         expected = [

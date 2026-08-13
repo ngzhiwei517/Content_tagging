@@ -173,7 +173,8 @@ class SummaryCopyContractTests(unittest.TestCase):
         ]:
             with self.subTest(widget_key=widget_key):
                 self.assertIn(widget_key, APP_SOURCE)
-        self.assertIn("summary_drilldown_v68_71", APP_SOURCE)
+        self.assertIn("render_local_summary_filter_v68_81", APP_SOURCE)
+        self.assertNotIn('"Quick creative type"', APP_SOURCE)
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         renderer = APP_SOURCE.split(
             "def render_sortable_summary_table_v68_46", 1
