@@ -86,7 +86,7 @@ class SummaryV6815Tests(unittest.TestCase):
         }
         namespace["TOP_POST_TABLE_COLUMNS_V68_46"] = [
             "Edit", "Platform", "Creator", "Market", "Track", "Creative Type",
-            "Content Subtype",
+            "Narrative", "Content Subtype",
             "Followers", "KOL Size", "Views", "Total Engagement",
             "Engagement Rate", "Link",
         ]
@@ -389,12 +389,14 @@ class SummaryV6815Tests(unittest.TestCase):
             {
                 "Platform": "TikTok", "Creator": "a", "Market Display": "MY",
                 "Track Display": "Song", "Creative Type": "Performance",
+                "Narrative": "A creator performs the song for the camera.",
                 "Followers": "41,700", "KOL Size": "Micro", "Views": "8,300,000",
                 "Total Engagement": "84,583", "Link": "https://example.com/a",
             },
             {
                 "Platform": "TikTok", "Creator": "b", "Market Display": "SG",
                 "Track Display": "Song", "Creative Type": "Dance",
+                "Narrative": "Friends perform a coordinated dance.",
                 "Followers": "51,500", "KOL Size": "Macro", "Views": "8,200,000",
                 "Total Engagement": "61,659", "Link": "https://example.com/b",
             },
@@ -406,7 +408,17 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn(top_posts["Total Engagement"].dtype.kind, "iu")
         self.assertIn(top_posts["Engagement Rate"].dtype.kind, "f")
         self.assertEqual(top_posts.iloc[0]["Market"], "MY")
+        self.assertEqual(
+            top_posts.iloc[0]["Narrative"],
+            "A creator performs the song for the camera.",
+        )
         self.assertEqual(top_posts.iloc[0]["Link"], "https://example.com/a")
+
+    def test_narrative_is_shown_only_in_top_posts(self):
+        self.assertIn('"Creative Type",\n    "Narrative",\n    "Content Subtype",', APP_SOURCE)
+        creator_columns = APP_SOURCE.split("TOP_CREATOR_TABLE_COLUMNS_V68_71 = [", 1)[1].split("]", 1)[0]
+        self.assertNotIn('"Narrative"', creator_columns)
+        self.assertIn('column_config["Narrative"]', APP_SOURCE)
 
     def test_top_posts_use_native_clickable_header_table(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]

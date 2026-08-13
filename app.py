@@ -4903,6 +4903,7 @@ TOP_POST_TABLE_COLUMNS_V68_46 = [
     "Market",
     "Track",
     "Creative Type",
+    "Narrative",
     "Content Subtype",
     "Followers",
     "KOL Size",
@@ -5247,6 +5248,12 @@ def render_sortable_summary_table_v68_46(
             help="Select this cell, then use the edit button below the table.",
             pinned=True,
         )
+    if "Narrative" in table.columns:
+        column_config["Narrative"] = st.column_config.TextColumn(
+            "Narrative",
+            help="The post's storyline or narrative angle.",
+            width="large",
+        )
 
     visible_rows = min(max(len(table), 1), max_visible_rows)
     interactive = bool(key and clickable_columns)
@@ -5278,6 +5285,10 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
         top_posts["Market"] = top_posts["Market Display"]
     if "Track Display" in top_posts.columns:
         top_posts["Track"] = top_posts["Track Display"]
+    top_posts["Narrative"] = top_posts.get(
+        "Narrative",
+        pd.Series("", index=top_posts.index, dtype=str),
+    ).map(lambda value: display_empty(value, "Not specified"))
     if "Drama Content Category Display" in top_posts.columns:
         top_posts["Content Subtype"] = top_posts["Drama Content Category Display"].replace(
             "Not applicable", ""
@@ -8086,8 +8097,8 @@ elif st.session_state.step == 6:
             )
             st.caption(
                 "Click Platform, Creator, Market, Track, Creative Type, Content "
-                "Subtype, or KOL Size to show related posts. Select Edit to "
-                "change that post's labels and details."
+                "Subtype, or KOL Size to show related posts and their narratives. "
+                "Select Edit to change that post's labels and details."
             )
             if selected_summary_post:
                 if st.button(
