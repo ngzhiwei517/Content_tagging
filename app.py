@@ -3417,7 +3417,7 @@ def _create_batch_checkpoint_store_v68_48(
 
 
 def _large_batch_store_v68_43() -> BatchCheckpointStore:
-    """Return the durable store used for every large tagging selection."""
+    """Return the durable store used for every tagging selection."""
     runtime_id = _valid_runtime_id_v68_15(
         st.session_state.get("runtime_run_id_v68_15")
     )
@@ -3428,11 +3428,8 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 
 
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
-    """Protect any selection too large for one bounded Apify request."""
-    return (
-        isinstance(selected, pd.DataFrame)
-        and len(selected) > MAX_APIFY_POSTS_PER_EXECUTION_V68_54
-    )
+    """Protect every non-empty selection from a Streamlit reconnect."""
+    return isinstance(selected, pd.DataFrame) and not selected.empty
 
 
 def _large_batch_manifest_v68_43(selected: pd.DataFrame) -> Optional[Dict]:
@@ -3805,7 +3802,7 @@ def _run_checkpointed_tag_every_link_v68_43(
     apify_token: str,
     comparison_model: str,
 ) -> Optional[pd.DataFrame]:
-    """Process one 50-row scrape chunk with a checkpoint after every tagged row.
+    """Process one bounded scrape chunk with a checkpoint after every tagged row.
 
     ``None`` means that a chunk completed and more chunks remain.  An empty
     DataFrame means the current attempt failed and should wait for the user to
@@ -3840,7 +3837,7 @@ def _run_checkpointed_tag_every_link_v68_43(
             requested_rows=len(selected),
         )
     except Exception as exc:
-        st.error(f"Could not create the large-batch checkpoint: {exc}")
+        st.error(f"Could not create the tagging checkpoint: {exc}")
         return pd.DataFrame()
 
     st.session_state.comparison_run_id_v68_41_4 = safe_str(
@@ -3895,7 +3892,7 @@ def _run_checkpointed_tag_every_link_v68_43(
     chunk_number = next_chunk_index + 1
     chunk = store.chunk_frame(execution_rows, manifest, next_chunk_index)
     status = st.status(
-        f"Large batch: chunk {chunk_number} of {total_chunks}",
+        f"Saved tagging: step {chunk_number} of {total_chunks}",
         expanded=True,
     )
     status.write(
@@ -4198,7 +4195,7 @@ def _run_checkpointed_tag_every_link_v68_43(
     except Exception as exc:
         error_code = _large_batch_error_code_v68_43(exc)
         LOGGER.exception(
-            "Large-batch tagging paused. code=%s saved=%s total=%s",
+            "Checkpointed tagging paused. code=%s saved=%s total=%s",
             error_code,
             len(store.load_saved_results(manifest)),
             total_rows,
@@ -4214,7 +4211,7 @@ def _run_checkpointed_tag_every_link_v68_43(
         if not partial.empty:
             st.session_state.tagged_df = partial
         _persist_runtime_checkpoint_v68_15()
-        status.update(label="Large-batch tagging paused", state="error", expanded=True)
+        status.update(label="Tagging paused safely", state="error", expanded=True)
         saved_count = int(manifest.get("saved_rows", len(partial)))
         if quota_pause:
             st.error(
@@ -5045,9 +5042,13 @@ def render_taggy_assistant_v68_76(
                 messages.append({"role": "user", "content": question})
 
                 answer = page_help_answer(int(step), question)
+                # This assistant reruns as a fragment, so a replacement key in
+                # Streamlit Secrets may be newer than the browser-session copy.
+                # Prefer the current managed key and retain the session value as
+                # the local/manual fallback only.
                 gemini_key = clean_api_secret(
-                    st.session_state.get("gemini_key")
-                    or _managed_api_secret_v68_43("GEMINI_API_KEY")
+                    _managed_api_secret_v68_43("GEMINI_API_KEY")
+                    or st.session_state.get("gemini_key")
                 )
                 if not answer and not gemini_key:
                     answer = (
@@ -7672,7 +7673,7 @@ elif st.session_state.step == 4:
             )
         )
         st.info(
-            "Large-batch protection is on. Progress is saved automatically"
+            "Restart protection is on. Progress is saved automatically"
             + (
                 f"; {completed_count:,} of {len(selected):,} posts are already complete."
                 if completed_count
@@ -7755,8 +7756,8 @@ elif st.session_state.step == 4:
                     execution_owner,
                 )
         if tagged_result is None:
-            # Each large-batch chunk runs in a fresh Streamlit execution. This
-            # avoids one 800-row request monopolising a single script run.
+            # Each bounded unit runs in a fresh Streamlit execution. This keeps
+            # every run restart-safe without monopolising one script execution.
             if expected_large_job_id:
                 _set_tagging_continue_query_v68_55(expected_large_job_id)
             st.rerun()
