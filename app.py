@@ -1283,10 +1283,13 @@ TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
 # Keep each live Streamlit execution deliberately short. The durable manifest
 # still uses 50-row chunks for backward-compatible recovery, while only this
 # many unfinished rows are analysed before yielding to a fresh script run.
-MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5
+# Ten halves the rerun overhead without returning to the longer execution
+# window that previously exposed Streamlit Cloud sessions to restarts.
+MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 10
 # Apify media collection can exceed Streamlit Cloud's execution window when a
 # whole campaign is submitted at once. Save each smaller scrape window before
-# yielding, then save every five completed Gemini rows to persistent storage.
+# yielding, keep every completed Gemini row restart-safe, and compact the
+# remote partial snapshot every five rows.
 MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
 REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
