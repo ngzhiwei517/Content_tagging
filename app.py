@@ -5042,9 +5042,13 @@ def render_taggy_assistant_v68_76(
                 messages.append({"role": "user", "content": question})
 
                 answer = page_help_answer(int(step), question)
+                # This assistant reruns as a fragment, so a replacement key in
+                # Streamlit Secrets may be newer than the browser-session copy.
+                # Prefer the current managed key and retain the session value as
+                # the local/manual fallback only.
                 gemini_key = clean_api_secret(
-                    st.session_state.get("gemini_key")
-                    or _managed_api_secret_v68_43("GEMINI_API_KEY")
+                    _managed_api_secret_v68_43("GEMINI_API_KEY")
+                    or st.session_state.get("gemini_key")
                 )
                 if not answer and not gemini_key:
                     answer = (

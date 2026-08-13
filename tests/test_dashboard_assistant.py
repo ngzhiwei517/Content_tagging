@@ -66,6 +66,17 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("importlib.reload(_dashboard_assistant)", APP_SOURCE)
         self.assertIn('"PAGE_CHAT_SUGGESTIONS"', APP_SOURCE)
 
+    def test_taggy_prefers_the_current_managed_gemini_key(self):
+        taggy_start = APP_SOURCE.index("def render_taggy_assistant_v68_76")
+        taggy_end = APP_SOURCE.index("def aggregate_summary_performance_v68_15", taggy_start)
+        taggy_source = APP_SOURCE[taggy_start:taggy_end]
+        managed_key = '_managed_api_secret_v68_43("GEMINI_API_KEY")'
+        session_key = 'st.session_state.get("gemini_key")'
+
+        self.assertIn(managed_key, taggy_source)
+        self.assertIn(session_key, taggy_source)
+        self.assertLess(taggy_source.index(managed_key), taggy_source.index(session_key))
+
     def test_context_is_compact_allowlisted_and_uses_filtered_rows(self):
         context = build_dashboard_context(self.sample_frame().iloc[:1])
         self.assertEqual(1, context["totals"]["posts"])
