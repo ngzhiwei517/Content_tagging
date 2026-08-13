@@ -27,6 +27,12 @@ import pandas as pd
 import streamlit as st
 
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
+from ugc_tagger.dashboard_assistant import (
+    DASHBOARD_CHAT_SUGGESTIONS,
+    dashboard_context_json,
+    dashboard_context_signature,
+    generate_dashboard_answer,
+)
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
@@ -4783,6 +4789,7 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         "Sound Breakdown": "S",
         "Top Posts": "",
         "Post Summary": "P",
+        "Ask this dashboard": "AI",
         "Downloads": "↓",
     }
     icon = icon_map.get(title, "•")
@@ -4790,6 +4797,115 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
         f"<div class='summary-section-title' style='--accent:{accent}'>"
         f"<div class='section-icon'>{esc(icon)}</div><div><h3>{esc(title)}</h3></div></div>"
     )
+
+
+@st.fragment
+def render_dashboard_assistant_v68_72(filtered: pd.DataFrame) -> None:
+    """Render a session-only Gemini chat grounded in the filtered dashboard."""
+    context_json = dashboard_context_json(filtered)
+    context_signature = dashboard_context_signature(context_json)
+    signature_key = "dashboard_chat_context_signature_v68_72"
+    messages_key = "dashboard_chat_messages_v68_72"
+    suggestions_key = "dashboard_chat_suggestions_v68_72"
+
+    if st.session_state.get(signature_key) != context_signature:
+        st.session_state[signature_key] = context_signature
+        st.session_state[messages_key] = []
+        st.session_state.pop(suggestions_key, None)
+
+    messages = list(st.session_state.get(messages_key, []))
+    with st.container(border=True):
+        st.markdown(section_title("Ask this dashboard", "#2563eb"), unsafe_allow_html=True)
+        st.caption(
+            "Ask about the current filtered results or request a campaign idea. "
+            "Answers use this dashboard only and are not saved."
+        )
+
+        for message in messages:
+            role = safe_str(message.get("role"))
+            if role not in {"user", "assistant"}:
+                continue
+            avatar = ":material/auto_awesome:" if role == "assistant" else None
+            with st.chat_message(role, avatar=avatar):
+                st.markdown(safe_str(message.get("content")))
+
+        suggested_question = None
+        if not messages:
+            suggested_label = st.pills(
+                "Try asking",
+                list(DASHBOARD_CHAT_SUGGESTIONS),
+                key=suggestions_key,
+                label_visibility="collapsed",
+                width="stretch",
+            )
+            if suggested_label:
+                suggested_question = DASHBOARD_CHAT_SUGGESTIONS.get(suggested_label)
+
+        typed_question = st.chat_input(
+            "Ask about these results or request a campaign idea",
+            key="dashboard_chat_input_v68_72",
+            max_chars=1000,
+        )
+        question = safe_str(typed_question) or safe_str(suggested_question)
+        if question:
+            prior_history = list(messages)
+            with st.chat_message("user"):
+                st.markdown(question)
+            messages.append({"role": "user", "content": question})
+
+            gemini_key = clean_api_secret(
+                st.session_state.get("gemini_key")
+                or _managed_api_secret_v68_43("GEMINI_API_KEY")
+            )
+            if not gemini_key:
+                answer = (
+                    "Add a Gemini API key in Streamlit Secrets to use this assistant. "
+                    "No scraping was started."
+                )
+            else:
+                try:
+                    with st.spinner("Reviewing the current dashboard..."):
+                        answer = generate_dashboard_answer(
+                            api_key=gemini_key,
+                            model=normalize_gemini_model(
+                                st.session_state.get(
+                                    "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
+                                )
+                            ),
+                            question=question,
+                            context_json=context_json,
+                            history=prior_history,
+                        )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Dashboard assistant request failed (%s)", type(exc).__name__
+                    )
+                    error_text = safe_str(exc).lower()
+                    if any(
+                        marker in error_text
+                        for marker in ["quota", "429", "resource_exhausted"]
+                    ):
+                        answer = (
+                            "The Gemini usage limit has been reached. Replace or refresh "
+                            "the Gemini key, then ask again."
+                        )
+                    else:
+                        answer = (
+                            "I couldn't answer this question right now. The dashboard "
+                            "results are unchanged, and no scraping was started."
+                        )
+
+            with st.chat_message("assistant", avatar=":material/auto_awesome:"):
+                st.markdown(answer)
+            messages.append({"role": "assistant", "content": answer})
+            st.session_state[messages_key] = messages[-12:]
+
+        if messages and st.button(
+            "Clear chat", key="dashboard_chat_clear_v68_72", width="content"
+        ):
+            st.session_state[messages_key] = []
+            st.session_state.pop(suggestions_key, None)
+            st.rerun()
 
 
 def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
@@ -4897,14 +5013,12 @@ SUMMARY_PERCENT_COLUMNS_V68_46 = {
     "Avg. ER",
 }
 TOP_POST_TABLE_COLUMNS_V68_46 = [
-    "Edit",
     "Platform",
     "Creator",
     "Market",
     "Track",
     "Creative Type",
     "Narrative",
-    "Content Subtype",
     "Followers",
     "KOL Size",
     "Views",
@@ -4920,7 +5034,6 @@ SUMMARY_CLICK_FILTER_COLUMNS_V68_71 = {
     "Track": "Track Display",
     "Campaign Track": "Track Display",
     "Creative Type": "Primary Creative Type",
-    "Content Subtype": "Drama Content Category Display",
     "KOL Size": "KOL Size Display",
 }
 DRAMA_DETAIL_TABLE_COLUMNS_V68_71 = [
@@ -5274,13 +5387,171 @@ def render_sortable_summary_table_v68_46(
     return selected
 
 
+def summary_creative_type_cell_v68_73(row: pd.Series) -> str:
+    """Show a drama subtype beneath its broad label without a second column."""
+    creative_type = operational_creative_type(row.get("Creative Type"))
+    if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
+        return creative_type
+    subtype = safe_str(row.get("Drama Content Category")) or safe_str(
+        row.get("Drama Content Category Display")
+    )
+    if subtype in {"", "Not applicable", "Not specified"}:
+        return creative_type
+    return f"{creative_type}\n↳ {subtype}"
+
+
+def _parse_summary_creative_type_cell_v68_73(value) -> Tuple[str, str]:
+    """Split the editable broad-label/subtype cell back into stored fields."""
+    lines = [
+        re.sub(r"^[\s\u21b3\u2514\-]+", "", line).strip()
+        for line in safe_str(value).splitlines()
+        if line.strip()
+    ]
+    creative_type = operational_creative_type(lines[0] if lines else "Others")
+    subtype = lines[1] if len(lines) > 1 else ""
+    if "Movie/Tv/Drama Edits" not in split_creative_labels(creative_type):
+        subtype = ""
+    return creative_type, subtype
+
+
+def apply_summary_post_edits_v68_73(
+    tagged_df: pd.DataFrame,
+    original_table: pd.DataFrame,
+    edited_table: pd.DataFrame,
+) -> Tuple[pd.DataFrame, int]:
+    """Apply direct Summary edits to the source rows with review audit fields."""
+    if (
+        tagged_df is None
+        or tagged_df.empty
+        or original_table is None
+        or edited_table is None
+    ):
+        return tagged_df, 0
+
+    updated = tagged_df.copy()
+    changed_rows = 0
+    for original_index in edited_table.index.intersection(original_table.index):
+        if original_index not in updated.index:
+            continue
+        row_changed = False
+        original = original_table.loc[original_index]
+        edited = edited_table.loc[original_index]
+
+        original_type = safe_str(original.get("Creative Type"))
+        edited_type = safe_str(edited.get("Creative Type"))
+        if edited_type != original_type:
+            creative_type, subtype = _parse_summary_creative_type_cell_v68_73(
+                edited_type
+            )
+            source_row = updated.loc[original_index]
+            audit_fields = final_update2_review_audit_update(
+                source_row.get(
+                    "Original AI Labels",
+                    source_row.get("Creative Type", "Others"),
+                ),
+                creative_type,
+                source_row.get("Label History", ""),
+                action="KEEP",
+                note="Edited directly in Summary",
+            )
+            for column, audit_value in audit_fields.items():
+                updated.at[original_index, column] = audit_value
+            updated.at[original_index, "Creative Type"] = audit_fields["Final Labels"]
+            updated.at[original_index, "Drama Content Category"] = subtype
+            row_changed = True
+
+        original_narrative = safe_str(original.get("Narrative"))
+        edited_narrative = safe_str(edited.get("Narrative"))
+        if edited_narrative != original_narrative:
+            updated.at[original_index, "Narrative"] = (
+                "" if edited_narrative == "Not specified" else edited_narrative
+            )
+            row_changed = True
+
+        if row_changed:
+            updated.at[original_index, "Needs Review"] = False
+            updated.at[original_index, "Review Action"] = "KEEP"
+            updated.at[original_index, "Review Note"] = "Edited directly in Summary"
+            updated.at[original_index, "QA Priority"] = "Reviewed"
+            updated.at[original_index, "Validation Status"] = "reviewed"
+            changed_rows += 1
+    return updated, changed_rows
+
+
+def render_editable_top_posts_v68_73(top_posts: pd.DataFrame) -> None:
+    """Render direct label/narrative editing while keeping metrics read-only."""
+    table = prepare_sortable_summary_table_v68_46(
+        top_posts,
+        TOP_POST_TABLE_COLUMNS_V68_46,
+    )
+    if table.empty:
+        st.markdown("<div class='empty-panel'>No rows to show.</div>", unsafe_allow_html=True)
+        return
+
+    column_config = {
+        column: st.column_config.NumberColumn(
+            column,
+            format="%.2f%%" if column in SUMMARY_PERCENT_COLUMNS_V68_46 else "localized",
+        )
+        for column in table.columns
+        if column in SUMMARY_INTEGER_COLUMNS_V68_46
+        or column in SUMMARY_PERCENT_COLUMNS_V68_46
+    }
+    column_config["Creative Type"] = st.column_config.TextColumn(
+        "Creative Type",
+        help="Click a cell to edit. For drama posts, the smaller second line is the subtype.",
+        width="large",
+    )
+    column_config["Narrative"] = st.column_config.TextColumn(
+        "Narrative",
+        help="Click a cell to edit the post narrative.",
+        width="large",
+    )
+    if "Link" in table.columns:
+        column_config["Link"] = st.column_config.LinkColumn(
+            "Link",
+            display_text="Open post",
+        )
+
+    index_signature = hashlib.sha1(
+        "|".join(safe_str(index) for index in table.index).encode("utf-8")
+    ).hexdigest()[:12]
+    edited_table = st.data_editor(
+        table,
+        hide_index=True,
+        width="stretch",
+        height=38 + (min(max(len(table), 1), 15) * 62),
+        row_height=62,
+        column_config=column_config,
+        disabled=[
+            column
+            for column in table.columns
+            if column not in {"Creative Type", "Narrative"}
+        ],
+        num_rows="fixed",
+        key=f"summary_top_posts_editor_v68_73_{index_signature}",
+    )
+    updated, changed_rows = apply_summary_post_edits_v68_73(
+        st.session_state.get("tagged_df", pd.DataFrame()),
+        table,
+        edited_table,
+    )
+    if changed_rows:
+        st.session_state.tagged_df = add_performance_fields(updated)
+        _persist_runtime_checkpoint_v68_15()
+        st.toast(
+            f"Saved {changed_rows:,} edited post{'s' if changed_rows != 1 else ''}.",
+            icon="✅",
+        )
+        st.rerun()
+
+
 def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     """Keep post metrics numeric so Streamlit header sorting is accurate."""
     if df is None or df.empty:
         return pd.DataFrame(columns=TOP_POST_TABLE_COLUMNS_V68_46)
 
     top_posts = df.copy()
-    top_posts["Edit"] = "Edit"
     if "Market Display" in top_posts.columns:
         top_posts["Market"] = top_posts["Market Display"]
     if "Track Display" in top_posts.columns:
@@ -5288,13 +5559,11 @@ def prepare_sortable_top_posts_v68_46(df: pd.DataFrame) -> pd.DataFrame:
     top_posts["Narrative"] = top_posts.get(
         "Narrative",
         pd.Series("", index=top_posts.index, dtype=str),
-    ).map(lambda value: display_empty(value, "Not specified"))
-    if "Drama Content Category Display" in top_posts.columns:
-        top_posts["Content Subtype"] = top_posts["Drama Content Category Display"].replace(
-            "Not applicable", ""
-        )
-    elif "Drama Content Category" in top_posts.columns:
-        top_posts["Content Subtype"] = top_posts["Drama Content Category"]
+    ).map(safe_str)
+    top_posts["Creative Type"] = top_posts.apply(
+        summary_creative_type_cell_v68_73,
+        axis=1,
+    )
 
     for column in ["Followers", "Total Engagement"]:
         if column not in top_posts.columns:
@@ -5861,6 +6130,12 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
         )
 
         max_creator_count = min(100, len(target_candidates))
+        if max_creator_count <= 0:
+            st.markdown(
+                "<div class='empty-panel'>No public creator profiles are available in the current view.</div>",
+                unsafe_allow_html=True,
+            )
+            return
         default_creator_count = min(10, max_creator_count)
         try:
             stored_creator_count = int(
@@ -5870,28 +6145,43 @@ def render_top_creator_performance_v68_47(filtered: pd.DataFrame) -> None:
             )
         except (TypeError, ValueError):
             stored_creator_count = default_creator_count
-        st.session_state.creator_profile_count_v68_60 = min(
-            max(stored_creator_count, 1), max_creator_count
-        )
+        stored_creator_count = min(max(stored_creator_count, 1), max_creator_count)
+        count_text_key = "creator_profile_count_text_v68_73"
+        count_max_key = "creator_profile_count_max_v68_73"
+        if (
+            count_text_key not in st.session_state
+            or st.session_state.get(count_max_key) != max_creator_count
+        ):
+            st.session_state[count_text_key] = str(stored_creator_count)
+            st.session_state[count_max_key] = max_creator_count
 
         history_mode, history_post_limit = profile_history_settings(
             PROFILE_HISTORY_FULL
         )
         control_col, action_col = st.columns([2, 1])
         with control_col:
-            profile_count = st.number_input(
+            profile_count_text = st.text_input(
                 f"Top creators (max {max_creator_count})",
-                min_value=1,
-                max_value=max_creator_count,
-                step=1,
-                key="creator_profile_count_v68_60",
+                key=count_text_key,
+                help=f"Type any whole number from 1 to {max_creator_count}.",
             )
+            try:
+                profile_count = int(profile_count_text.strip())
+                profile_count_is_valid = 1 <= profile_count <= max_creator_count
+            except (AttributeError, TypeError, ValueError):
+                profile_count = stored_creator_count
+                profile_count_is_valid = False
+            if profile_count_is_valid:
+                st.session_state.creator_profile_count_v68_60 = profile_count
+            else:
+                st.warning(f"Enter a whole number from 1 to {max_creator_count}.")
         with action_col:
             enrich_clicked = st.button(
                 "Fetch profile metrics",
                 type="secondary",
                 width="stretch",
                 key="creator_profile_fetch_v68_51",
+                disabled=not profile_count_is_valid,
             )
         target_count_preview = min(int(profile_count), len(target_candidates))
         if enrich_clicked:
@@ -8084,30 +8374,11 @@ elif st.session_state.step == 6:
         with st.container(border=True):
             st.markdown(section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
             top_posts = prepare_sortable_top_posts_v68_46(filtered)
-            top_post_click = render_sortable_summary_table_v68_46(
-                top_posts,
-                columns=TOP_POST_TABLE_COLUMNS_V68_46,
-                max_visible_rows=15,
-                key="summary_top_posts_table_v68_71",
-                clickable_columns=SUMMARY_CLICK_FILTER_COLUMNS_V68_71,
-            )
-            _consume_summary_table_click_v68_71(top_post_click)
-            selected_summary_post = safe_str(
-                st.session_state.get("summary_selected_post_index_v68_71")
-            )
+            render_editable_top_posts_v68_73(top_posts)
             st.caption(
-                "Click Platform, Creator, Market, Track, Creative Type, Content "
-                "Subtype, or KOL Size to show related posts and their narratives. "
-                "Select Edit to change that post's labels and details."
+                "Click a Creative Type or Narrative cell and type to edit it. "
+                "Changes save automatically; all performance metrics stay read-only."
             )
-            if selected_summary_post:
-                if st.button(
-                    "Edit selected post labels & details",
-                    type="primary",
-                    width="stretch",
-                    key="summary_edit_selected_post_v68_71",
-                ):
-                    _open_summary_post_in_review_v68_71(selected_summary_post)
 
     drama_details = prepare_drama_detail_table_v68_71(filtered)
     if not drama_details.empty:
@@ -8212,6 +8483,8 @@ elif st.session_state.step == 6:
         st.download_button("Download Review / QA Report", to_excel_bytes(report), f"review_qa_report_{export_model_slug}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    render_dashboard_assistant_v68_72(filtered)
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back to Review", width="stretch"):
@@ -8225,6 +8498,9 @@ elif st.session_state.step == 6:
             st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.creator_profile_aliases_v68_67 = {}
             st.session_state.tiktok_follower_attempted_keys_v68_65 = []
+            st.session_state.dashboard_chat_messages_v68_72 = []
+            st.session_state.pop("dashboard_chat_context_signature_v68_72", None)
+            st.session_state.pop("dashboard_chat_suggestions_v68_72", None)
             st.session_state.last_message = ""
             reset_date_filter_state_v68()
             _new_runtime_recovery_id_v68_44()
