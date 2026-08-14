@@ -1,5 +1,6 @@
 import unittest
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import patch
@@ -2467,6 +2468,96 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
 
         self.assertEqual(calls, {"download": 0, "gemini": 1})
         self.assertEqual(enriched["_drama_evidence_source"], "2 cached scene frames")
+
+    def test_drama_pass_overlaps_audio_check_with_gemini_without_extra_calls(self):
+        from ugc_tagger.final_update2_backend import load_backend
+
+        with patch.dict(sys.modules, {"cv2": types.ModuleType("cv2")}):
+            backend = load_backend()
+        google_module = types.ModuleType("google")
+        genai_module = types.ModuleType("google.genai")
+        genai_module.types = types.SimpleNamespace(
+            Part=types.SimpleNamespace(
+                from_bytes=lambda **kwargs: kwargs,
+            ),
+        )
+        google_module.genai = genai_module
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama scene montage",
+            "content_details": "A fictional scene.",
+            "confidence": 0.9,
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "drama_format": "Long-form Drama",
+            "country_region": "China",
+            "drama_title": "Example Drama",
+            "detected_audio": "Example Song",
+            "campaign_song_match": "Match",
+            "audio_version": "Original",
+        }
+        audio_started = threading.Event()
+        gemini_started = threading.Event()
+        calls = {"catalog": 0, "audio": 0, "gemini": 0}
+
+        def fake_extract(_video_path, output_dir, _points):
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            frame_path = output_path / "frame.jpg"
+            frame_path.write_bytes(b"frame")
+            return [str(frame_path)]
+
+        def fake_catalog(_track):
+            calls["catalog"] += 1
+            audio_started.set()
+            if not gemini_started.wait(timeout=2):
+                raise AssertionError("audio check did not overlap the Gemini call")
+            return {"preview_url": "https://example.test/preview.m4a"}
+
+        def fake_audio(_video_path, _preview_url):
+            calls["audio"] += 1
+            return {"match": True}
+
+        def fake_gemini(_contents, _key, max_retries=2):
+            del max_retries
+            calls["gemini"] += 1
+            gemini_started.set()
+            if not audio_started.wait(timeout=2):
+                raise AssertionError("Gemini did not overlap the audio check")
+            return response
+
+        function_globals = backend.run_drama_enrichment_pass.__globals__
+        replacements = {
+            "extract_frames": fake_extract,
+            "fetch_itunes_preview": fake_catalog,
+            "compare_video_audio_to_preview": fake_audio,
+            "call_drama_enrichment_gemini": fake_gemini,
+        }
+        originals = {name: function_globals[name] for name in replacements}
+        try:
+            function_globals.update(replacements)
+            with patch.dict(
+                sys.modules,
+                {"google": google_module, "google.genai": genai_module},
+            ):
+                enriched = backend.run_drama_enrichment_pass(
+                    result,
+                    {
+                        "videoUrl": "https://example.test/video.mp4",
+                        "_campaign_track": "Example Song",
+                    },
+                    "fake-key",
+                    media_cache={"video_bytes": b"video"},
+                )
+        finally:
+            function_globals.update(originals)
+
+        self.assertEqual(calls, {"catalog": 1, "audio": 1, "gemini": 1})
+        self.assertEqual(enriched["campaign_song_match"], "Matched")
+        self.assertEqual(enriched["_drama_evidence_source"], "1 scene frames")
 
     def test_resolved_kpop_show_cut_clears_stale_low_confidence_review(self):
         from ugc_tagger.drama_analysis import clear_resolved_drama_soft_review_flags

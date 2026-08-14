@@ -17,6 +17,7 @@ import requests
 import cv2
 import tempfile
 import io
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -4679,6 +4680,19 @@ def call_drama_enrichment_gemini(contents, gemini_key, max_retries=2):
 # -----------------------------------------------------------------------------
 
 
+def _compare_drama_audio_to_campaign(video_path, campaign_track):
+    """Return the existing catalog/audio evidence for one confirmed drama post."""
+    verified_itunes = fetch_itunes_preview(campaign_track)
+    preview_url = verified_itunes.get('preview_url', '')
+    audio_comparison = {}
+    if preview_url:
+        audio_comparison = compare_video_audio_to_preview(
+            video_path,
+            preview_url,
+        )
+    return verified_itunes, audio_comparison
+
+
 def run_drama_enrichment_pass(
     result,
     row,
@@ -4749,16 +4763,26 @@ def run_drama_enrichment_pass(
                             contents.append(gtypes.Part.from_bytes(data=handle.read(), mime_type='image/jpeg'))
                     if frame_paths:
                         evidence_source = f'{len(frame_paths)} scene frames'
-                response = call_drama_enrichment_gemini(contents, gemini_key)
                 campaign_track = str(row.get('_campaign_track', '') or '').strip()
                 if campaign_track and os.path.exists(video_path):
-                    verified_itunes = fetch_itunes_preview(campaign_track)
-                    preview_url = verified_itunes.get('preview_url', '')
-                    if preview_url:
-                        audio_comparison = compare_video_audio_to_preview(
+                    # The scene-frame Gemini pass and the audio/catalog check are
+                    # independent once the temporary video is ready. Run only the
+                    # non-Gemini audio work in the background so the selected
+                    # model context, request order and tagging decisions remain
+                    # exactly the same while avoiding a second serial wait.
+                    with ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix='drama-audio',
+                    ) as audio_executor:
+                        audio_future = audio_executor.submit(
+                            _compare_drama_audio_to_campaign,
                             video_path,
-                            preview_url,
+                            campaign_track,
                         )
+                        response = call_drama_enrichment_gemini(contents, gemini_key)
+                        verified_itunes, audio_comparison = audio_future.result()
+                else:
+                    response = call_drama_enrichment_gemini(contents, gemini_key)
         except GeminiQuotaExhaustedError:
             raise
         except Exception as exc:
