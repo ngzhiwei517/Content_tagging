@@ -114,6 +114,20 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
         self.assertIn('"Download metrics CSV"', APP_SOURCE)
         self.assertIn('"Download metrics Excel"', APP_SOURCE)
 
+    def test_metrics_helper_is_loaded_safely_during_hot_reload(self):
+        import_block = APP_SOURCE.split(
+            "from ugc_tagger.final_update2_adapter import (",
+            1,
+        )[1].split(")", 1)[0]
+        wrapper = APP_SOURCE.split(
+            "def final_update2_metrics_candidates(",
+            1,
+        )[1].split("def _failed_analysis_review_row_v68_43", 1)[0]
+
+        self.assertNotIn("metrics_candidates", import_block)
+        self.assertIn('getattr(adapter, "metrics_candidates", None)', wrapper)
+        self.assertIn("importlib.reload(adapter)", wrapper)
+
     def test_metrics_runner_never_calls_tagging_backend(self):
         runner = APP_SOURCE.split(
             "def _run_metrics_only_chunk_v68_86",
