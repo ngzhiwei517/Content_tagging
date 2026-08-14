@@ -567,16 +567,68 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             after = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             self.assertEqual(after, populated)
 
-    def test_managed_secrets_and_automatic_recovery_remain_without_manual_controls(self):
+    def test_managed_secrets_and_private_continue_later_recovery_remain_available(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
         self.assertNotIn('key="runtime_save_batch_button_v68_44"', APP_SOURCE)
         self.assertNotIn('with st.expander("Open a saved batch"', APP_SOURCE)
         self.assertNotIn('key="runtime_recovery_button_v68_44"', APP_SOURCE)
-        self.assertIn("_restore_runtime_checkpoint_v68_15()", APP_SOURCE)
+        self.assertIn('key="runtime_continue_later_v68_85"', APP_SOURCE)
+        self.assertIn('@st.dialog("Continue later")', APP_SOURCE)
+        self.assertIn("_render_continue_later_v68_85()", APP_SOURCE)
+        self.assertIn(
+            "_restore_runtime_checkpoint_v68_15(persist=not taggy_companion_session_v68_87)",
+            APP_SOURCE,
+        )
         self.assertIn("_persist_runtime_checkpoint_v68_15()", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', APP_SOURCE)
+
+    def test_continue_later_is_hidden_until_posts_exist_and_saves_before_opening(self):
+        events = []
+
+        class FakeColumn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        class FakeStreamlit:
+            session_state = {"batch_df": pd.DataFrame()}
+
+            @staticmethod
+            def columns(spec):
+                events.append(("columns", spec))
+                return FakeColumn(), FakeColumn()
+
+            @staticmethod
+            def button(label, **kwargs):
+                events.append(("button", label, kwargs))
+                return True
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_runtime_checkpoint_has_posts_v68_44": lambda state: isinstance(
+                state.get("batch_df"), pd.DataFrame
+            ) and not state["batch_df"].empty,
+            "_persist_runtime_checkpoint_v68_15": lambda: events.append("persist"),
+            "_show_runtime_save_dialog_v68_44": lambda: events.append("dialog"),
+        }
+        render = load_function("_render_continue_later_v68_85", namespace)
+
+        render()
+        self.assertEqual(events, [])
+
+        FakeStreamlit.session_state["batch_df"] = pd.DataFrame(
+            [{"Link": "https://www.tiktok.com/@creator/video/1"}]
+        )
+        render()
+
+        self.assertEqual(events[0], ("columns", [5, 1]))
+        self.assertEqual(events[1][0:2], ("button", "Continue later"))
+        self.assertEqual(events[1][2]["key"], "runtime_continue_later_v68_85")
+        self.assertEqual(events[-2:], ["persist", "dialog"])
 
     def test_save_link_hides_recovery_id_inside_the_url(self):
         recovery_id = "e" * 32

@@ -39,6 +39,7 @@ _DASHBOARD_ASSISTANT_API = (
     "PAGE_CHAT_SUGGESTIONS",
     "PAGE_TITLES",
     "chat_history_markdown",
+    "build_taggy_companion_url",
     "dashboard_context_json",
     "dashboard_context_signature",
     "generate_page_assistant_answer",
@@ -54,6 +55,7 @@ DASHBOARD_CHAT_SUGGESTIONS = _dashboard_assistant.DASHBOARD_CHAT_SUGGESTIONS
 PAGE_CHAT_SUGGESTIONS = _dashboard_assistant.PAGE_CHAT_SUGGESTIONS
 PAGE_TITLES = _dashboard_assistant.PAGE_TITLES
 chat_history_markdown = _dashboard_assistant.chat_history_markdown
+build_taggy_companion_url = _dashboard_assistant.build_taggy_companion_url
 dashboard_context_json = _dashboard_assistant.dashboard_context_json
 dashboard_context_signature = _dashboard_assistant.dashboard_context_signature
 generate_page_assistant_answer = _dashboard_assistant.generate_page_assistant_answer
@@ -94,10 +96,12 @@ from ugc_tagger.final_update2_adapter import (
     APP_VERSION,
     DRAMA_REVIEW_OPTIONS,
     MARKETING_EXPORT_COLUMNS,
+    MAX_APIFY_POSTS_PER_REQUEST,
     QA_AUDIT_COLUMNS,
     build_review_drama_updates as final_update2_build_review_drama_updates,
     drama_review_defaults as final_update2_drama_review_defaults,
     normalize_url as final_update2_normalize_url,
+    metrics_candidates as final_update2_metrics_candidates,
     review_audit_update as final_update2_review_audit_update,
     review_cache as final_update2_review_cache,
     scrape_links as final_update2_scrape_links,
@@ -772,6 +776,23 @@ table.clean-table tr:hover td{background:#eef6ff !important;}
   background:#ffffff !important;
   box-shadow:none !important;
 }
+.taggy-companion-link{
+  display:inline-flex;
+  align-items:center;
+  min-height:38px;
+  padding:8px 14px;
+  border:1px solid #cbd5e1;
+  border-radius:15px;
+  background:#ffffff;
+  color:#172033 !important;
+  font-weight:700;
+  text-decoration:none !important;
+  white-space:nowrap;
+}
+.taggy-companion-link:hover{
+  border-color:#6254e8;
+  color:#5145cd !important;
+}
 @media (max-width:640px){
   .st-key-taggy_floating_launcher_v68_78{
     right:12px !important;
@@ -1039,6 +1060,11 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
+    "analysis_mode_v68_86": "AI tagging",
+    "metrics_only_df_v68_86": pd.DataFrame(),
+    "metrics_only_active_v68_86": False,
+    "metrics_only_next_position_v68_86": 0,
+    "metrics_only_fingerprint_v68_86": "",
     # Public profile metrics never contain API tokens or media and are included
     # in restart checkpoints so completed profile enrichment is not lost.
     "creator_profile_metrics_v68_51": pd.DataFrame(),
@@ -1361,15 +1387,22 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_id_v68_41_4",
     "comparison_run_started_utc_v68_41_4",
     "comparison_run_elapsed_v68_41_4",
+    "analysis_mode_v68_86",
+    "metrics_only_df_v68_86",
+    "metrics_only_active_v68_86",
+    "metrics_only_next_position_v68_86",
+    "metrics_only_fingerprint_v68_86",
     "tiktok_follower_attempted_keys_v68_65",
     "creator_profile_metrics_v68_51",
     "creator_profile_updated_at_v68_51",
     "creator_profile_aliases_v68_67",
 )
+TAGGY_COMPANION_QUERY_V68_87 = "taggy"
 RUNTIME_DATAFRAME_KEYS_V68_15 = {
     "batch_df",
     "selected_df",
     "tagged_df",
+    "metrics_only_df_v68_86",
     "creator_profile_metrics_v68_51",
 }
 RUNTIME_BLOCKED_COLUMN_V68_44 = re.compile(
@@ -1458,6 +1491,15 @@ def _runtime_query_value_v68_15(name: str) -> str:
     if isinstance(value, list):
         value = value[0] if value else ""
     return safe_str(value)
+
+
+def _taggy_companion_requested_v68_87() -> bool:
+    """Return whether this browser session is the read-only Taggy companion."""
+    return _runtime_query_value_v68_15(TAGGY_COMPANION_QUERY_V68_87).lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _browser_recovery_pointer_v68_80() -> Tuple[bool, str]:
@@ -1709,7 +1751,23 @@ def _runtime_recovery_url_v68_44() -> str:
     return f"{app_url}?{query}" if app_url else f"?{query}"
 
 
-@st.dialog("Save this batch")
+def _taggy_companion_url_v68_87(step: int) -> str:
+    """Return a new-session Taggy URL without paid-job continuation markers."""
+    run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
+    if not run_id:
+        return ""
+    try:
+        app_url = safe_str(st.context.url)
+    except Exception:
+        app_url = ""
+    return build_taggy_companion_url(
+        base_url=app_url,
+        recovery_id=run_id,
+        step=step,
+    )
+
+
+@st.dialog("Continue later")
 def _show_runtime_save_dialog_v68_44() -> None:
     recovery_url = _runtime_recovery_url_v68_44()
     st.markdown("**Your progress is already saved automatically.**")
@@ -1773,8 +1831,29 @@ def _persist_runtime_checkpoint_v68_15() -> None:
             pass
 
 
-def _restore_runtime_checkpoint_v68_15() -> None:
-    """Restore the current batch once when Streamlit creates a replacement session."""
+def _render_continue_later_v68_85() -> None:
+    """Offer a private recovery link only after the workflow contains posts."""
+    if not _runtime_checkpoint_has_posts_v68_44(st.session_state):
+        return
+    _, action_column = st.columns([5, 1])
+    with action_column:
+        if st.button(
+            "Continue later",
+            key="runtime_continue_later_v68_85",
+            help="Copy a private link that reopens this batch.",
+            width="stretch",
+        ):
+            _persist_runtime_checkpoint_v68_15()
+            _show_runtime_save_dialog_v68_44()
+
+
+def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
+    """Restore workflow state, optionally without writing it back.
+
+    The Taggy companion uses a second Streamlit session while tagging is busy.
+    Its snapshot must stay read-only so it cannot overwrite newer progress from
+    the active tagging session.
+    """
     if st.session_state.get("runtime_restore_checked_v68_15"):
         _sync_runtime_query_v68_15()
         return
@@ -1871,7 +1950,8 @@ def _restore_runtime_checkpoint_v68_15() -> None:
     # accepting an empty replacement session.
     st.session_state.runtime_restore_checked_v68_15 = bool(restored or not requested_id)
     _sync_runtime_query_v68_15()
-    _persist_runtime_checkpoint_v68_15()
+    if persist:
+        _persist_runtime_checkpoint_v68_15()
 
 
 # Display values and engagement metrics
@@ -4364,6 +4444,106 @@ def _run_checkpointed_tag_every_link_v68_43(
     return None
 
 
+def _start_metrics_only_run_v68_86(
+    selected: pd.DataFrame,
+    *,
+    restart: bool = False,
+) -> None:
+    """Start or resume a metrics-only scrape for the current selection."""
+    supported = selected[
+        selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
+    ].copy().reset_index(drop=True)
+    fingerprint = input_fingerprint(supported)
+    saved_fingerprint = safe_str(
+        st.session_state.get("metrics_only_fingerprint_v68_86")
+    )
+    if restart or saved_fingerprint != fingerprint:
+        st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
+        st.session_state.metrics_only_next_position_v68_86 = 0
+        st.session_state.metrics_only_fingerprint_v68_86 = fingerprint
+    st.session_state.metrics_only_active_v68_86 = True
+
+
+def _run_metrics_only_chunk_v68_86(
+    selected: pd.DataFrame,
+) -> Optional[pd.DataFrame]:
+    """Refresh one safe scrape window; return None while more rows remain."""
+    supported = selected[
+        selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
+    ].copy().reset_index(drop=True)
+    if supported.empty:
+        st.error("No valid TikTok or Instagram post links were selected.")
+        st.session_state.metrics_only_active_v68_86 = False
+        return pd.DataFrame()
+
+    fingerprint = input_fingerprint(supported)
+    if safe_str(st.session_state.get("metrics_only_fingerprint_v68_86")) != fingerprint:
+        st.warning("The selected posts changed. Start the metrics run again.")
+        st.session_state.metrics_only_active_v68_86 = False
+        return pd.DataFrame()
+
+    apify_token = (
+        _managed_api_secret_v68_43("APIFY_TOKEN")
+        or clean_api_secret(
+            st.session_state.get("apify_token", "")
+            or st.session_state.get("apify_token_input_v52", "")
+            or st.session_state.get("apify_token_input", "")
+        )
+    )
+    if not apify_token:
+        st.error(
+            "Metrics access is not configured. Contact the app owner to update "
+            "the Apify token used only when the free scraper needs a fallback."
+        )
+        st.session_state.metrics_only_active_v68_86 = False
+        return pd.DataFrame()
+
+    start = max(
+        0,
+        min(
+            int(st.session_state.get("metrics_only_next_position_v68_86", 0)),
+            len(supported),
+        ),
+    )
+    existing = st.session_state.get("metrics_only_df_v68_86", pd.DataFrame())
+    if start >= len(supported):
+        st.session_state.metrics_only_active_v68_86 = False
+        return existing.copy() if isinstance(existing, pd.DataFrame) else pd.DataFrame()
+
+    end = min(start + MAX_APIFY_POSTS_PER_REQUEST, len(supported))
+    chunk = supported.iloc[start:end].copy().reset_index(drop=True)
+    st.info(
+        f"Refreshing public metrics for posts {start + 1:,}–{end:,} "
+        f"of {len(supported):,}. Gemini is not used."
+    )
+    try:
+        records = final_update2_scrape_links(
+            chunk["Link"].map(safe_str).tolist(),
+            apify_token,
+        )
+        refreshed = final_update2_metrics_candidates(chunk, records)
+        refreshed = add_performance_fields(refreshed)
+    except Exception as exc:
+        LOGGER.exception("Metrics-only scrape window failed")
+        st.error(f"Metrics collection paused: {exc}")
+        st.session_state.metrics_only_active_v68_86 = False
+        return pd.DataFrame()
+
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        combined = pd.concat([existing, refreshed], ignore_index=True)
+    else:
+        combined = refreshed.reset_index(drop=True)
+    st.session_state.metrics_only_df_v68_86 = combined
+    st.session_state.metrics_only_next_position_v68_86 = end
+    st.session_state.apify_records_by_key.update(final_update2_review_cache(records))
+    _persist_runtime_checkpoint_v68_15()
+
+    if end < len(supported):
+        return None
+    st.session_state.metrics_only_active_v68_86 = False
+    return combined
+
+
 def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """Run final_update_2 while preserving the accepted UI and audit contract."""
     if df.empty:
@@ -5049,34 +5229,168 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
 TAGGY_ASSET_V68_76 = Path(__file__).resolve().parent / "assets" / "taggy-assistant.png"
 
 
+def _render_taggy_chat_content_v68_87(
+    *,
+    step: int,
+    context_json: str,
+    messages: List[Dict],
+    messages_key: str,
+    suggestions_key: str,
+) -> None:
+    """Render one Taggy conversation in either the popover or companion page."""
+    st.markdown("### Hi, I’m Taggy")
+    st.caption("Ask how to use this page or ask about the latest saved results.")
+
+    for message in messages[-8:]:
+        role = safe_str(message.get("role"))
+        if role not in {"user", "assistant"}:
+            continue
+        avatar = str(TAGGY_ASSET_V68_76) if role == "assistant" else None
+        with st.chat_message(role, avatar=avatar):
+            st.markdown(safe_str(message.get("content")))
+
+    suggested_question = None
+    if not messages:
+        suggestions = PAGE_CHAT_SUGGESTIONS.get(int(step), DASHBOARD_CHAT_SUGGESTIONS)
+        suggested_label = st.pills(
+            "Try asking",
+            list(suggestions),
+            key=suggestions_key,
+            label_visibility="collapsed",
+            width="stretch",
+        )
+        if suggested_label:
+            suggested_question = suggestions.get(suggested_label)
+
+    typed_question = st.chat_input(
+        "Ask Taggy a question",
+        key=f"taggy_chat_input_v68_76_{int(step)}",
+        max_chars=1000,
+    )
+    question = safe_str(typed_question) or safe_str(suggested_question)
+    if question:
+        prior_history = list(messages)
+        with st.chat_message("user"):
+            st.markdown(question)
+        messages.append({"role": "user", "content": question})
+
+        answer = page_help_answer(int(step), question)
+        # Prefer the current managed key so a replacement Secret is available
+        # to the independent companion session immediately.
+        gemini_key = clean_api_secret(
+            _managed_api_secret_v68_43("GEMINI_API_KEY")
+            or st.session_state.get("gemini_key")
+        )
+        if not answer and not gemini_key:
+            answer = (
+                "I can guide you through this page, but an open-ended answer needs "
+                "the Gemini API key configured in Streamlit Secrets. No scraping was started."
+            )
+        elif not answer:
+            try:
+                with st.spinner("Taggy is checking this page..."):
+                    answer = generate_page_assistant_answer(
+                        api_key=gemini_key,
+                        model=normalize_gemini_model(
+                            st.session_state.get(
+                                "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
+                            )
+                        ),
+                        step=int(step),
+                        question=question,
+                        context_json=context_json,
+                        history=prior_history,
+                    )
+            except Exception as exc:
+                LOGGER.warning("Taggy assistant request failed (%s)", type(exc).__name__)
+                error_text = safe_str(exc).lower()
+                if any(
+                    marker in error_text
+                    for marker in ["quota", "429", "resource_exhausted"]
+                ):
+                    answer = (
+                        "The Gemini usage limit has been reached. Update the key, then ask again."
+                    )
+                else:
+                    answer = "I couldn't answer that right now. Your batch and results are unchanged."
+
+        avatar = (
+            str(TAGGY_ASSET_V68_76)
+            if TAGGY_ASSET_V68_76.exists()
+            else ":material/pets:"
+        )
+        with st.chat_message("assistant", avatar=avatar):
+            st.markdown(answer)
+        messages.append({"role": "assistant", "content": answer})
+        st.session_state[messages_key] = messages[-40:]
+
+    if messages:
+        with st.container(horizontal=True, gap="small"):
+            st.download_button(
+                "Download chat",
+                data=chat_history_markdown(
+                    messages,
+                    page_title=f"Taggy - {PAGE_TITLES.get(int(step), 'UGC tagging tool')}",
+                ).encode("utf-8"),
+                file_name=f"taggy-chat-step-{int(step)}.md",
+                mime="text/markdown",
+                icon=":material/download:",
+                width="content",
+                on_click="ignore",
+                key=f"taggy_chat_download_v68_77_{int(step)}",
+            )
+            if st.button(
+                "Clear chat", key="taggy_chat_clear_v68_76", width="content"
+            ):
+                st.session_state[messages_key] = []
+                st.session_state.pop(suggestions_key, None)
+                st.rerun()
+
+
 @st.fragment
 def render_taggy_assistant_v68_76(
     step: int,
     context_df: Optional[pd.DataFrame] = None,
+    *,
+    standalone: bool = False,
 ) -> None:
-    """Render the same compact, page-aware mascot assistant on every step."""
+    """Render Taggy inline or in its independent during-tagging session."""
     context_df = context_df if isinstance(context_df, pd.DataFrame) else pd.DataFrame()
     context_json = dashboard_context_json(context_df)
     context_signature = dashboard_context_signature(context_json)
     signature_key = "taggy_chat_context_signature_v68_76"
     messages_key = "taggy_chat_messages_v68_76"
     suggestions_key = f"taggy_chat_suggestions_v68_76_{int(step)}"
-    popover_label = "Ask Taggy"
 
     combined_signature = f"{int(step)}:{context_signature}"
     if st.session_state.get(signature_key) != combined_signature:
         st.session_state[signature_key] = combined_signature
         st.session_state[messages_key] = []
         st.session_state.pop(suggestions_key, None)
-
     messages = list(st.session_state.get(messages_key, []))
+
+    if standalone:
+        with st.container(key="taggy_companion_panel_v68_87", border=True):
+            _render_taggy_chat_content_v68_87(
+                step=int(step),
+                context_json=context_json,
+                messages=messages,
+                messages_key=messages_key,
+                suggestions_key=suggestions_key,
+            )
+        return
+
+    tagging_is_busy = int(step) == 4 and bool(
+        st.session_state.get("tagging_job_active_v68_43", False)
+        or st.session_state.get("metrics_only_active_v68_86", False)
+    )
     with st.container(
         key="taggy_floating_launcher_v68_78",
         width="content",
         horizontal_alignment="right",
         gap=None,
     ):
-        st.caption("May I help?")
+        st.caption("Tagging is running" if tagging_is_busy else "May I help?")
         with st.container(
             horizontal=True,
             vertical_alignment="center",
@@ -5086,117 +5400,33 @@ def render_taggy_assistant_v68_76(
         ):
             if TAGGY_ASSET_V68_76.exists():
                 st.image(str(TAGGY_ASSET_V68_76), width=56)
-            assistant_popover = st.popover(
-                popover_label,
-                icon=":material/chat:",
-                width="content",
-            )
-
-        with assistant_popover:
-            st.markdown("### Hi, I’m Taggy")
-            st.caption("Ask how to use this page or ask about the available results.")
-
-            for message in messages[-8:]:
-                role = safe_str(message.get("role"))
-                if role not in {"user", "assistant"}:
-                    continue
-                avatar = str(TAGGY_ASSET_V68_76) if role == "assistant" else None
-                with st.chat_message(role, avatar=avatar):
-                    st.markdown(safe_str(message.get("content")))
-
-            suggested_question = None
-            if not messages:
-                suggestions = PAGE_CHAT_SUGGESTIONS.get(
-                    int(step), DASHBOARD_CHAT_SUGGESTIONS
-                )
-                suggested_label = st.pills(
-                    "Try asking",
-                    list(suggestions),
-                    key=suggestions_key,
-                    label_visibility="collapsed",
-                    width="stretch",
-                )
-                if suggested_label:
-                    suggested_question = suggestions.get(suggested_label)
-
-            typed_question = st.chat_input(
-                "Ask Taggy a question",
-                key=f"taggy_chat_input_v68_76_{int(step)}",
-                max_chars=1000,
-            )
-            question = safe_str(typed_question) or safe_str(suggested_question)
-            if question:
-                prior_history = list(messages)
-                with st.chat_message("user"):
-                    st.markdown(question)
-                messages.append({"role": "user", "content": question})
-
-                answer = page_help_answer(int(step), question)
-                # This assistant reruns as a fragment, so a replacement key in
-                # Streamlit Secrets may be newer than the browser-session copy.
-                # Prefer the current managed key and retain the session value as
-                # the local/manual fallback only.
-                gemini_key = clean_api_secret(
-                    _managed_api_secret_v68_43("GEMINI_API_KEY")
-                    or st.session_state.get("gemini_key")
-                )
-                if not answer and not gemini_key:
-                    answer = (
-                        "I can guide you through this page, but an open-ended answer needs "
-                        "the Gemini API key configured in Streamlit Secrets. No scraping was started."
+            if tagging_is_busy:
+                companion_url = _taggy_companion_url_v68_87(int(step))
+                if companion_url:
+                    st.markdown(
+                        "<a class='taggy-companion-link' target='_blank' "
+                        "rel='noopener noreferrer' href='"
+                        + html.escape(companion_url, quote=True)
+                        + "'>Ask Taggy ↗</a>",
+                        unsafe_allow_html=True,
                     )
-                elif not answer:
-                    try:
-                        with st.spinner("Taggy is checking this page..."):
-                            answer = generate_page_assistant_answer(
-                                api_key=gemini_key,
-                                model=normalize_gemini_model(
-                                    st.session_state.get(
-                                        "qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL
-                                    )
-                                ),
-                                step=int(step),
-                                question=question,
-                                context_json=context_json,
-                                history=prior_history,
-                            )
-                    except Exception as exc:
-                        LOGGER.warning(
-                            "Taggy assistant request failed (%s)", type(exc).__name__
-                        )
-                        error_text = safe_str(exc).lower()
-                        if any(marker in error_text for marker in ["quota", "429", "resource_exhausted"]):
-                            answer = "The Gemini usage limit has been reached. Update the key, then ask again."
-                        else:
-                            answer = "I couldn't answer that right now. Your batch and results are unchanged."
+            else:
+                assistant_popover = st.popover(
+                    "Ask Taggy",
+                    icon=":material/chat:",
+                    width="content",
+                )
 
-                avatar = str(TAGGY_ASSET_V68_76) if TAGGY_ASSET_V68_76.exists() else ":material/pets:"
-                with st.chat_message("assistant", avatar=avatar):
-                    st.markdown(answer)
-                messages.append({"role": "assistant", "content": answer})
-                st.session_state[messages_key] = messages[-40:]
-
-            if messages:
-                with st.container(horizontal=True, gap="small"):
-                    st.download_button(
-                        "Download chat",
-                        data=chat_history_markdown(
-                            messages,
-                            page_title=f"Taggy - {PAGE_TITLES.get(int(step), 'UGC tagging tool')}",
-                        ).encode("utf-8"),
-                        file_name=f"taggy-chat-step-{int(step)}.md",
-                        mime="text/markdown",
-                        icon=":material/download:",
-                        width="content",
-                        on_click="ignore",
-                        key=f"taggy_chat_download_v68_77_{int(step)}",
-                    )
-                    if st.button(
-                        "Clear chat", key="taggy_chat_clear_v68_76", width="content"
-                    ):
-                        st.session_state[messages_key] = []
-                        st.session_state.pop(suggestions_key, None)
-                        st.rerun()
+    if tagging_is_busy:
+        return
+    with assistant_popover:
+        _render_taggy_chat_content_v68_87(
+            step=int(step),
+            context_json=context_json,
+            messages=messages,
+            messages_key=messages_key,
+            suggestions_key=suggestions_key,
+        )
 
 
 def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
@@ -5653,6 +5883,62 @@ def _dismiss_summary_drama_details_v68_83() -> None:
     st.session_state[state_key] = int(st.session_state.get(state_key, 0)) + 1
 
 
+def apply_summary_drama_detail_edits_v68_84(
+    tagged_df: pd.DataFrame,
+    original_index,
+    values: Dict[str, object],
+) -> Tuple[pd.DataFrame, bool]:
+    """Save structured drama-dialog edits to one tagged row."""
+    if (
+        tagged_df is None
+        or tagged_df.empty
+        or original_index not in tagged_df.index
+        or not isinstance(values, dict)
+    ):
+        return tagged_df, False
+
+    updated = tagged_df.copy()
+    source_row = updated.loc[original_index]
+    if isinstance(source_row, pd.DataFrame):
+        source_row = source_row.iloc[0]
+    if not isinstance(source_row, pd.Series):
+        return tagged_df, False
+
+    drama_updates = final_update2_build_review_drama_updates(values)
+    # Content Details carries the structured summary, while this separate field
+    # remains the preferred display source in the Summary dialog.
+    drama_updates["visual_summary"] = safe_str(values.get("visual_summary"))
+    changed = any(
+        safe_str(source_row.get(column)) != safe_str(value)
+        for column, value in drama_updates.items()
+    )
+    if not changed:
+        return tagged_df, False
+
+    for column, value in drama_updates.items():
+        updated.at[original_index, column] = value
+
+    final_labels = operational_creative_type(
+        source_row.get("Creative Type", "Movie/Tv/Drama Edits")
+    )
+    audit_fields = final_update2_review_audit_update(
+        source_row.get("Original AI Labels", final_labels),
+        final_labels,
+        source_row.get("Label History", ""),
+        action="KEEP",
+        note="Edited drama details in Summary",
+    )
+    for column, value in audit_fields.items():
+        updated.at[original_index, column] = value
+    updated.at[original_index, "Creative Type"] = audit_fields["Final Labels"]
+    updated.at[original_index, "Needs Review"] = False
+    updated.at[original_index, "Review Action"] = "KEEP"
+    updated.at[original_index, "Review Note"] = "Edited drama details in Summary"
+    updated.at[original_index, "QA Priority"] = "Reviewed"
+    updated.at[original_index, "Validation Status"] = "reviewed"
+    return updated, True
+
+
 @st.dialog(
     "Drama post details",
     width="large",
@@ -5660,7 +5946,7 @@ def _dismiss_summary_drama_details_v68_83() -> None:
     on_dismiss=_dismiss_summary_drama_details_v68_83,
 )
 def render_drama_details_dialog_v68_83(source_row: pd.Series) -> None:
-    """Show structured drama analysis without adding more table columns."""
+    """View and edit structured drama analysis without extra table columns."""
     if source_row is None or not isinstance(source_row, pd.Series):
         st.warning("Drama details are not available for this post.")
         return
@@ -5674,38 +5960,107 @@ def render_drama_details_dialog_v68_83(source_row: pd.Series) -> None:
         return
 
     detail = details.iloc[0]
+    defaults = final_update2_drama_review_defaults(source_row.to_dict())
     creator = display_empty(detail.get("Creator"), "Unknown creator")
-    subtype = display_empty(detail.get("Content Subtype"), "Not specified")
     st.markdown(f"**{creator}** · Movie/Tv/Drama Edits")
-    st.markdown(f":orange-badge[{subtype}]")
+    st.caption("Review the detected details, edit anything incorrect, then save.")
 
-    visual_summary = display_empty(
-        detail.get("Visual Summary"),
-        "No visual summary is available.",
-    )
-    with st.container(border=True):
-        st.markdown("**Visual summary**")
-        st.write(visual_summary)
+    def option_index(options, value) -> int:
+        option_values = list(options)
+        return option_values.index(value) if value in option_values else 0
 
-    field_groups = [
-        [
-            ("Drama type", "Drama Type"),
-            ("Edit focus", "Edit Focus"),
-            ("Format", "Format"),
-        ],
-        [
-            ("Country / region", "Country / Region"),
-            ("Drama / show title", "Drama / Show Title"),
-            ("Detected audio", "Detected Audio"),
-            ("Audio version", "Audio Version"),
-        ],
-    ]
-    columns = st.columns(2)
-    for container, fields in zip(columns, field_groups):
-        with container:
-            for label, column in fields:
-                st.markdown(f"**{label}**")
-                st.write(display_empty(detail.get(column), "Not specified"))
+    form_key = f"summary_drama_details_form_v68_84_{source_index}"
+    with st.form(form_key):
+        content_categories = st.multiselect(
+            "Content subtype (choose up to 2)",
+            DRAMA_REVIEW_OPTIONS["content_categories"],
+            default=defaults["content_categories"],
+            max_selections=2,
+        )
+        visual_summary = st.text_area(
+            "Visual summary",
+            value=defaults["visual_summary"],
+            height=110,
+        )
+
+        left, right = st.columns(2)
+        with left:
+            drama_type = st.selectbox(
+                "Drama type",
+                DRAMA_REVIEW_OPTIONS["drama_type"],
+                index=option_index(
+                    DRAMA_REVIEW_OPTIONS["drama_type"], defaults["drama_type"]
+                ),
+            )
+            edit_focus = st.selectbox(
+                "Edit focus",
+                DRAMA_REVIEW_OPTIONS["edit_focus"],
+                index=option_index(
+                    DRAMA_REVIEW_OPTIONS["edit_focus"], defaults["edit_focus"]
+                ),
+            )
+            drama_format = st.selectbox(
+                "Format",
+                DRAMA_REVIEW_OPTIONS["drama_format"],
+                index=option_index(
+                    DRAMA_REVIEW_OPTIONS["drama_format"], defaults["drama_format"]
+                ),
+            )
+        with right:
+            country_region = st.selectbox(
+                "Country / region",
+                DRAMA_REVIEW_OPTIONS["country_region"],
+                index=option_index(
+                    DRAMA_REVIEW_OPTIONS["country_region"], defaults["country_region"]
+                ),
+            )
+            drama_title = st.text_input(
+                "Drama / show title", value=defaults["drama_title"]
+            )
+            detected_audio = st.text_input(
+                "Detected audio", value=defaults["detected_audio"]
+            )
+            audio_version = st.selectbox(
+                "Audio version",
+                DRAMA_REVIEW_OPTIONS["audio_version"],
+                index=option_index(
+                    DRAMA_REVIEW_OPTIONS["audio_version"], defaults["audio_version"]
+                ),
+            )
+
+        save_details = st.form_submit_button(
+            "Save changes",
+            type="primary",
+            icon=":material/save:",
+            width="stretch",
+        )
+
+    if save_details:
+        values = {
+            "visual_summary": visual_summary,
+            "content_categories": content_categories,
+            "drama_type": drama_type,
+            "edit_focus": edit_focus,
+            "drama_format": drama_format,
+            "country_region": country_region,
+            "drama_title": drama_title,
+            "detected_audio": detected_audio,
+            "campaign_song_match": defaults["campaign_song_match"],
+            "audio_version": audio_version,
+        }
+        updated, changed = apply_summary_drama_detail_edits_v68_84(
+            st.session_state.get("tagged_df", pd.DataFrame()),
+            source_index,
+            values,
+        )
+        if changed:
+            st.session_state.tagged_df = add_performance_fields(updated)
+            _persist_runtime_checkpoint_v68_15()
+            _dismiss_summary_drama_details_v68_83()
+            st.toast("Drama details saved.", icon=":material/check_circle:")
+            st.rerun()
+        else:
+            st.info("No changes to save.")
 
     link = safe_str(detail.get("Link"))
     if link:
@@ -7358,22 +7713,58 @@ def apply_filter_value(df: pd.DataFrame, col: str, value: str, empty_label: str 
         return df[df[col].fillna("").astype(str).str.strip().eq("")]
     return df[df[col].fillna("").astype(str).str.strip().eq(value)]
 
+
+def _taggy_context_for_step_v68_87(step: int) -> pd.DataFrame:
+    """Select the most useful saved data for Taggy on one workflow page."""
+    if int(step) in {2, 3}:
+        context = st.session_state.get("batch_df", pd.DataFrame())
+    elif int(step) == 4:
+        context = st.session_state.get("tagged_df", pd.DataFrame())
+        if not isinstance(context, pd.DataFrame) or context.empty:
+            context = st.session_state.get("selected_df", pd.DataFrame())
+    else:
+        context = st.session_state.get("tagged_df", pd.DataFrame())
+    return context if isinstance(context, pd.DataFrame) else pd.DataFrame()
+
 # -----------------------------------------------------------------------------
 # Application shell and workflow pages
 # -----------------------------------------------------------------------------
+taggy_companion_session_v68_87 = _taggy_companion_requested_v68_87()
 _restore_browser_recovery_pointer_v68_80()
-_restore_runtime_checkpoint_v68_15()
+_restore_runtime_checkpoint_v68_15(persist=not taggy_companion_session_v68_87)
 # Step 1 was the retired credential page. Existing bookmarked sessions and
 # checkpoints should reopen on Add Posts instead of rendering an empty route.
 if st.session_state.get("step") == 1:
     st.session_state.step = 2
-_persist_runtime_checkpoint_v68_15()
+if not taggy_companion_session_v68_87:
+    _persist_runtime_checkpoint_v68_15()
 managed_gemini_key_v68_43 = _managed_api_secret_v68_43("GEMINI_API_KEY")
 managed_apify_token_v68_43 = _managed_api_secret_v68_43("APIFY_TOKEN")
 if managed_gemini_key_v68_43:
     st.session_state.gemini_key = managed_gemini_key_v68_43
 if managed_apify_token_v68_43:
     st.session_state.apify_token = managed_apify_token_v68_43
+
+if taggy_companion_session_v68_87:
+    companion_step_v68_87 = max(
+        2,
+        min(6, int(st.session_state.get("step", 4))),
+    )
+    st.markdown(
+        "<div class='card page-heading'><h2>Ask Taggy</h2>"
+        "<p class='sub'>Your tagging run continues in the original tab.</p></div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "This companion is read-only and uses the latest saved batch snapshot. "
+        "Refresh this tab to load newer saved progress."
+    )
+    render_taggy_assistant_v68_76(
+        companion_step_v68_87,
+        _taggy_context_for_step_v68_87(companion_step_v68_87),
+        standalone=True,
+    )
+    st.stop()
 
 st.markdown(
     """
@@ -7386,6 +7777,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 step_strip(st.session_state.step)
+_render_continue_later_v68_85()
 if st.session_state.pop("runtime_resume_notice_v68_15", False):
     st.markdown(
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",
@@ -7393,14 +7785,7 @@ if st.session_state.pop("runtime_resume_notice_v68_15", False):
     )
 
 if st.session_state.step != 6:
-    if st.session_state.step in {2, 3}:
-        taggy_context_v68_76 = st.session_state.get("batch_df", pd.DataFrame())
-    elif st.session_state.step == 4:
-        taggy_context_v68_76 = st.session_state.get("tagged_df", pd.DataFrame())
-        if not isinstance(taggy_context_v68_76, pd.DataFrame) or taggy_context_v68_76.empty:
-            taggy_context_v68_76 = st.session_state.get("selected_df", pd.DataFrame())
-    else:
-        taggy_context_v68_76 = st.session_state.get("tagged_df", pd.DataFrame())
+    taggy_context_v68_76 = _taggy_context_for_step_v68_87(st.session_state.step)
     render_taggy_assistant_v68_76(st.session_state.step, taggy_context_v68_76)
 
 # STEP 2: Add posts
@@ -7740,6 +8125,10 @@ if st.session_state.step == 2:
                 st.session_state.batch_df = pd.DataFrame()
                 st.session_state.selected_df = pd.DataFrame()
                 st.session_state.tagged_df = pd.DataFrame()
+                st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
+                st.session_state.metrics_only_active_v68_86 = False
+                st.session_state.metrics_only_next_position_v68_86 = 0
+                st.session_state.metrics_only_fingerprint_v68_86 = ""
                 st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
                 st.session_state.creator_profile_updated_at_v68_51 = ""
                 st.session_state.creator_profile_aliases_v68_67 = {}
@@ -8166,14 +8555,167 @@ elif st.session_state.step == 4:
         if st.button("Go to Select Posts", type="primary"):
             go(3)
         st.stop()
+    analysis_mode_v68_86 = st.segmented_control(
+        "What do you want to run?",
+        ["AI tagging", "Metrics only"],
+        key="analysis_mode_v68_86",
+        help=(
+            "Metrics only refreshes public post metrics and calculates engagement "
+            "without sending posts to Gemini."
+        ),
+    ) or "AI tagging"
+    metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
     st.markdown(metric_row([
-        ("Posts", str(len(selected)), "To tag"),
-        ("Mode", "General", "Taxonomy"),
+        ("Posts", str(len(selected)), "To refresh" if metrics_only_mode_v68_86 else "To tag"),
+        ("Mode", analysis_mode_v68_86, "No Gemini" if metrics_only_mode_v68_86 else "General taxonomy"),
         ("Markets", str(len([m for m in selected['Market'].fillna('').unique() if safe_str(m)])), "Detected"),
         ("Tracks", str(len([t for t in selected['Track'].fillna('').unique() if safe_str(t)])), "Detected"),
         ("Selection", st.session_state.get("selection_mode", "Top posts"), "Method"),
     ]), unsafe_allow_html=True)
     st.markdown(render_table(selected, max_rows=10, cols=["Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
+
+    if metrics_only_mode_v68_86:
+        st.caption(
+            "Refreshes Views, Likes, Comments, Shares, Saves and Followers, then "
+            "calculates engagement. The free scraper runs first; Apify is used only "
+            "when that public method needs a fallback."
+        )
+        supported_metrics_selection_v68_86 = selected[
+            selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
+        ].copy().reset_index(drop=True)
+        selected_fingerprint_v68_86 = input_fingerprint(
+            supported_metrics_selection_v68_86
+        )
+        saved_fingerprint_v68_86 = safe_str(
+            st.session_state.get("metrics_only_fingerprint_v68_86")
+        )
+        metrics_result_v68_86 = st.session_state.get(
+            "metrics_only_df_v68_86", pd.DataFrame()
+        )
+        if saved_fingerprint_v68_86 != selected_fingerprint_v68_86:
+            metrics_result_v68_86 = pd.DataFrame()
+
+        if st.session_state.get("metrics_only_active_v68_86", False):
+            completed_metrics_v68_86 = _run_metrics_only_chunk_v68_86(selected)
+            if completed_metrics_v68_86 is None:
+                st.rerun()
+            metrics_result_v68_86 = st.session_state.get(
+                "metrics_only_df_v68_86", pd.DataFrame()
+            )
+
+        completed_positions_v68_86 = int(
+            st.session_state.get("metrics_only_next_position_v68_86", 0)
+        )
+        metrics_complete_v68_86 = (
+            saved_fingerprint_v68_86 == selected_fingerprint_v68_86
+            and completed_positions_v68_86 >= len(supported_metrics_selection_v68_86)
+            and isinstance(metrics_result_v68_86, pd.DataFrame)
+            and not metrics_result_v68_86.empty
+        )
+
+        if isinstance(metrics_result_v68_86, pd.DataFrame) and not metrics_result_v68_86.empty:
+            if metrics_complete_v68_86:
+                st.success(
+                    f"Metrics refreshed for {len(metrics_result_v68_86):,} posts. "
+                    "No Gemini tagging was run."
+                )
+            else:
+                st.warning(
+                    f"Saved metrics for {len(metrics_result_v68_86):,} posts so far. "
+                    "Resume to collect the remaining posts."
+                )
+            total_views_v68_86 = sum(
+                clean_num(value) for value in metrics_result_v68_86.get("Views", [])
+            )
+            total_engagement_v68_86 = sum(
+                clean_num(value)
+                for value in metrics_result_v68_86.get("Total Engagement", [])
+            )
+            rates_v68_86 = pd.to_numeric(
+                metrics_result_v68_86.get(
+                    "Engagement Rate",
+                    pd.Series(dtype=float),
+                ),
+                errors="coerce",
+            ).dropna()
+            average_rate_v68_86 = (
+                float(rates_v68_86.mean()) if not rates_v68_86.empty else float("nan")
+            )
+            st.markdown(metric_row([
+                ("Refreshed", f"{len(metrics_result_v68_86):,}", "Posts"),
+                ("Views", short_num(total_views_v68_86), "Available total"),
+                ("Engagement", short_num(total_engagement_v68_86), "Available total"),
+                (
+                    "Average engagement rate",
+                    f"{average_rate_v68_86:.2f}%" if not pd.isna(average_rate_v68_86) else "—",
+                    "Mean post rate",
+                ),
+            ]), unsafe_allow_html=True)
+            metrics_columns_v68_86 = [
+                "Platform", "Source", "Link", "Market", "Track", "Creator",
+                "Followers", "Views", "Likes", "Comments", "Shares", "Saves",
+                "Total Engagement", "Engagement Rate", "Likes Rate",
+                "Comments Rate", "Shares Rate", "Saves Rate", "Metrics Status",
+                "Metrics Unavailable",
+            ]
+            st.markdown(
+                render_table(
+                    metrics_result_v68_86,
+                    max_rows=20,
+                    cols=metrics_columns_v68_86,
+                ),
+                unsafe_allow_html=True,
+            )
+            csv_col_v68_86, excel_col_v68_86 = st.columns(2)
+            export_metrics_v68_86 = metrics_result_v68_86[
+                [
+                    column for column in metrics_columns_v68_86
+                    if column in metrics_result_v68_86.columns
+                ]
+            ].copy()
+            with csv_col_v68_86:
+                st.download_button(
+                    "Download metrics CSV",
+                    export_metrics_v68_86.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="post_metrics.csv",
+                    mime="text/csv",
+                    width="stretch",
+                )
+            with excel_col_v68_86:
+                st.download_button(
+                    "Download metrics Excel",
+                    to_excel_bytes({"Post Metrics": export_metrics_v68_86}),
+                    file_name="post_metrics.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                )
+
+        metrics_back_v68_86, metrics_run_v68_86 = st.columns(2)
+        with metrics_back_v68_86:
+            if st.button("Back", width="stretch", key="metrics_only_back_v68_86"):
+                go(3)
+        with metrics_run_v68_86:
+            if metrics_complete_v68_86:
+                metrics_button_label_v68_86 = "Refresh metrics"
+            elif completed_positions_v68_86 > 0:
+                metrics_button_label_v68_86 = "Resume metrics"
+            else:
+                metrics_button_label_v68_86 = "Collect metrics"
+            if st.button(
+                metrics_button_label_v68_86,
+                type="primary",
+                width="stretch",
+                key="metrics_only_run_v68_86",
+            ):
+                _start_metrics_only_run_v68_86(
+                    selected,
+                    restart=metrics_complete_v68_86,
+                )
+                _persist_runtime_checkpoint_v68_15()
+                st.rerun()
+        _persist_runtime_checkpoint_v68_15()
+        st.stop()
+
     # Keep the same escalation path for either approved model. The active
     # backend only reaches full-video analysis when cover, 3-frame and 9-frame
     # evidence remain unresolved.

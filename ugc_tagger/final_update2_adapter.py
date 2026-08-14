@@ -941,6 +941,130 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
     return records
 
 
+def metrics_candidates(
+    candidates: pd.DataFrame,
+    records: List[Dict],
+) -> pd.DataFrame:
+    """Merge refreshed public metrics into selected rows without AI analysis."""
+    if candidates is None or candidates.empty:
+        return pd.DataFrame()
+
+    by_id, by_url = index_records(records)
+    metric_fields = {
+        "Views": "playCount",
+        "Likes": "diggCount",
+        "Comments": "commentCount",
+        "Shares": "shareCount",
+        "Saves": "collectCount",
+    }
+
+    def metric_is_present(record: Dict, field: str) -> bool:
+        if field not in record:
+            return False
+        value = record.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return False
+        try:
+            return not bool(pd.isna(value))
+        except (TypeError, ValueError):
+            return True
+
+    converted: List[Dict] = []
+    for _, original in candidates.iterrows():
+        output = original.to_dict()
+        record = match_record(original, by_id, by_url)
+        record_error = _text(
+            (record or {}).get("error") or (record or {}).get("errorCode")
+        ) if isinstance(record, dict) else "POST_NOT_FOUND"
+        unavailable = _instagram_unavailable_metrics(record)
+        if not isinstance(record, dict) or record_error:
+            unavailable = {name.casefold() for name in metric_fields}
+            record = {}
+        else:
+            unavailable.update(
+                metric.casefold()
+                for metric, record_field in metric_fields.items()
+                if not metric_is_present(record, record_field)
+            )
+
+        author = record.get("authorMeta") if isinstance(record.get("authorMeta"), dict) else {}
+        music = record.get("musicMeta") if isinstance(record.get("musicMeta"), dict) else {}
+        link = record_url(record) or _text(output.get("Link"))
+        platform = (
+            _text(output.get("Platform"))
+            or platform_for_record(record, link)
+            or detect_platform(link)
+            or TIKTOK
+        )
+        creator = _text(author.get("name")) or _creator_handle_from_post_url(link)
+        if not creator or creator.isdigit():
+            creator = _text(output.get("Creator"))
+
+        output.update({
+            "App Version": APP_VERSION,
+            "Platform": platform,
+            "Link": link,
+            "Market": normalize_campaign_market(output.get("Market")),
+            "Market Source": (
+                "Uploaded file / user input"
+                if normalize_campaign_market(output.get("Market"))
+                else "Not provided"
+            ),
+            "Track": _text(output.get("Track")) or _record_music_name(record),
+            "Original Sound": _text(output.get("Original Sound")) or _record_music_name(record),
+            "Creator": creator,
+            "Creator Display": _text(author.get("nickName")),
+            "Caption": _text(record.get("text")) or _text(output.get("Caption")),
+            "Followers": _creator_followers(record) or _number(output.get("Followers")),
+            "Audio From Platform": _text(music.get("musicName")),
+            "Audio Artist From Platform": _text(music.get("musicAuthor")),
+            "Metrics Unavailable": ", ".join(
+                name for name in metric_fields if name.casefold() in unavailable
+            ),
+            "Metrics Status": (
+                "Not refreshed"
+                if record_error
+                else "Partial" if unavailable else "Refreshed"
+            ),
+            "Gemini Called": False,
+            "Validation Status": "metrics_only",
+            "Needs Review": False,
+        })
+
+        for metric, record_field in metric_fields.items():
+            output[metric] = (
+                pd.NA
+                if metric.casefold() in unavailable
+                else _number(record.get(record_field))
+            )
+
+        engagement_values = [
+            output.get(metric)
+            for metric in ("Likes", "Comments", "Shares", "Saves")
+            if metric.casefold() not in unavailable
+        ]
+        output["Total Engagement"] = (
+            sum(_number(value) for value in engagement_values)
+            if engagement_values
+            else pd.NA
+        )
+        views_available = "views" not in unavailable and _number(output.get("Views")) > 0
+        output["Engagement Rate"] = (
+            round(_number(output.get("Total Engagement")) / _number(output.get("Views")) * 100, 2)
+            if views_available and not pd.isna(output.get("Total Engagement"))
+            else pd.NA
+        )
+        for metric in ("Likes", "Comments", "Shares", "Saves"):
+            output[f"{metric} Rate"] = (
+                round(_number(output.get(metric)) / _number(output.get("Views")) * 100, 2)
+                if views_available and metric.casefold() not in unavailable
+                else pd.NA
+            )
+        converted.append(output)
+
+    return pd.DataFrame(converted).reset_index(drop=True)
+
+
 def tag_candidates(
     candidates: pd.DataFrame,
     records: List[Dict],

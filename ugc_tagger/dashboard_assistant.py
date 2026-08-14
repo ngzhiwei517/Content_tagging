@@ -6,8 +6,27 @@ import hashlib
 import json
 import math
 from typing import Callable, Dict, Iterable, List, Mapping, Optional
+from urllib.parse import urlencode
 
 import pandas as pd
+
+
+def build_taggy_companion_url(
+    *,
+    base_url: str,
+    recovery_id: str,
+    step: int,
+) -> str:
+    """Build the secret-free URL used by Taggy's independent browser session."""
+    query = urlencode(
+        {
+            "run": str(recovery_id).strip(),
+            "step": str(max(2, min(6, int(step)))),
+            "taggy": "1",
+        }
+    )
+    clean_base_url = str(base_url or "").strip().rstrip("?")
+    return f"{clean_base_url}?{query}" if clean_base_url else f"?{query}"
 
 
 DASHBOARD_CHAT_SUGGESTIONS = {

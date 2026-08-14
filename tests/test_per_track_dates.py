@@ -298,6 +298,11 @@ class PerTrackDateStateAndSourceTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "segmented_control"
+            and any(
+                isinstance(value, ast.Constant)
+                and value.value in {"Same date for all tracks", "Different date by track"}
+                for value in ast.walk(node)
+            )
         ]
         self.assertEqual(calls, [])
         for phrase in [
