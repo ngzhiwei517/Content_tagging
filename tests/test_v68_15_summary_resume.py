@@ -174,6 +174,9 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.filter_summary_by_creative_types = staticmethod(
             load_function("filter_summary_by_creative_types_v68_75", namespace)
         )
+        cls.prepare_drama_breakdown_view = staticmethod(
+            load_function("prepare_drama_breakdown_view_v68_90", namespace)
+        )
         cls.summary_drilldown_mask = staticmethod(
             load_function(
                 "_summary_drilldown_mask_v68_71",
@@ -641,12 +644,106 @@ class SummaryV6815Tests(unittest.TestCase):
         self.render_drama_breakdown(insights)
         trace = self.rendered_chart_figures[-1].data[0]
         self.assertEqual(trace.orientation, "h")
-        self.assertEqual(list(trace.y), insights["Drama Type"].tolist())
-        self.assertEqual(list(trace.x), [5, 0, 13, 1])
+        self.assertEqual(list(trace.y), ["BL", "General drama", "Other / unclear"])
+        self.assertEqual(list(trace.x), [5, 13, 1])
         self.assertIn("5 posts · 13.9% avg. ER", list(trace.text))
-        self.assertIn("0 posts · ER unavailable", list(trace.text))
-        self.assertIn("Share of drama posts: %{customdata[0]:.1f}%", trace.hovertemplate)
+        self.assertNotIn("GL", list(trace.y))
+        self.assertIn("Share of shown posts: %{customdata[0]:.1f}%", trace.hovertemplate)
         self.assertIn("Average engagement rate: %{customdata[1]}", trace.hovertemplate)
+        self.assertIn("Total views: %{customdata[2]:,.0f}", trace.hovertemplate)
+
+    def test_drama_breakdown_views_keep_content_genre_format_and_title_separate(self):
+        rows = pd.DataFrame([
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Micro-drama edits",
+                "Drama Type": "BL Drama",
+                "Drama Format": "Short-form Drama",
+                "Drama Title": "Never Ending Summer",
+                "Audio Version": "Slowed",
+                "Views": 100,
+                "Total Engagement": 20,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Entertainment News",
+                "Drama Type": "General Drama",
+                "Drama Format": "Long-form Drama",
+                "Drama Title": "Love Has Fireworks",
+                "Audio Version": "Original",
+                "Views": 200,
+                "Total Engagement": 20,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "GL CP Edits",
+                "Drama Edit Focus": "GL CP Edit",
+                "Drama Format": "Micro-drama",
+                "Drama Title": "Never Ending Summer",
+                "Audio Version": "Original",
+                "Views": 100,
+                "Total Engagement": 10,
+            },
+            {
+                "Creative Type": "Comedy",
+                "Drama Content Category": "Drama Edit",
+                "Views": 100,
+                "Total Engagement": 100,
+            },
+        ])
+
+        content = self.prepare_drama_breakdown_view(rows, "Content type")
+        self.assertEqual(content["Posts"].sum(), 3)
+        self.assertIn("Micro-drama Edit", content["Category"].tolist())
+        self.assertIn("Entertainment News", content["Category"].tolist())
+        self.assertIn("CP Edit", content["Category"].tolist())
+
+        genre = self.prepare_drama_breakdown_view(rows, "Drama genre")
+        self.assertEqual(set(genre["Category"]), {"BL", "GL", "General drama"})
+        self.assertNotIn("Other / unclear", genre["Category"].tolist())
+
+        format_view = self.prepare_drama_breakdown_view(rows, "Format")
+        short_form = format_view.loc[
+            format_view["Category"] == "Short-form drama", "Posts"
+        ].iloc[0]
+        self.assertEqual(int(short_form), 2)
+
+        titles = self.prepare_drama_breakdown_view(rows, "Show / title")
+        self.assertEqual(titles.iloc[0]["Category"], "Never Ending Summer")
+        self.assertEqual(int(titles.iloc[0]["Posts"]), 2)
+
+        audio = self.prepare_drama_breakdown_view(rows, "Audio version")
+        self.assertEqual(set(audio["Category"]), {"Original", "Slowed"})
+        self.assertEqual(
+            int(audio.loc[audio["Category"] == "Original", "Posts"].iloc[0]),
+            2,
+        )
+
+    def test_drama_content_type_normalizes_campaign_specific_labels(self):
+        rows = pd.DataFrame([
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Chinese longform drama edits",
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Local Indonesian drama edits",
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Actor/Actress Carousel",
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Drama Carousel",
+            },
+        ])
+
+        content = self.prepare_drama_breakdown_view(rows, "Content type")
+        counts = dict(zip(content["Category"], content["Posts"]))
+        self.assertEqual(int(counts["Drama Edit"]), 2)
+        self.assertEqual(int(counts["Actor/Actress Carousel"]), 1)
+        self.assertEqual(int(counts["Drama Carousel"]), 1)
 
     def test_summary_has_requested_order_and_no_median_metric(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
@@ -728,8 +825,10 @@ class SummaryV6815Tests(unittest.TestCase):
         )[0]
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", top_posts_block)
         self.assertIn('st.expander(', top_posts_block)
-        self.assertIn('f"Drama breakdown · {total_drama_posts:,} post"', top_posts_block)
-        self.assertIn("render_drama_breakdown_v68_89(drama_insights)", top_posts_block)
+        self.assertIn('f"Drama performance · {total_drama_posts:,} post"', top_posts_block)
+        self.assertIn("DRAMA_BREAKDOWN_VIEWS_V68_90", top_posts_block)
+        self.assertIn("prepare_drama_breakdown_view_v68_90", top_posts_block)
+        self.assertIn("render_drama_breakdown_v68_89(", top_posts_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
         for column in [
             "Creator", "Market", "Track", "Creative Type", "Narrative",

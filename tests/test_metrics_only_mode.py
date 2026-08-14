@@ -118,13 +118,29 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
             "# STEP 5: Review",
             1,
         )[0]
+        step_six = APP_SOURCE.split("# STEP 6: Summary and export", 1)[1]
 
         self.assertIn('"What do you want to run?"', step_two)
         self.assertIn('["AI tagging", "Metrics only"]', APP_SOURCE)
         self.assertNotIn('"What do you want to run?"', step_four)
         self.assertIn('st.session_state.get("analysis_mode_v68_86")', step_four)
-        self.assertIn('"Download metrics CSV"', APP_SOURCE)
-        self.assertIn('"Download metrics Excel"', APP_SOURCE)
+        self.assertIn('run_page_title_v68_86 = "Fetch metrics"', step_four)
+        self.assertIn('metrics_button_label_v68_86 = "Fetch metrics"', step_four)
+        self.assertIn("if metrics_complete_v68_86:", step_four)
+        self.assertIn("go(6)", step_four)
+        self.assertNotIn('"Download metrics CSV"', step_four)
+        self.assertIn("<h2>Metrics & Export</h2>", step_six)
+        self.assertIn('"Download metrics CSV"', step_six)
+        self.assertIn('"Download metrics Excel"', step_six)
+
+    def test_metrics_export_branch_skips_tagged_summary(self):
+        step_six = APP_SOURCE.split("# STEP 6: Summary and export", 1)[1]
+        metrics_branch = step_six.split("tagged = st.session_state.tagged_df", 1)[0]
+
+        self.assertIn("metrics_only_export_mode_v68_86", metrics_branch)
+        self.assertIn("st.stop()", metrics_branch)
+        self.assertIn('"Refresh metrics"', metrics_branch)
+        self.assertIn('"Start new batch"', metrics_branch)
 
     def test_metrics_helper_is_loaded_safely_during_hot_reload(self):
         import_block = APP_SOURCE.split(
