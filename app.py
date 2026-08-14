@@ -2745,6 +2745,15 @@ def standardize_file_rows(
     return out_df, cols
 
 
+def uploaded_rows_missing_track_v68_82(frame: pd.DataFrame) -> bool:
+    """Return True only when at least one valid uploaded row has no track."""
+    if frame is None or frame.empty:
+        return False
+    if "Track" not in frame.columns:
+        return True
+    return bool(frame["Track"].map(safe_str).eq("").any())
+
+
 # Current batch assembly and deduplication
 
 
@@ -7563,7 +7572,10 @@ if st.session_state.step == 2:
                             fallback_track=fallback_track,
                             fallback_artist=fallback_artist,
                         )
-                        if not std.empty and not fallback_track:
+                        # A track already present in the uploaded file is valid;
+                        # do not disable the add button merely because the
+                        # optional per-file override was left untouched.
+                        if uploaded_rows_missing_track_v68_82(std):
                             missing_track_files.append(f.name)
                         parsed_frames.append(std)
                         platforms = sorted([
