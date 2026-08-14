@@ -5898,6 +5898,77 @@ def prepare_drama_detail_table_v68_71(df: pd.DataFrame) -> pd.DataFrame:
     return details[DRAMA_DETAIL_TABLE_COLUMNS_V68_71]
 
 
+def prepare_drama_insights_v68_85(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarise the current drama posts without adding another dashboard mode."""
+    columns = ["Drama Type", "Posts", "Average Engagement Rate"]
+    if df is None or df.empty or "Creative Type" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    drama_rows = df[
+        df["Creative Type"].fillna("").astype(str).map(
+            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+        )
+    ].copy()
+    if drama_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    def parsed_detail(row, field: str) -> str:
+        for line in safe_str(row.get("Content Details")).splitlines():
+            if ":" not in line:
+                continue
+            label, value = line.split(":", 1)
+            if label.strip().casefold() == field.casefold():
+                return safe_str(value)
+        return ""
+
+    def drama_group(row) -> str:
+        drama_type = safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type")
+        edit_focus = (
+            safe_str(row.get("Drama Edit Focus"))
+            or parsed_detail(row, "Edit Focus")
+        )
+        evidence = f"{drama_type} {edit_focus}".casefold()
+        if re.search(r"\bbl\b|boys[ -]?love", evidence):
+            return "BL"
+        if re.search(r"\bgl\b|girls[ -]?love", evidence):
+            return "GL"
+        if "general" in evidence:
+            return "General drama"
+        return "Other / unclear"
+
+    def engagement_rate(row) -> float:
+        raw_views = row.get("Views")
+        raw_engagement = row.get("Total Engagement")
+        views_text = safe_str(raw_views).casefold()
+        engagement_text = safe_str(raw_engagement).casefold()
+        unavailable_values = {"", "none", "nan", "<na>", "not available"}
+        if views_text not in unavailable_values and engagement_text not in unavailable_values:
+            views = clean_num(raw_views)
+            if views > 0:
+                return clean_num(raw_engagement) / views * 100
+        raw_rate = safe_str(row.get("Engagement Rate")).replace("%", "").strip()
+        try:
+            return float(raw_rate)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drama_rows["_Drama Insight Type"] = drama_rows.apply(drama_group, axis=1)
+    drama_rows["_Drama Insight ER"] = drama_rows.apply(engagement_rate, axis=1)
+    order = ["BL", "GL", "General drama", "Other / unclear"]
+    records = []
+    for label in order:
+        group = drama_rows[drama_rows["_Drama Insight Type"] == label]
+        average_rate = group["_Drama Insight ER"].dropna().mean()
+        records.append({
+            "Drama Type": label,
+            "Posts": int(len(group)),
+            "Average Engagement Rate": (
+                float(average_rate) if pd.notna(average_rate) else None
+            ),
+        })
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
 def _dismiss_summary_drama_details_v68_83() -> None:
     """Reset the selected-cell widget after a drama detail dialog closes."""
     state_key = "summary_top_posts_click_nonce_v68_83"
@@ -9771,6 +9842,33 @@ elif st.session_state.step == 6:
             st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
             views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
             render_creative_type_views_doughnut_v68_49(views_mix)
+
+    drama_insights = prepare_drama_insights_v68_85(filtered)
+    if not drama_insights.empty:
+        with st.container(border=True):
+            st.markdown(section_title("Drama Insights", "#f59e0b"), unsafe_allow_html=True)
+            total_drama_posts = int(drama_insights["Posts"].sum())
+            st.caption(
+                f"{total_drama_posts:,} drama post"
+                f"{'s' if total_drama_posts != 1 else ''} in the current filtered view."
+            )
+            insight_columns = st.columns(len(drama_insights))
+            for insight_column, (_, insight) in zip(
+                insight_columns,
+                drama_insights.iterrows(),
+            ):
+                with insight_column:
+                    post_count = int(insight["Posts"])
+                    st.metric(
+                        safe_str(insight["Drama Type"]),
+                        f"{post_count:,} post{'s' if post_count != 1 else ''}",
+                    )
+                    average_rate = insight["Average Engagement Rate"]
+                    st.caption(
+                        f"{float(average_rate):.1f}% avg. engagement rate"
+                        if pd.notna(average_rate)
+                        else "Engagement rate unavailable"
+                    )
 
     if has_metrics:
         with st.container(border=True):
