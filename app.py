@@ -101,7 +101,6 @@ from ugc_tagger.final_update2_adapter import (
     build_review_drama_updates as final_update2_build_review_drama_updates,
     drama_review_defaults as final_update2_drama_review_defaults,
     normalize_url as final_update2_normalize_url,
-    metrics_candidates as final_update2_metrics_candidates,
     review_audit_update as final_update2_review_audit_update,
     review_cache as final_update2_review_cache,
     scrape_links as final_update2_scrape_links,
@@ -131,6 +130,28 @@ except Exception:
 st.set_page_config(page_title="UGC Post Tagging", page_icon="", layout="wide")
 
 LOGGER = logging.getLogger(__name__)
+
+
+def final_update2_metrics_candidates(
+    candidates: pd.DataFrame,
+    records: List[Dict],
+) -> pd.DataFrame:
+    """Load the metrics-only adapter helper without breaking hot reloads.
+
+    Streamlit Cloud can briefly execute a new ``app.py`` while the previous
+    adapter module remains cached. Reloading only when this newly added helper
+    is absent keeps the app available during that rolling update.
+    """
+    adapter = _final_update2_adapter
+    helper = getattr(adapter, "metrics_candidates", None)
+    if not callable(helper):
+        adapter = importlib.reload(adapter)
+        helper = getattr(adapter, "metrics_candidates", None)
+    if not callable(helper):
+        raise RuntimeError(
+            "Metrics-only mode is still updating. Please retry in a moment."
+        )
+    return helper(candidates, records)
 
 
 def _failed_analysis_review_row_v68_43(original) -> Dict:
