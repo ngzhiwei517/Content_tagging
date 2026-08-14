@@ -44,6 +44,8 @@ Large batches are processed in protected chunks and saved after each completed r
 
 Checkpoints are local by default. Supabase/Postgres can optionally provide recovery after an app restart or redeployment. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
 
+Open the plain app URL for a new independent batch. Use a batch's private **Continue later** link to reopen that specific run.
+
 ## Creator performance
 
 The dashboard can enrich up to 100 ranked creators using public activity from the latest three months. It:

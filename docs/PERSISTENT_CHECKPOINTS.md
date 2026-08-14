@@ -39,6 +39,8 @@ Recovery IDs are private bearer identifiers and should not be shared publicly.
 Progress is saved automatically. The private `run` value in the current browser
 URL identifies the batch and lets the app restore it after a reconnect or
 restart. Keep that URL private because anyone with it can reopen the batch.
+Opening the plain app URL starts a new independent batch, so separate tabs can
+run separate jobs without being redirected to the last unfinished batch.
 
 Remote checkpointing starts only after the current workflow contains at least
 one post. Opening an empty app session does not create a Supabase/Postgres row;

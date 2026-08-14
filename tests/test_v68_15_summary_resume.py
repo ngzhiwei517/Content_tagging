@@ -464,6 +464,58 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(details.loc[0, "Visual Summary"], "An emotional drama montage.")
         self.assertEqual(details.loc[0, "Drama Type"], "General Drama")
 
+    def test_drama_insights_keep_bl_gl_and_general_simple(self):
+        drama_namespace = {
+            "pd": pd,
+            "re": re,
+            "split_creative_labels": lambda value: [
+                part.strip() for part in str(value).split(",") if part.strip()
+            ],
+            "safe_str": lambda value: "" if pd.isna(value) else str(value).strip(),
+            "clean_num": lambda value: int(float(value or 0)),
+        }
+        prepare_insights = load_function(
+            "prepare_drama_insights_v68_85",
+            drama_namespace,
+        )
+        insights = prepare_insights(pd.DataFrame([
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Views": 100,
+                "Total Engagement": 20,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Edit Focus": "GL CP Edit",
+                "Views": 200,
+                "Total Engagement": 20,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Content Details": "Drama Type: General Drama",
+                "Views": 100,
+                "Total Engagement": 10,
+            },
+            {
+                "Creative Type": "Comedy",
+                "Drama Type": "BL Drama",
+                "Views": 100,
+                "Total Engagement": 100,
+            },
+        ]))
+
+        self.assertEqual(
+            insights["Drama Type"].tolist(),
+            ["BL", "GL", "General drama", "Other / unclear"],
+        )
+        self.assertEqual(insights["Posts"].tolist(), [1, 1, 1, 0])
+        self.assertEqual(
+            insights["Average Engagement Rate"].iloc[:3].round(1).tolist(),
+            [20.0, 10.0, 10.0],
+        )
+        self.assertTrue(pd.isna(insights.iloc[3]["Average Engagement Rate"]))
+
     def test_drama_detail_dialog_is_editable_and_persists_structured_fields(self):
         tagged = pd.DataFrame([{
             "Creative Type": "Movie/Tv/Drama Edits",

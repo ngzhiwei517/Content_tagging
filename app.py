@@ -1548,27 +1548,15 @@ def _browser_recovery_pointer_v68_80() -> Tuple[bool, str]:
 
 
 def _restore_browser_recovery_pointer_v68_80() -> None:
-    """Reopen the latest saved batch when the same browser visits the plain URL."""
-    ready, remembered_id = _browser_recovery_pointer_v68_80()
-    has_explicit_run = bool(_valid_runtime_id_v68_15(_runtime_query_value_v68_15("run")))
-    has_session_run = bool(
-        _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
-    )
-    if has_explicit_run or has_session_run:
-        return
-    if not ready:
-        # Wait for the tiny browser component to read localStorage. It triggers
-        # the next rerun immediately and prevents a new empty id from replacing
-        # the user's remembered batch in the meantime.
-        st.stop()
-    if not remembered_id or not _runtime_checkpoint_candidates_v68_44(remembered_id):
-        return
-    try:
-        st.query_params["run"] = remembered_id
-        st.query_params["step"] = "2"
-    except Exception:
-        return
-    st.rerun()
+    """Remember explicit recovery links without redirecting the plain app URL.
+
+    A visit to the plain deployed URL must create a separate batch so users can
+    work in multiple tabs. Only a private URL containing ``run=...`` restores a
+    saved batch.
+    """
+    explicit_run = _valid_runtime_id_v68_15(_runtime_query_value_v68_15("run"))
+    if explicit_run:
+        _browser_recovery_pointer_v68_80()
 
 
 def _clear_tagging_continue_query_v68_55() -> None:
@@ -5405,13 +5393,25 @@ def render_taggy_assistant_v68_76(
         st.session_state.get("tagging_job_active_v68_43", False)
         or st.session_state.get("metrics_only_active_v68_86", False)
     )
+    # A Streamlit script run owns its browser session until the current tagging
+    # call returns. The Run Tagging page must therefore always launch Taggy in
+    # a separate session, even immediately before the active flag is reconciled
+    # lower down the page. Other workflow pages keep the convenient popover.
+    companion_url = (
+        _taggy_companion_url_v68_87(int(step)) if int(step) == 4 else ""
+    )
+    use_companion = bool(companion_url)
     with st.container(
         key="taggy_floating_launcher_v68_78",
         width="content",
         horizontal_alignment="right",
         gap=None,
     ):
-        st.caption("Tagging is running" if tagging_is_busy else "May I help?")
+        st.caption(
+            "Tagging is running"
+            if tagging_is_busy
+            else ("Opens in a separate tab" if use_companion else "May I help?")
+        )
         with st.container(
             horizontal=True,
             vertical_alignment="center",
@@ -5421,16 +5421,14 @@ def render_taggy_assistant_v68_76(
         ):
             if TAGGY_ASSET_V68_76.exists():
                 st.image(str(TAGGY_ASSET_V68_76), width=56)
-            if tagging_is_busy:
-                companion_url = _taggy_companion_url_v68_87(int(step))
-                if companion_url:
-                    st.markdown(
-                        "<a class='taggy-companion-link' target='_blank' "
-                        "rel='noopener noreferrer' href='"
-                        + html.escape(companion_url, quote=True)
-                        + "'>Ask Taggy ↗</a>",
-                        unsafe_allow_html=True,
-                    )
+            if use_companion:
+                st.markdown(
+                    "<a class='taggy-companion-link' target='_blank' "
+                    "rel='noopener noreferrer' href='"
+                    + html.escape(companion_url, quote=True)
+                    + "'>Ask Taggy ↗</a>",
+                    unsafe_allow_html=True,
+                )
             else:
                 assistant_popover = st.popover(
                     "Ask Taggy",
@@ -5438,7 +5436,7 @@ def render_taggy_assistant_v68_76(
                     width="content",
                 )
 
-    if tagging_is_busy:
+    if use_companion:
         return
     with assistant_popover:
         _render_taggy_chat_content_v68_87(
@@ -5896,6 +5894,77 @@ def prepare_drama_detail_table_v68_71(df: pd.DataFrame) -> pd.DataFrame:
         })
     details = pd.DataFrame.from_records(records).set_index("_index")
     return details[DRAMA_DETAIL_TABLE_COLUMNS_V68_71]
+
+
+def prepare_drama_insights_v68_85(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarise the current drama posts without adding another dashboard mode."""
+    columns = ["Drama Type", "Posts", "Average Engagement Rate"]
+    if df is None or df.empty or "Creative Type" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    drama_rows = df[
+        df["Creative Type"].fillna("").astype(str).map(
+            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+        )
+    ].copy()
+    if drama_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    def parsed_detail(row, field: str) -> str:
+        for line in safe_str(row.get("Content Details")).splitlines():
+            if ":" not in line:
+                continue
+            label, value = line.split(":", 1)
+            if label.strip().casefold() == field.casefold():
+                return safe_str(value)
+        return ""
+
+    def drama_group(row) -> str:
+        drama_type = safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type")
+        edit_focus = (
+            safe_str(row.get("Drama Edit Focus"))
+            or parsed_detail(row, "Edit Focus")
+        )
+        evidence = f"{drama_type} {edit_focus}".casefold()
+        if re.search(r"\bbl\b|boys[ -]?love", evidence):
+            return "BL"
+        if re.search(r"\bgl\b|girls[ -]?love", evidence):
+            return "GL"
+        if "general" in evidence:
+            return "General drama"
+        return "Other / unclear"
+
+    def engagement_rate(row) -> float:
+        raw_views = row.get("Views")
+        raw_engagement = row.get("Total Engagement")
+        views_text = safe_str(raw_views).casefold()
+        engagement_text = safe_str(raw_engagement).casefold()
+        unavailable_values = {"", "none", "nan", "<na>", "not available"}
+        if views_text not in unavailable_values and engagement_text not in unavailable_values:
+            views = clean_num(raw_views)
+            if views > 0:
+                return clean_num(raw_engagement) / views * 100
+        raw_rate = safe_str(row.get("Engagement Rate")).replace("%", "").strip()
+        try:
+            return float(raw_rate)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drama_rows["_Drama Insight Type"] = drama_rows.apply(drama_group, axis=1)
+    drama_rows["_Drama Insight ER"] = drama_rows.apply(engagement_rate, axis=1)
+    order = ["BL", "GL", "General drama", "Other / unclear"]
+    records = []
+    for label in order:
+        group = drama_rows[drama_rows["_Drama Insight Type"] == label]
+        average_rate = group["_Drama Insight ER"].dropna().mean()
+        records.append({
+            "Drama Type": label,
+            "Posts": int(len(group)),
+            "Average Engagement Rate": (
+                float(average_rate) if pd.notna(average_rate) else None
+            ),
+        })
+    return pd.DataFrame.from_records(records, columns=columns)
 
 
 def _dismiss_summary_drama_details_v68_83() -> None:
@@ -7813,6 +7882,25 @@ if st.session_state.step != 6:
 if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
+    with st.container(border=True):
+        st.segmented_control(
+            "What do you want to run?",
+            ["AI tagging", "Metrics only"],
+            key="analysis_mode_v68_86",
+            help=(
+                "Metrics only refreshes public post metrics and calculates engagement "
+                "without sending posts to Gemini."
+            ),
+        )
+        selected_run_mode_v68_88 = safe_str(
+            st.session_state.get("analysis_mode_v68_86")
+        ) or "AI tagging"
+        st.caption(
+            "AI tagging analyses creative content and metrics."
+            if selected_run_mode_v68_88 == "AI tagging"
+            else "Metrics only refreshes available engagement data without AI tagging."
+        )
+
     # The demo keeps the established General UGC pipeline. Drama detail remains
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
@@ -8576,14 +8664,8 @@ elif st.session_state.step == 4:
         if st.button("Go to Select Posts", type="primary"):
             go(3)
         st.stop()
-    analysis_mode_v68_86 = st.segmented_control(
-        "What do you want to run?",
-        ["AI tagging", "Metrics only"],
-        key="analysis_mode_v68_86",
-        help=(
-            "Metrics only refreshes public post metrics and calculates engagement "
-            "without sending posts to Gemini."
-        ),
+    analysis_mode_v68_86 = safe_str(
+        st.session_state.get("analysis_mode_v68_86")
     ) or "AI tagging"
     metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
     st.markdown(metric_row([
@@ -9771,6 +9853,33 @@ elif st.session_state.step == 6:
             st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
             views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
             render_creative_type_views_doughnut_v68_49(views_mix)
+
+    drama_insights = prepare_drama_insights_v68_85(filtered)
+    if not drama_insights.empty:
+        with st.container(border=True):
+            st.markdown(section_title("Drama Insights", "#f59e0b"), unsafe_allow_html=True)
+            total_drama_posts = int(drama_insights["Posts"].sum())
+            st.caption(
+                f"{total_drama_posts:,} drama post"
+                f"{'s' if total_drama_posts != 1 else ''} in the current filtered view."
+            )
+            insight_columns = st.columns(len(drama_insights))
+            for insight_column, (_, insight) in zip(
+                insight_columns,
+                drama_insights.iterrows(),
+            ):
+                with insight_column:
+                    post_count = int(insight["Posts"])
+                    st.metric(
+                        safe_str(insight["Drama Type"]),
+                        f"{post_count:,} post{'s' if post_count != 1 else ''}",
+                    )
+                    average_rate = insight["Average Engagement Rate"]
+                    st.caption(
+                        f"{float(average_rate):.1f}% avg. engagement rate"
+                        if pd.notna(average_rate)
+                        else "Engagement rate unavailable"
+                    )
 
     if has_metrics:
         with st.container(border=True):
