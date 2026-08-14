@@ -5886,7 +5886,7 @@ def _dismiss_summary_drama_details_v68_83() -> None:
 def apply_summary_drama_detail_edits_v68_84(
     tagged_df: pd.DataFrame,
     original_index,
-    values: Dict[str, object],
+    values: dict[str, object],
 ) -> Tuple[pd.DataFrame, bool]:
     """Save structured drama-dialog edits to one tagged row."""
     if (
