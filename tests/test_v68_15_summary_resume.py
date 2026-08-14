@@ -188,7 +188,10 @@ class SummaryV6815Tests(unittest.TestCase):
             "Optional": __import__("typing").Optional,
             "safe_str": namespace["safe_str"],
             "clean_num": namespace["clean_num"],
-            "st": SimpleNamespace(markdown=lambda *args, **kwargs: None),
+            "st": SimpleNamespace(
+                markdown=lambda *args, **kwargs: None,
+                caption=lambda *args, **kwargs: None,
+            ),
             "bar_list": lambda *args, **kwargs: "",
             "chart_bar": lambda *args, **kwargs: None,
             "render_plotly_chart": lambda fig: cls.rendered_chart_figures.append(fig),
@@ -199,6 +202,9 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         cls.render_creative_type_views = staticmethod(
             load_function("render_creative_type_views_doughnut_v68_49", chart_namespace)
+        )
+        cls.render_drama_breakdown = staticmethod(
+            load_function("render_drama_breakdown_v68_89", chart_namespace)
         )
 
     def test_group_summary_uses_average_engagement_metrics(self):
@@ -625,6 +631,23 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
         self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
 
+    def test_drama_breakdown_compares_volume_and_average_engagement_rate(self):
+        self.rendered_chart_figures.clear()
+        insights = pd.DataFrame({
+            "Drama Type": ["BL", "GL", "General drama", "Other / unclear"],
+            "Posts": [5, 0, 13, 1],
+            "Average Engagement Rate": [13.9, None, 7.6, 4.6],
+        })
+        self.render_drama_breakdown(insights)
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertEqual(trace.orientation, "h")
+        self.assertEqual(list(trace.y), insights["Drama Type"].tolist())
+        self.assertEqual(list(trace.x), [5, 0, 13, 1])
+        self.assertIn("5 posts · 13.9% avg. ER", list(trace.text))
+        self.assertIn("0 posts · ER unavailable", list(trace.text))
+        self.assertIn("Share of drama posts: %{customdata[0]:.1f}%", trace.hovertemplate)
+        self.assertIn("Average engagement rate: %{customdata[1]}", trace.hovertemplate)
+
     def test_summary_has_requested_order_and_no_median_metric(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         positions = [
@@ -638,6 +661,7 @@ class SummaryV6815Tests(unittest.TestCase):
         ]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("Median Engagement Rate", APP_SOURCE)
+        self.assertNotIn('section_title("Drama Insights"', step_six)
 
     def test_tiktok_links_render_as_safe_clickable_links(self):
         self.assertIn('target="_blank"', APP_SOURCE)
@@ -703,6 +727,9 @@ class SummaryV6815Tests(unittest.TestCase):
             "render_top_creator_performance_v68_47", 1
         )[0]
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", top_posts_block)
+        self.assertIn('st.expander(', top_posts_block)
+        self.assertIn('f"Drama breakdown · {total_drama_posts:,} post"', top_posts_block)
+        self.assertIn("render_drama_breakdown_v68_89(drama_insights)", top_posts_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
         for column in [
             "Creator", "Market", "Track", "Creative Type", "Narrative",

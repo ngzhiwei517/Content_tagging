@@ -5967,6 +5967,130 @@ def prepare_drama_insights_v68_85(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=columns)
 
 
+def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
+    """Render a compact drama comparison for the optional Top Posts detail."""
+    if insights is None or insights.empty:
+        return
+
+    chart_data = insights.copy()
+    chart_data["Posts"] = pd.to_numeric(
+        chart_data["Posts"], errors="coerce"
+    ).fillna(0).clip(lower=0).round().astype(int)
+    chart_data["Average Engagement Rate"] = pd.to_numeric(
+        chart_data["Average Engagement Rate"], errors="coerce"
+    )
+    total_posts = int(chart_data["Posts"].sum())
+    if total_posts <= 0:
+        return
+
+    chart_data["Share of Drama Posts"] = (
+        chart_data["Posts"] / total_posts * 100.0
+    )
+    chart_data["Average ER Label"] = chart_data["Average Engagement Rate"].map(
+        lambda value: (
+            f"{float(value):.1f}% avg. ER"
+            if pd.notna(value)
+            else "ER unavailable"
+        )
+    )
+    chart_data["Bar Label"] = chart_data.apply(
+        lambda row: (
+            f"{int(row['Posts']):,} post{'s' if int(row['Posts']) != 1 else ''}"
+            f" · {row['Average ER Label']}"
+        ),
+        axis=1,
+    )
+
+    available = chart_data[
+        (chart_data["Posts"] > 0) & chart_data["Average Engagement Rate"].notna()
+    ]
+    leading_volume = chart_data.loc[chart_data["Posts"].idxmax(), "Drama Type"]
+    if available.empty:
+        takeaway = (
+            f"{leading_volume} is the most common drama type in this filtered batch."
+        )
+    else:
+        leading_er = available.loc[
+            available["Average Engagement Rate"].idxmax(), "Drama Type"
+        ]
+        if leading_er == leading_volume:
+            takeaway = (
+                f"{leading_volume} leads both post volume and average engagement rate "
+                "in this filtered batch."
+            )
+        else:
+            takeaway = (
+                f"{leading_volume} has the most posts, while {leading_er} has the highest "
+                "average engagement rate in this filtered batch."
+            )
+    st.markdown(f"**At a glance:** {takeaway}")
+
+    if px is None:
+        chart_bar(
+            chart_data,
+            "Drama Type",
+            "Posts",
+            orientation="h",
+            value_format="integer",
+        )
+        st.caption(
+            "Bar length shows post count. Average ER uses available post metrics."
+        )
+        return
+
+    fig = px.bar(
+        chart_data,
+        x="Posts",
+        y="Drama Type",
+        orientation="h",
+        text="Bar Label",
+        template="plotly_white",
+    )
+    fig.update_traces(
+        marker=dict(
+            color=["#8b5cf6", "#ec4899", "#0ea5e9", "#94a3b8"],
+            line=dict(color="#ffffff", width=1),
+        ),
+        customdata=chart_data[
+            ["Share of Drama Posts", "Average ER Label"]
+        ].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>Posts: %{x:,.0f}"
+            "<br>Share of drama posts: %{customdata[0]:.1f}%"
+            "<br>Average engagement rate: %{customdata[1]}<extra></extra>"
+        ),
+        textposition="outside",
+        cliponaxis=False,
+        textfont=dict(color="#334155", size=12),
+    )
+    fig.update_layout(
+        showlegend=False,
+        height=300,
+        margin=dict(l=10, r=185, t=12, b=42),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        xaxis=dict(
+            title="Posts",
+            gridcolor="#e2e8f0",
+            rangemode="tozero",
+            tickformat=",d",
+            automargin=True,
+        ),
+        yaxis=dict(
+            title="",
+            categoryorder="array",
+            categoryarray=chart_data["Drama Type"].tolist()[::-1],
+            automargin=True,
+        ),
+    )
+    render_plotly_chart(fig)
+    st.caption(
+        "Bar length shows post count. Average ER uses available post metrics."
+    )
+
+
 def _dismiss_summary_drama_details_v68_83() -> None:
     """Reset the selected-cell widget after a drama detail dialog closes."""
     state_key = "summary_top_posts_click_nonce_v68_83"
@@ -9854,33 +9978,6 @@ elif st.session_state.step == 6:
             views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
             render_creative_type_views_doughnut_v68_49(views_mix)
 
-    drama_insights = prepare_drama_insights_v68_85(filtered)
-    if not drama_insights.empty:
-        with st.container(border=True):
-            st.markdown(section_title("Drama Insights", "#f59e0b"), unsafe_allow_html=True)
-            total_drama_posts = int(drama_insights["Posts"].sum())
-            st.caption(
-                f"{total_drama_posts:,} drama post"
-                f"{'s' if total_drama_posts != 1 else ''} in the current filtered view."
-            )
-            insight_columns = st.columns(len(drama_insights))
-            for insight_column, (_, insight) in zip(
-                insight_columns,
-                drama_insights.iterrows(),
-            ):
-                with insight_column:
-                    post_count = int(insight["Posts"])
-                    st.metric(
-                        safe_str(insight["Drama Type"]),
-                        f"{post_count:,} post{'s' if post_count != 1 else ''}",
-                    )
-                    average_rate = insight["Average Engagement Rate"]
-                    st.caption(
-                        f"{float(average_rate):.1f}% avg. engagement rate"
-                        if pd.notna(average_rate)
-                        else "Engagement rate unavailable"
-                    )
-
     if has_metrics:
         with st.container(border=True):
             st.markdown(section_title("Top Posts", "#ec4899"), unsafe_allow_html=True)
@@ -9891,6 +9988,15 @@ elif st.session_state.step == 6:
                 "Creative Type to open the full drama analysis. Use Edit to update "
                 "post fields; KOL Size and Engagement Rate recalculate automatically."
             )
+            drama_insights = prepare_drama_insights_v68_85(filtered)
+            total_drama_posts = int(drama_insights["Posts"].sum())
+            if total_drama_posts > 0:
+                with st.expander(
+                    f"Drama breakdown · {total_drama_posts:,} post"
+                    f"{'s' if total_drama_posts != 1 else ''}",
+                    expanded=False,
+                ):
+                    render_drama_breakdown_v68_89(drama_insights)
 
     # Keep creator contribution last among the analytical sections.
     render_top_creator_performance_v68_47(filtered)
