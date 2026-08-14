@@ -109,8 +109,20 @@ class MetricsOnlyAdapterTests(unittest.TestCase):
 
 
 class MetricsOnlyUiContractTests(unittest.TestCase):
-    def test_run_page_offers_metrics_only_and_downloads(self):
+    def test_add_posts_page_offers_metrics_only_and_run_page_uses_selection(self):
+        step_two = APP_SOURCE.split("# STEP 2: Add posts", 1)[1].split(
+            "# STEP 3: Select posts",
+            1,
+        )[0]
+        step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
+            "# STEP 5: Review",
+            1,
+        )[0]
+
+        self.assertIn('"What do you want to run?"', step_two)
         self.assertIn('["AI tagging", "Metrics only"]', APP_SOURCE)
+        self.assertNotIn('"What do you want to run?"', step_four)
+        self.assertIn('st.session_state.get("analysis_mode_v68_86")', step_four)
         self.assertIn('"Download metrics CSV"', APP_SOURCE)
         self.assertIn('"Download metrics Excel"', APP_SOURCE)
 

@@ -1548,27 +1548,15 @@ def _browser_recovery_pointer_v68_80() -> Tuple[bool, str]:
 
 
 def _restore_browser_recovery_pointer_v68_80() -> None:
-    """Reopen the latest saved batch when the same browser visits the plain URL."""
-    ready, remembered_id = _browser_recovery_pointer_v68_80()
-    has_explicit_run = bool(_valid_runtime_id_v68_15(_runtime_query_value_v68_15("run")))
-    has_session_run = bool(
-        _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
-    )
-    if has_explicit_run or has_session_run:
-        return
-    if not ready:
-        # Wait for the tiny browser component to read localStorage. It triggers
-        # the next rerun immediately and prevents a new empty id from replacing
-        # the user's remembered batch in the meantime.
-        st.stop()
-    if not remembered_id or not _runtime_checkpoint_candidates_v68_44(remembered_id):
-        return
-    try:
-        st.query_params["run"] = remembered_id
-        st.query_params["step"] = "2"
-    except Exception:
-        return
-    st.rerun()
+    """Remember explicit recovery links without redirecting the plain app URL.
+
+    A visit to the plain deployed URL must create a separate batch so users can
+    work in multiple tabs. Only a private URL containing ``run=...`` restores a
+    saved batch.
+    """
+    explicit_run = _valid_runtime_id_v68_15(_runtime_query_value_v68_15("run"))
+    if explicit_run:
+        _browser_recovery_pointer_v68_80()
 
 
 def _clear_tagging_continue_query_v68_55() -> None:
@@ -5405,13 +5393,25 @@ def render_taggy_assistant_v68_76(
         st.session_state.get("tagging_job_active_v68_43", False)
         or st.session_state.get("metrics_only_active_v68_86", False)
     )
+    # A Streamlit script run owns its browser session until the current tagging
+    # call returns. The Run Tagging page must therefore always launch Taggy in
+    # a separate session, even immediately before the active flag is reconciled
+    # lower down the page. Other workflow pages keep the convenient popover.
+    companion_url = (
+        _taggy_companion_url_v68_87(int(step)) if int(step) == 4 else ""
+    )
+    use_companion = bool(companion_url)
     with st.container(
         key="taggy_floating_launcher_v68_78",
         width="content",
         horizontal_alignment="right",
         gap=None,
     ):
-        st.caption("Tagging is running" if tagging_is_busy else "May I help?")
+        st.caption(
+            "Tagging is running"
+            if tagging_is_busy
+            else ("Opens in a separate tab" if use_companion else "May I help?")
+        )
         with st.container(
             horizontal=True,
             vertical_alignment="center",
@@ -5421,16 +5421,14 @@ def render_taggy_assistant_v68_76(
         ):
             if TAGGY_ASSET_V68_76.exists():
                 st.image(str(TAGGY_ASSET_V68_76), width=56)
-            if tagging_is_busy:
-                companion_url = _taggy_companion_url_v68_87(int(step))
-                if companion_url:
-                    st.markdown(
-                        "<a class='taggy-companion-link' target='_blank' "
-                        "rel='noopener noreferrer' href='"
-                        + html.escape(companion_url, quote=True)
-                        + "'>Ask Taggy ↗</a>",
-                        unsafe_allow_html=True,
-                    )
+            if use_companion:
+                st.markdown(
+                    "<a class='taggy-companion-link' target='_blank' "
+                    "rel='noopener noreferrer' href='"
+                    + html.escape(companion_url, quote=True)
+                    + "'>Ask Taggy ↗</a>",
+                    unsafe_allow_html=True,
+                )
             else:
                 assistant_popover = st.popover(
                     "Ask Taggy",
@@ -5438,7 +5436,7 @@ def render_taggy_assistant_v68_76(
                     width="content",
                 )
 
-    if tagging_is_busy:
+    if use_companion:
         return
     with assistant_popover:
         _render_taggy_chat_content_v68_87(
@@ -7884,6 +7882,25 @@ if st.session_state.step != 6:
 if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
+    with st.container(border=True):
+        st.segmented_control(
+            "What do you want to run?",
+            ["AI tagging", "Metrics only"],
+            key="analysis_mode_v68_86",
+            help=(
+                "Metrics only refreshes public post metrics and calculates engagement "
+                "without sending posts to Gemini."
+            ),
+        )
+        selected_run_mode_v68_88 = safe_str(
+            st.session_state.get("analysis_mode_v68_86")
+        ) or "AI tagging"
+        st.caption(
+            "AI tagging analyses creative content and metrics."
+            if selected_run_mode_v68_88 == "AI tagging"
+            else "Metrics only refreshes available engagement data without AI tagging."
+        )
+
     # The demo keeps the established General UGC pipeline. Drama detail remains
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
@@ -8647,14 +8664,8 @@ elif st.session_state.step == 4:
         if st.button("Go to Select Posts", type="primary"):
             go(3)
         st.stop()
-    analysis_mode_v68_86 = st.segmented_control(
-        "What do you want to run?",
-        ["AI tagging", "Metrics only"],
-        key="analysis_mode_v68_86",
-        help=(
-            "Metrics only refreshes public post metrics and calculates engagement "
-            "without sending posts to Gemini."
-        ),
+    analysis_mode_v68_86 = safe_str(
+        st.session_state.get("analysis_mode_v68_86")
     ) or "AI tagging"
     metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
     st.markdown(metric_row([
