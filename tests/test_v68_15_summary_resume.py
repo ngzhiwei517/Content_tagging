@@ -9,6 +9,8 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import plotly.express as px
 
+from ugc_tagger.final_update2_adapter import build_review_drama_updates
+
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 APP_SOURCE = APP_PATH.read_text(encoding="utf-8")
@@ -50,6 +52,8 @@ class RuntimeCheckpointTests(unittest.TestCase):
         self.assertIn('"batch_df"', checkpoint_block)
         self.assertIn('"tagged_df"', checkpoint_block)
         self.assertIn('"tiktok_follower_attempted_keys_v68_65"', checkpoint_block)
+        self.assertIn('"creator_profile_metrics_v68_51"', checkpoint_block)
+        self.assertIn('"creator_profile_aliases_v68_67"', checkpoint_block)
 
     def test_url_tracks_batch_and_step_for_reconnect(self):
         self.assertIn('st.query_params["run"] = run_id', APP_SOURCE)
@@ -122,8 +126,12 @@ class SummaryV6815Tests(unittest.TestCase):
             "Human Edited": namespace["safe_str"](original) != namespace["safe_str"](final),
             "Label History": "summary edit",
         }
+        namespace["final_update2_build_review_drama_updates"] = build_review_drama_updates
         cls.apply_summary_post_edits = staticmethod(
             load_function("apply_summary_post_edits_v68_73", namespace)
+        )
+        cls.apply_summary_drama_detail_edits = staticmethod(
+            load_function("apply_summary_drama_detail_edits_v68_84", namespace)
         )
         cls.prepare_top_posts = staticmethod(load_function("prepare_sortable_top_posts_v68_46", namespace))
         namespace["Tuple"] = Tuple
@@ -455,6 +463,64 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(details.loc[0, "Content Subtype"], "Drama Edit")
         self.assertEqual(details.loc[0, "Visual Summary"], "An emotional drama montage.")
         self.assertEqual(details.loc[0, "Drama Type"], "General Drama")
+
+    def test_drama_detail_dialog_is_editable_and_persists_structured_fields(self):
+        tagged = pd.DataFrame([{
+            "Creative Type": "Movie/Tv/Drama Edits",
+            "Original AI Labels": "Movie/Tv/Drama Edits",
+            "Label History": "",
+            "visual_summary": "Old summary",
+            "Drama Content Category": "Drama Edit",
+            "Drama Type": "General Drama",
+            "Drama Edit Focus": "Fictional Story",
+            "Drama Format": "Long-form Drama",
+            "Drama Country/Region": "China",
+            "Drama Title": "Old title",
+            "Detected Audio": "Old audio",
+            "Audio Version": "Original",
+        }], index=[7])
+        values = {
+            "visual_summary": "Behind-the-scenes rehearsal footage.",
+            "content_categories": ["Behind-the-Scenes Edit"],
+            "drama_type": "Unknown",
+            "edit_focus": "Unknown",
+            "drama_format": "Short-form Drama",
+            "country_region": "United States",
+            "drama_title": "Studio rehearsal",
+            "detected_audio": "Hate That I Made You Love Me",
+            "campaign_song_match": "Yes",
+            "audio_version": "Original",
+        }
+
+        updated, changed = self.apply_summary_drama_detail_edits(tagged, 7, values)
+
+        self.assertTrue(changed)
+        self.assertEqual(updated.at[7, "visual_summary"], values["visual_summary"])
+        self.assertEqual(
+            updated.at[7, "Drama Content Category"], "Behind-the-Scenes Edit"
+        )
+        self.assertEqual(updated.at[7, "Drama Country/Region"], "United States")
+        self.assertEqual(updated.at[7, "Drama Title"], "Studio rehearsal")
+        self.assertIn("Visual Summary: Behind-the-scenes rehearsal footage.", updated.at[7, "Content Details"])
+        self.assertEqual(updated.at[7, "Review Action"], "KEEP")
+        self.assertEqual(
+            updated.at[7, "Review Note"], "Edited drama details in Summary"
+        )
+
+        unchanged, changed_again = self.apply_summary_drama_detail_edits(
+            updated, 7, values
+        )
+        self.assertFalse(changed_again)
+        self.assertIs(unchanged, updated)
+
+        dialog = APP_SOURCE.split(
+            "def render_drama_details_dialog_v68_83", 1
+        )[1].split("def _summary_source_row_v68_83", 1)[0]
+        self.assertIn("st.form(", dialog)
+        self.assertIn('st.form_submit_button(', dialog)
+        self.assertIn('"Save changes"', dialog)
+        self.assertIn("apply_summary_drama_detail_edits_v68_84", dialog)
+        self.assertIn("_persist_runtime_checkpoint_v68_15()", dialog)
 
     def test_creative_type_engagement_chart_uses_mean_rate_and_post_count(self):
         rows = pd.DataFrame({

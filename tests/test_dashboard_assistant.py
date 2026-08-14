@@ -2,6 +2,7 @@ import json
 import unittest
 import warnings
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
@@ -11,6 +12,7 @@ from ugc_tagger.dashboard_assistant import (
     build_dashboard_context,
     build_dashboard_prompt,
     build_page_assistant_prompt,
+    build_taggy_companion_url,
     chat_history_markdown,
     dashboard_context_json,
     dashboard_context_signature,
@@ -67,8 +69,8 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn('"PAGE_CHAT_SUGGESTIONS"', APP_SOURCE)
 
     def test_taggy_prefers_the_current_managed_gemini_key(self):
-        taggy_start = APP_SOURCE.index("def render_taggy_assistant_v68_76")
-        taggy_end = APP_SOURCE.index("def aggregate_summary_performance_v68_15", taggy_start)
+        taggy_start = APP_SOURCE.index("def _render_taggy_chat_content_v68_87")
+        taggy_end = APP_SOURCE.index("@st.fragment", taggy_start)
         taggy_source = APP_SOURCE[taggy_start:taggy_end]
         managed_key = '_managed_api_secret_v68_43("GEMINI_API_KEY")'
         session_key = 'st.session_state.get("gemini_key")'
@@ -220,7 +222,7 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("render_taggy_assistant_v68_76(6, filtered)", APP_SOURCE)
         self.assertIn("assets\" / \"taggy-assistant.png", APP_SOURCE)
         self.assertIn('key="taggy_floating_launcher_v68_78"', APP_SOURCE)
-        self.assertIn('st.caption("May I help?")', APP_SOURCE)
+        self.assertIn('"Tagging is running" if tagging_is_busy else "May I help?"', APP_SOURCE)
         self.assertIn("position:fixed !important", APP_SOURCE)
         self.assertIn("bottom:max(76px", APP_SOURCE)
         self.assertIn("assistant_popover = st.popover(", APP_SOURCE)
@@ -232,6 +234,55 @@ class DashboardAssistantTests(unittest.TestCase):
             "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (", 1
         )[1].split(")", 1)[0]
         self.assertNotIn("taggy_chat_messages_v68_76", checkpoint_block)
+
+    def test_taggy_companion_url_is_secret_free_and_uses_a_new_session_route(self):
+        recovery_id = "a" * 32
+        url = build_taggy_companion_url(
+            base_url="https://example.streamlit.app/",
+            recovery_id=recovery_id,
+            step=4,
+        )
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+
+        self.assertEqual("https", parsed.scheme)
+        self.assertEqual("example.streamlit.app", parsed.netloc)
+        self.assertEqual(
+            {"run": [recovery_id], "step": ["4"], "taggy": ["1"]},
+            query,
+        )
+        self.assertNotIn("tagjob", parsed.query)
+        self.assertNotIn("token", parsed.query.lower())
+        self.assertNotIn("key", parsed.query.lower())
+
+    def test_taggy_companion_is_read_only_and_stops_before_workflow(self):
+        shell = APP_SOURCE.split("# Application shell and workflow pages", 1)[1]
+        before_step_two = shell.split("# STEP 2: Add posts", 1)[0]
+
+        self.assertIn(
+            "_restore_runtime_checkpoint_v68_15(persist=not taggy_companion_session_v68_87)",
+            before_step_two,
+        )
+        self.assertIn("if not taggy_companion_session_v68_87:", before_step_two)
+        self.assertIn("standalone=True", before_step_two)
+        self.assertIn("st.stop()", before_step_two)
+        self.assertNotIn("run_real_tagging_backend(", before_step_two)
+
+        restore_start = APP_SOURCE.index("def _restore_runtime_checkpoint_v68_15")
+        restore_end = APP_SOURCE.index("# Display values and engagement metrics", restore_start)
+        restore_source = APP_SOURCE[restore_start:restore_end]
+        self.assertIn("*, persist: bool = True", restore_source)
+        self.assertIn("if persist:\n        _persist_runtime_checkpoint_v68_15()", restore_source)
+
+    def test_active_tagging_launcher_opens_companion_in_new_tab(self):
+        taggy_start = APP_SOURCE.index("def render_taggy_assistant_v68_76")
+        taggy_end = APP_SOURCE.index("def aggregate_summary_performance_v68_15", taggy_start)
+        taggy_source = APP_SOURCE[taggy_start:taggy_end]
+
+        self.assertIn('st.session_state.get("tagging_job_active_v68_43", False)', taggy_source)
+        self.assertIn("_taggy_companion_url_v68_87", taggy_source)
+        self.assertIn("target='_blank'", taggy_source)
+        self.assertIn("rel='noopener noreferrer'", taggy_source)
 
 
 if __name__ == "__main__":

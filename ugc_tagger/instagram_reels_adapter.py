@@ -21,6 +21,11 @@ INSTAGRAM_POST_ACTOR_ID = "apify/instagram-scraper"
 # Backward-compatible alias for integrations that imported the original name.
 INSTAGRAM_ACTOR_ID = INSTAGRAM_REEL_ACTOR_ID
 
+# Match the TikTok direct-metadata fast path: the direct public attempt remains
+# first, but blocked requests reach the existing Apify fallback sooner.
+DIRECT_SCRAPE_TIMEOUT_SECONDS = 12
+DIRECT_SCRAPE_MAX_WORKERS = 8
+
 
 # -----------------------------------------------------------------------------
 # Platform URL identity and normalization
@@ -428,7 +433,7 @@ def _default_direct_instagram_extract(url: str) -> Optional[Dict]:
         "noprogress": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 30,
+        "socket_timeout": DIRECT_SCRAPE_TIMEOUT_SECONDS,
         "retries": 1,
         "extractor_retries": 1,
         "format": "worst[height>=360]/best[height<=720]/worst",
@@ -499,7 +504,7 @@ def scrape_instagram_posts_direct(
     links: Iterable[str],
     *,
     extractor: Optional[DirectInstagramExtractor] = None,
-    max_workers: int = 4,
+    max_workers: int = DIRECT_SCRAPE_MAX_WORKERS,
 ) -> Tuple[List[Dict], List[str]]:
     """Return direct records and links that still require the Apify fallback."""
     requested = [

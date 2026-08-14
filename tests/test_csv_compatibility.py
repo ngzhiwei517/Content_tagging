@@ -96,6 +96,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "instagram_export_campaign_context",
             "infer_track_from_filename",
             "is_opaque_instagram_sound_id",
+            "uploaded_rows_missing_track_v68_82",
             "coalesce_duplicate_batch_rows",
         ]:
             namespace[name] = load_function(name, namespace)
@@ -118,6 +119,9 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.display_market = staticmethod(namespace["display_market"])
         cls.normalize_market = staticmethod(namespace["normalize_market"])
         cls.infer_market_from_filename = staticmethod(namespace["infer_market_from_filename"])
+        cls.uploaded_rows_missing_track = staticmethod(
+            namespace["uploaded_rows_missing_track_v68_82"]
+        )
         cls.infer_track_from_filename = staticmethod(namespace["infer_track_from_filename"])
         cls.coalesce_duplicate_batch_rows = staticmethod(namespace["coalesce_duplicate_batch_rows"])
         cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
@@ -330,6 +334,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertIn('"Artist (optional)"', APP_SOURCE)
         self.assertNotIn('"Track name (optional)"', APP_SOURCE)
         self.assertIn("missing_track_files = []", APP_SOURCE)
+        self.assertIn("uploaded_rows_missing_track_v68_82(std)", APP_SOURCE)
         self.assertIn("disabled=bool(missing_track_files)", APP_SOURCE)
         self.assertIn(
             "Enter a track name for each uploaded file before adding it to the batch.",
@@ -341,6 +346,20 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertNotIn("Market in file:", APP_SOURCE)
         self.assertIn("links = parse_links(link_text)", APP_SOURCE)
         self.assertIn('"Platform": detected_platform', APP_SOURCE)
+
+    def test_uploaded_file_track_allows_add_button_without_manual_override(self):
+        rows, _ = self.parse(
+            "Link,Sound\nhttps://www.tiktok.com/@creator/video/1234567890123456789,Existing CSV Track\n",
+            name="generic_upload.csv",
+        )
+        self.assertFalse(self.uploaded_rows_missing_track(rows))
+
+    def test_uploaded_rows_with_no_track_still_require_user_input(self):
+        rows, _ = self.parse(
+            "Link\nhttps://www.tiktok.com/@creator/video/1234567890123456789\n",
+            name="generic_upload.csv",
+        )
+        self.assertTrue(self.uploaded_rows_missing_track(rows))
 
     def test_full_metrics_actor_csv_aliases_are_preserved(self):
         text = (

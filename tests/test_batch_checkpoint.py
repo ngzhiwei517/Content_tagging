@@ -381,7 +381,7 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         self.assertIn("DEFAULT_CHUNK_SIZE", self.source)
         self.assertIn("MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25", self.source)
         self.assertIn("and not selected.empty", self.source)
-        self.assertIn("MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 5", self.source)
+        self.assertIn("MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 10", self.source)
         self.assertIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5", self.source)
         self.assertIn(
             ":MAX_LIVE_POSTS_PER_EXECUTION_V68_52",

@@ -567,16 +567,68 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             after = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             self.assertEqual(after, populated)
 
-    def test_managed_secrets_and_automatic_recovery_remain_without_manual_controls(self):
+    def test_managed_secrets_and_private_continue_later_recovery_remain_available(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
         self.assertNotIn('key="runtime_save_batch_button_v68_44"', APP_SOURCE)
         self.assertNotIn('with st.expander("Open a saved batch"', APP_SOURCE)
         self.assertNotIn('key="runtime_recovery_button_v68_44"', APP_SOURCE)
-        self.assertIn("_restore_runtime_checkpoint_v68_15()", APP_SOURCE)
+        self.assertIn('key="runtime_continue_later_v68_85"', APP_SOURCE)
+        self.assertIn('@st.dialog("Continue later")', APP_SOURCE)
+        self.assertIn("_render_continue_later_v68_85()", APP_SOURCE)
+        self.assertIn(
+            "_restore_runtime_checkpoint_v68_15(persist=not taggy_companion_session_v68_87)",
+            APP_SOURCE,
+        )
         self.assertIn("_persist_runtime_checkpoint_v68_15()", APP_SOURCE)
         self.assertNotIn("Current recovery ID", APP_SOURCE)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', APP_SOURCE)
+
+    def test_continue_later_is_hidden_until_posts_exist_and_saves_before_opening(self):
+        events = []
+
+        class FakeColumn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        class FakeStreamlit:
+            session_state = {"batch_df": pd.DataFrame()}
+
+            @staticmethod
+            def columns(spec):
+                events.append(("columns", spec))
+                return FakeColumn(), FakeColumn()
+
+            @staticmethod
+            def button(label, **kwargs):
+                events.append(("button", label, kwargs))
+                return True
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_runtime_checkpoint_has_posts_v68_44": lambda state: isinstance(
+                state.get("batch_df"), pd.DataFrame
+            ) and not state["batch_df"].empty,
+            "_persist_runtime_checkpoint_v68_15": lambda: events.append("persist"),
+            "_show_runtime_save_dialog_v68_44": lambda: events.append("dialog"),
+        }
+        render = load_function("_render_continue_later_v68_85", namespace)
+
+        render()
+        self.assertEqual(events, [])
+
+        FakeStreamlit.session_state["batch_df"] = pd.DataFrame(
+            [{"Link": "https://www.tiktok.com/@creator/video/1"}]
+        )
+        render()
+
+        self.assertEqual(events[0], ("columns", [5, 1]))
+        self.assertEqual(events[1][0:2], ("button", "Continue later"))
+        self.assertEqual(events[1][2]["key"], "runtime_continue_later_v68_85")
+        self.assertEqual(events[-2:], ["persist", "dialog"])
 
     def test_save_link_hides_recovery_id_inside_the_url(self):
         recovery_id = "e" * 32
@@ -601,6 +653,65 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             recovery_url,
             f"https://tagging.example.com/app?run={recovery_id}&step=4",
         )
+
+    def test_plain_url_reopens_recovery_id_remembered_by_same_browser(self):
+        recovery_id = "d" * 32
+
+        class FakeStreamlit:
+            query_params = {}
+            session_state = {}
+
+            @staticmethod
+            def rerun():
+                raise RuntimeError("rerun")
+
+            @staticmethod
+            def stop():
+                raise AssertionError("browser pointer was already ready")
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_browser_recovery_pointer_v68_80": lambda: (True, recovery_id),
+            "_valid_runtime_id_v68_15": lambda value: value if value == recovery_id else "",
+            "_runtime_query_value_v68_15": lambda name: "",
+            "_runtime_checkpoint_candidates_v68_44": lambda run_id: [{"state": {"batch_df": {"data": [[1]]}}}],
+        }
+        restore = load_function("_restore_browser_recovery_pointer_v68_80", namespace)
+
+        with self.assertRaisesRegex(RuntimeError, "rerun"):
+            restore()
+
+        self.assertEqual(FakeStreamlit.query_params["run"], recovery_id)
+        self.assertEqual(FakeStreamlit.query_params["step"], "2")
+
+    def test_explicit_recovery_url_wins_over_browser_pointer(self):
+        explicit_id = "a" * 32
+        remembered_id = "b" * 32
+
+        class FakeStreamlit:
+            query_params = {"run": explicit_id}
+            session_state = {}
+
+            @staticmethod
+            def rerun():
+                raise AssertionError("explicit URL should not be replaced")
+
+            @staticmethod
+            def stop():
+                raise AssertionError("component is already ready")
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_browser_recovery_pointer_v68_80": lambda: (True, remembered_id),
+            "_valid_runtime_id_v68_15": lambda value: value if value in {explicit_id, remembered_id} else "",
+            "_runtime_query_value_v68_15": lambda name: explicit_id if name == "run" else "",
+            "_runtime_checkpoint_candidates_v68_44": lambda run_id: [{"state": {}}],
+        }
+        restore = load_function("_restore_browser_recovery_pointer_v68_80", namespace)
+
+        restore()
+
+        self.assertEqual(FakeStreamlit.query_params["run"], explicit_id)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,13 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 DirectExtractor = Callable[[str], Optional[Dict]]
 
 
+# Keep the free-first metadata attempt responsive. A blocked platform request
+# should reach the existing Apify fallback promptly instead of holding an
+# entire checkpoint window for up to 30 seconds per worker wave.
+DIRECT_SCRAPE_TIMEOUT_SECONDS = 12
+DIRECT_SCRAPE_MAX_WORKERS = 8
+
+
 def _number(value, default=0):
     try:
         return int(float(value))
@@ -36,7 +43,7 @@ def _default_extract(url: str) -> Optional[Dict]:
         "noprogress": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 30,
+        "socket_timeout": DIRECT_SCRAPE_TIMEOUT_SECONDS,
         "retries": 1,
         "extractor_retries": 1,
         # A combined, moderate-resolution stream is sufficient for frame-based
@@ -195,7 +202,7 @@ def scrape_tiktok_posts_direct(
     links: Iterable[str],
     *,
     extractor: Optional[DirectExtractor] = None,
-    max_workers: int = 4,
+    max_workers: int = DIRECT_SCRAPE_MAX_WORKERS,
 ) -> Tuple[List[Dict], List[str]]:
     """Return ``(records, fallback_links)`` while preserving input order."""
     requested = [str(link or "").strip() for link in links if str(link or "").strip()]
