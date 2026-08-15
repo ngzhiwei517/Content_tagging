@@ -8894,7 +8894,13 @@ if st.session_state.step == 2:
         "Without a track name, Audio Version may remain **Unknown**."
     )
 
-    add_tab, paste_tab = st.tabs(["Upload post files", "Paste post links"])
+    # Track the selected input tab so ordinary widget reruns do not send users
+    # back to the upload view while they are completing pasted-link details.
+    add_tab, paste_tab = st.tabs(
+        ["Upload post files", "Paste post links"],
+        key="add_posts_input_tab_v68_95",
+        on_change="rerun",
+    )
 
     with add_tab:
         st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok or Instagram post links. You can select multiple files or mix both platforms in one file.</p>", unsafe_allow_html=True)
