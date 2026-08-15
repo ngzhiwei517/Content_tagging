@@ -1529,6 +1529,233 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched["drama_type"], "BL Drama")
         self.assertEqual(enriched["edit_focus"], "Fictional Story")
 
+    def test_exact_gl_hashtag_overrides_generic_drama_subtype(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Emotional drama montage",
+            "content_details": "A fictional relationship story.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "A montage of fictional drama characters.",
+        }
+
+        enriched = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "Their story begins #glseries #shortdrama"},
+        )
+
+        self.assertEqual(enriched["drama_type"], "GL Drama")
+        self.assertEqual(enriched["edit_focus"], "Fictional Story")
+
+    def test_exact_bl_hashtag_overrides_conflicting_generic_model_answer(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama montage",
+            "content_details": "A fictional story edit.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "GL Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "A fictional drama montage.",
+        }
+
+        enriched = apply_drama_enrichment(
+            result,
+            response,
+            {"hashtags": [{"name": "BLDrama"}]},
+        )
+
+        self.assertEqual(enriched["drama_type"], "BL Drama")
+
+    def test_bl_gl_hashtag_matching_avoids_substrings_and_conflicts(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama montage",
+            "content_details": "A fictional story edit.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "A fictional drama montage.",
+        }
+
+        lookalike = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "A global story #global #blog"},
+        )
+        conflicting_response = dict(response)
+        conflicting_response["drama_type"] = "GL Drama"
+        conflicting = apply_drama_enrichment(
+            result,
+            conflicting_response,
+            {"Caption": "Mixed collection #blseries #glseries"},
+        )
+
+        self.assertEqual(lookalike["drama_type"], "General Drama")
+        self.assertEqual(conflicting["drama_type"], "General Drama")
+        self.assertTrue(conflicting["needs_human_review"])
+        self.assertIn("Both BL and GL hashtags", conflicting["drama_review_reason"])
+
+    def test_ambiguous_yuri_and_unicode_suffix_do_not_force_a_subtype(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama montage",
+            "content_details": "A fictional story edit.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "A fictional drama montage.",
+        }
+
+        named_yuri = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "A character named Yuri #yuri"},
+        )
+        unicode_suffix = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "A multilingual fan edit #BL日本"},
+        )
+
+        self.assertEqual(named_yuri["drama_type"], "General Drama")
+        self.assertEqual(unicode_suffix["drama_type"], "General Drama")
+
+    def test_exact_bare_and_normalized_hashtags_resolve_confirmed_drama_edits(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Fictional drama montage",
+            "content_details": "A fictional relationship story.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "A montage of fictional drama characters.",
+        }
+
+        for caption in (
+            "Story edit #gl",
+            "Story edit #thai_gl",
+            "Story edit #girl_x_girl",
+            "Story edit #glcp",
+            "Story edit #glcouple",
+        ):
+            with self.subTest(caption=caption):
+                enriched = apply_drama_enrichment(result, response, {"Caption": caption})
+                self.assertEqual(enriched["drama_type"], "GL Drama")
+
+        for caption in (
+            "Story edit #bl",
+            "Story edit #thai_bl",
+            "Story edit #blcp",
+            "Story edit #blcouple",
+        ):
+            with self.subTest(caption=caption):
+                enriched = apply_drama_enrichment(result, response, {"Caption": caption})
+                self.assertEqual(enriched["drama_type"], "BL Drama")
+
+    def test_same_gender_text_evidence_still_resolves_without_exact_hashtag(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Fictional drama montage",
+            "content_details": "A montage of scripted relationship scenes.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "visual_summary": "Two fictional male leads in a romantic drama montage.",
+            "evidence": ["The post shows scripted scenes between two male leads."],
+        }
+
+        enriched = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "A boys love story #shortdrama"},
+        )
+
+        self.assertEqual(enriched["drama_type"], "BL Drama")
+        self.assertEqual(enriched["edit_focus"], "Fictional Story")
+
+    def test_bl_gl_conflict_routes_cp_and_bts_rows_to_review(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama-related edit",
+            "content_details": "Two performers appear together.",
+        }
+        conflict_caption = {"Caption": "Pair content #blseries #glseries"}
+        cp = apply_drama_enrichment(
+            result,
+            {
+                "content_categories": ["CP Edit"],
+                "drama_type": "BL Drama",
+                "edit_focus": "BL CP Edit",
+                "visual_summary": "Two actors interact at a public event.",
+                "evidence": ["A real-person pair is shown off screen."],
+            },
+            conflict_caption,
+        )
+        behind_scenes = apply_drama_enrichment(
+            result,
+            {
+                "content_categories": ["Behind-the-Scenes Edit", "Drama Edit"],
+                "drama_type": "BL Drama",
+                "edit_focus": "Cast/Actor Edit",
+                "visual_summary": "Actors rehearse while the camera crew resets the set.",
+                "evidence": ["On-set cameras and rehearsal are visible."],
+            },
+            conflict_caption,
+        )
+
+        for enriched in (cp, behind_scenes):
+            self.assertTrue(enriched["needs_human_review"])
+            self.assertIn("Both BL and GL hashtags", enriched["drama_review_reason"])
+            self.assertNotIn(enriched["drama_type"], {"BL Drama", "GL Drama"})
+
+    def test_bl_hashtag_does_not_override_anime_or_behind_the_scenes_purpose(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Drama-related edit",
+            "content_details": "A drama-related montage.",
+        }
+        anime = apply_drama_enrichment(
+            result,
+            {
+                "content_categories": ["Anime Edit", "Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "visual_summary": "Animated anime characters in illustrated scenes.",
+                "evidence": ["The visuals are anime drawings, not live-action people."],
+            },
+            {"Caption": "Anime story #blseries #drama"},
+        )
+        behind_scenes = apply_drama_enrichment(
+            result,
+            {
+                "content_categories": ["Behind-the-Scenes Edit", "Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Cast/Actor Edit",
+                "visual_summary": "Actors rehearse while the camera crew resets the set.",
+                "evidence": ["On-set cameras and rehearsal are visible."],
+            },
+            {"Caption": "On set together #blseries #behindthescenes"},
+        )
+
+        self.assertEqual(anime["content_categories"], ["Anime Edit"])
+        self.assertNotEqual(anime["drama_type"], "BL Drama")
+        self.assertIn("Behind-the-Scenes Edit", behind_scenes["content_categories"])
+        self.assertNotEqual(behind_scenes["drama_type"], "BL Drama")
+
     def test_bl_hashtag_does_not_turn_real_interview_into_drama_edit(self):
         result = {
             "creative_type": ["Movie/Tv/Drama Edits", "Celebrity Edits"],
