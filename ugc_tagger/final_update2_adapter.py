@@ -32,10 +32,7 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
-from ugc_tagger.direct_post_scraper import (
-    scrape_tiktok_posts_direct,
-    tiktok_post_has_essential_metrics,
-)
+from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
 
 
 # Keep the runtime version beside the UI/backend schema boundary.  Importing
@@ -840,8 +837,68 @@ def _merge_instagram_refresh_records(
             None, "", [], {},
         ):
             merged[field] = direct[field]
+
+    # Merge creator metadata field by field. A fallback actor can identify the
+    # owner while omitting its follower count; its non-empty ``authorMeta``
+    # object must not hide a valid count returned by the free direct scraper.
+    fallback_author = (
+        merged.get("authorMeta") if isinstance(merged.get("authorMeta"), dict) else {}
+    )
+    direct_author = (
+        direct.get("authorMeta") if isinstance(direct.get("authorMeta"), dict) else {}
+    )
+    if fallback_author or direct_author:
+        author = dict(fallback_author)
+        for field in ("name", "nickName"):
+            if not _text(author.get(field)) and _text(direct_author.get(field)):
+                author[field] = direct_author[field]
+        fallback_followers = _number(
+            author.get("fans") or author.get("followers") or author.get("followerCount")
+        )
+        direct_followers = _number(
+            direct_author.get("fans")
+            or direct_author.get("followers")
+            or direct_author.get("followerCount")
+        )
+        if fallback_followers <= 0 < direct_followers:
+            author["fans"] = direct_followers
+            author["followers"] = direct_followers
+        merged["authorMeta"] = author
     merged["_scrape_provider"] = "direct_then_apify"
     return merged
+
+
+def _usable_apify_tiktok_record(record: Optional[Dict]) -> bool:
+    """Keep a matched Apify post when it contains at least one public metric.
+
+    Some public TikTok posts omit an individual counter (commonly comments)
+    even though the other counters are returned. Dropping that entire record
+    makes every metric look unavailable in Metrics only mode. The downstream
+    metrics adapter already preserves missing fields as blank, so retain valid
+    partial records and reject only error/identity-less/metric-less payloads.
+    """
+    if not isinstance(record, dict):
+        return False
+    if _text(record.get("error") or record.get("errorCode")):
+        return False
+    has_identity = bool(_text(record.get("id")) or record_urls(record))
+    metric_fields = (
+        "view_count", "playCount", "viewCount", "views",
+        "like_count", "diggCount", "likeCount", "likes",
+        "comment_count", "commentCount", "comments",
+        "repost_count", "shareCount", "shares",
+        "save_count", "collectCount", "saves",
+    )
+    has_metric = any(
+        field in record
+        and record.get(field) is not None
+        and not (
+            isinstance(record.get(field), str)
+            and record.get(field).strip().casefold() in {"", "nan", "none", "null"}
+        )
+        for field in metric_fields
+    )
+    return has_identity and has_metric
 
 
 def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
@@ -879,7 +936,7 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
             tiktok_records.extend(
                 record
                 for record in list(apify_records or [])
-                if tiktok_post_has_essential_metrics(record)
+                if _usable_apify_tiktok_record(record)
             )
         for record in tiktok_records:
             if isinstance(record, dict):

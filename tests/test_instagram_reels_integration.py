@@ -12,6 +12,7 @@ from ugc_tagger.final_update2_adapter import (
     index_records,
     is_tiktok_short_url,
     match_record,
+    metrics_candidates,
     resolve_tiktok_short_url,
     scrape_links,
 )
@@ -94,6 +95,7 @@ def instagram_video_record():
         "videoDuration": 15.5,
         "ownerUsername": "creator_name",
         "ownerFullName": "Creator Name",
+        "ownerFollowersCount": 1000,
         "hashtags": ["dance"],
         "musicInfo": {"song_name": "Test Song", "artist_name": "Test Artist"},
     }
@@ -320,6 +322,18 @@ class InstagramRecordTests(unittest.TestCase):
         self.assertEqual(record["createTimeISO"], "2026-01-01T00:00:00Z")
         self.assertEqual(record["instagramMetricsUnavailable"], [])
 
+    def test_nested_parent_profile_follower_count_is_mapped(self):
+        raw = instagram_video_record()
+        raw.pop("ownerFollowersCount")
+        raw["parentData"] = {
+            "profile": {
+                "username": "creator_name",
+                "followers_count": 4321,
+            }
+        }
+        record = normalize_instagram_record(raw, VIDEO_URL)
+        self.assertEqual(record["authorMeta"]["fans"], 4321)
+
     def test_sidecar_maps_to_a_confirmed_carousel(self):
         raw = {
             "id": "1",
@@ -452,6 +466,24 @@ class InstagramScrapeTests(unittest.TestCase):
         self.assertEqual(fallback, [VIDEO_URL])
         self.assertIn("Views", records[0]["instagramMetricsUnavailable"])
 
+    def test_direct_reel_with_complete_metrics_but_no_followers_requests_fallback(self):
+        info = {
+            "id": "DExampleAbC1",
+            "webpage_url": VIDEO_URL,
+            "url": "https://cdn.example/reel.mp4",
+            "description": "A public Reel",
+            "channel": "creator_name",
+            "view_count": 5000,
+            "like_count": 250,
+            "comment_count": 12,
+        }
+        records, fallback = scrape_instagram_posts_direct(
+            [VIDEO_URL], extractor=lambda _url: info
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(fallback, [VIDEO_URL])
+        self.assertEqual(records[0]["authorMeta"]["fans"], 0)
+
     def test_confirmed_zero_views_still_requests_missing_share_save_metrics(self):
         info = {
             "id": "DExampleAbC1",
@@ -517,6 +549,49 @@ class InstagramScrapeTests(unittest.TestCase):
         self.assertEqual(events, ["free", "apify"])
         self.assertEqual(records[0]["shareCount"], 41)
         self.assertEqual(records[0]["collectCount"], 17)
+
+    def test_adapter_keeps_direct_follower_when_post_fallback_omits_it(self):
+        direct_record = normalize_instagram_record(instagram_video_record(), VIDEO_URL)
+        fallback_raw = instagram_full_metrics_record()
+        fallback_raw["user"].pop("follower_count")
+        fallback_record = normalize_instagram_record(fallback_raw, VIDEO_URL)
+        with patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts_direct",
+            return_value=([direct_record], [VIDEO_URL]),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.load_backend",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "ugc_tagger.final_update2_adapter.scrape_instagram_posts",
+            return_value=[fallback_record],
+        ):
+            records = scrape_links([VIDEO_URL], "token")
+        self.assertEqual(records[0]["authorMeta"]["fans"], 1000)
+
+    def test_missing_post_follower_is_backfilled_from_one_profile_details_call(self):
+        post = instagram_full_metrics_record()
+        post["user"].pop("follower_count")
+        client = _FakeClient(
+            [],
+            items_by_actor={
+                INSTAGRAM_REEL_ACTOR_ID: [post],
+                INSTAGRAM_POST_ACTOR_ID: [
+                    {"username": "creator_name", "followersCount": 4321}
+                ],
+            },
+        )
+        records = scrape_instagram_posts([VIDEO_URL], "", client=client)
+        self.assertEqual(records[0]["authorMeta"]["fans"], 4321)
+        refreshed = metrics_candidates(
+            pd.DataFrame([{"Platform": INSTAGRAM_REELS, "Link": VIDEO_URL}]),
+            records,
+        )
+        self.assertEqual(refreshed.iloc[0]["Followers"], 4321)
+        self.assertEqual([actor_id for actor_id, _ in client.actor_calls], [
+            INSTAGRAM_REEL_ACTOR_ID,
+            INSTAGRAM_POST_ACTOR_ID,
+        ])
+        self.assertEqual(client.actor_calls[-1][1]["resultsType"], "details")
 
     def test_adapter_replaces_partial_direct_record_when_apify_recovers_views(self):
         direct_raw = instagram_video_record()
