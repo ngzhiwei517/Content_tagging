@@ -224,9 +224,28 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertEqual("csv_template", matches[0]["id"])
 
         answer = page_help_answer(2, question)
-        self.assertIn("`Link,Market,Track,Artist`", answer)
-        self.assertIn("exact columns and order", answer)
-        self.assertNotIn("paste one TikTok or Instagram post link per line", answer)
+        self.assertEqual("", answer)
+
+        prompt = build_page_assistant_prompt(
+            step=2,
+            question=question,
+            context_json=dashboard_context_json(pd.DataFrame()),
+        )
+        self.assertIn("Create a CSV template", prompt)
+        self.assertIn("`Link,Market,Track,Artist`", prompt)
+
+    def test_custom_requests_route_to_gemini_instead_of_local_faq(self):
+        self.assertEqual(
+            "",
+            page_help_answer(6, "Suggest a campaign based on this dashboard"),
+        )
+
+    def test_clear_factual_questions_still_answer_locally(self):
+        answer = page_help_answer(
+            4,
+            "Why is drama tagging slower than normal posts?",
+        )
+        self.assertIn("drama posts may need more frame or full-video evidence", answer)
 
     def test_retrieval_ranks_metric_definition_for_summary_question(self):
         matches = retrieve_taggy_knowledge(
