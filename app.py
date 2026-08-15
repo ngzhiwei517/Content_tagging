@@ -5165,6 +5165,273 @@ def render_creative_type_views_doughnut_v68_49(views_mix: pd.DataFrame) -> None:
     render_plotly_chart(fig)
 
 
+CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91 = {
+    "Views": {
+        "column": "Views",
+        "aggregation": "sum",
+        "label": "Views",
+        "axis": "Views",
+        "color": "#0ea5e9",
+    },
+    "Engagement": {
+        "column": "Total Engagement",
+        "aggregation": "sum",
+        "label": "Total engagement",
+        "axis": "Total engagement",
+        "color": "#10b981",
+    },
+    "Avg. ER": {
+        "column": "Engagement Rate",
+        "aggregation": "mean",
+        "label": "Average engagement rate",
+        "axis": "Average engagement rate (%)",
+        "color": "#6254e8",
+    },
+    "Shares": {
+        "column": "Shares",
+        "aggregation": "sum",
+        "label": "Shares",
+        "axis": "Shares",
+        "color": "#f97316",
+    },
+    "Saves": {
+        "column": "Saves",
+        "aggregation": "sum",
+        "label": "Saves",
+        "axis": "Saves",
+        "color": "#ec4899",
+    },
+}
+
+
+def prepare_creative_type_performance_chart_data_v68_91(
+    df: pd.DataFrame,
+    metric: str,
+    *,
+    max_categories: int = 12,
+) -> pd.DataFrame:
+    """Aggregate one selected performance signal without inventing missing data."""
+    columns = [
+        "Creative Type",
+        "Value",
+        "Posts",
+        "Available Posts",
+        "Coverage",
+    ]
+    spec = CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91.get(metric)
+    if (
+        df is None
+        or df.empty
+        or spec is None
+        or "Primary Creative Type" not in df.columns
+    ):
+        return pd.DataFrame(columns=columns)
+
+    working = pd.DataFrame(index=df.index)
+    labels = df["Primary Creative Type"].fillna("").astype(str).str.strip()
+    working["Creative Type"] = labels.mask(
+        labels.str.casefold().isin({"", "nan", "none", "null"}),
+        "Others",
+    )
+    source_column = str(spec["column"])
+    source_values = (
+        pd.to_numeric(df[source_column], errors="coerce")
+        if source_column in df.columns
+        else pd.Series(float("nan"), index=df.index, dtype="float64")
+    )
+    if metric == "Avg. ER":
+        # Recalculate from returned metrics so missing views never become a
+        # misleading 0% engagement rate in the comparison.
+        views = pd.to_numeric(
+            df["Views"] if "Views" in df.columns else source_values,
+            errors="coerce",
+        )
+        engagements = pd.to_numeric(
+            df["Total Engagement"]
+            if "Total Engagement" in df.columns
+            else pd.Series(float("nan"), index=df.index),
+            errors="coerce",
+        )
+        recalculated = engagements.div(views).mul(100).where(
+            views.gt(0) & engagements.notna()
+        )
+        if "Views" in df.columns and "Total Engagement" in df.columns:
+            source_values = recalculated
+        else:
+            source_values = recalculated.where(recalculated.notna(), source_values)
+    working["Metric Value"] = source_values.where(source_values.ge(0))
+
+    grouped = working.groupby("Creative Type", dropna=False, sort=False)
+    summary = grouped.agg(
+        Posts=("Creative Type", "size"),
+        **{"Available Posts": ("Metric Value", "count")},
+    )
+    if spec["aggregation"] == "mean":
+        summary["Value"] = grouped["Metric Value"].mean()
+    else:
+        summary["Value"] = grouped["Metric Value"].sum(min_count=1)
+    summary = summary.reset_index().dropna(subset=["Value"])
+    summary["Coverage"] = summary["Available Posts"].div(summary["Posts"]).mul(100)
+    summary = (
+        summary.sort_values(
+            ["Value", "Available Posts", "Creative Type"],
+            ascending=[False, False, True],
+            kind="stable",
+        )
+        .head(max(1, int(max_categories)))
+        .reset_index(drop=True)
+    )
+    summary["Posts"] = summary["Posts"].astype(int)
+    summary["Available Posts"] = summary["Available Posts"].astype(int)
+    return summary[columns]
+
+
+def _creative_performance_value_label_v68_91(metric: str, value) -> str:
+    numeric = float(value)
+    if metric == "Avg. ER":
+        return f"{numeric:.1f}%"
+    if numeric >= 1_000_000:
+        return f"{numeric / 1_000_000:.1f}M"
+    if numeric >= 1_000:
+        return f"{numeric / 1_000:.1f}K"
+    return f"{numeric:,.0f}"
+
+
+def render_creative_type_performance_bar_chart_v68_91(
+    performance: pd.DataFrame,
+    metric: str,
+) -> None:
+    """Render a ranked creative comparison with coverage in the hover detail."""
+    spec = CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91.get(metric)
+    if performance is None or performance.empty or spec is None:
+        label = str(spec["label"]) if spec else "The selected metric"
+        st.markdown(
+            f"<div class='empty-panel'>{esc(label)} is not available for this filtered batch.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    chart_data = performance.copy().sort_values(
+        ["Value", "Creative Type"], ascending=[True, False], kind="stable"
+    )
+    chart_data["Value Label"] = chart_data["Value"].map(
+        lambda value: _creative_performance_value_label_v68_91(metric, value)
+    )
+    if px is None:
+        chart_bar(
+            chart_data,
+            "Creative Type",
+            "Value",
+            orientation="h",
+            value_format="percent" if metric == "Avg. ER" else "number",
+        )
+        return
+
+    fig = px.bar(
+        chart_data,
+        x="Value",
+        y="Creative Type",
+        orientation="h",
+        text="Value Label",
+        color_discrete_sequence=[str(spec["color"])],
+        template="plotly_white",
+    )
+    fig.update_traces(
+        customdata=chart_data[
+            ["Value Label", "Posts", "Available Posts", "Coverage"]
+        ].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            + f"{spec['label']}: %{{customdata[0]}}"
+            + "<br>Metric available: %{customdata[2]:,.0f} of %{customdata[1]:,.0f} posts"
+            + "<br>Coverage: %{customdata[3]:.0f}%<extra></extra>"
+        ),
+        textposition="outside",
+        cliponaxis=False,
+        marker=dict(color=str(spec["color"]), line=dict(color="#ffffff", width=1)),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        showlegend=False,
+        height=max(360, 48 * len(chart_data) + 100),
+        margin=dict(l=12, r=72, t=18, b=58),
+        font=dict(color="#111827", size=12),
+        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(255,255,255,0)",
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+        xaxis=dict(
+            title=str(spec["axis"]),
+            rangemode="tozero",
+            gridcolor="#e2e8f0",
+            zeroline=False,
+            automargin=True,
+        ),
+        yaxis=dict(title=None, showgrid=False, automargin=True),
+    )
+    render_plotly_chart(fig)
+
+
+def prepare_marketing_next_actions_v68_91(df: pd.DataFrame) -> List[Tuple[str, str, str, str]]:
+    """Translate filtered dashboard evidence into three deterministic next actions."""
+    if df is None or df.empty:
+        return []
+
+    reach = prepare_creative_type_performance_chart_data_v68_91(df, "Views")
+    response = prepare_creative_type_performance_chart_data_v68_91(df, "Avg. ER")
+    if reach.empty and response.empty:
+        return []
+
+    reach_type = "Metrics pending"
+    reach_detail = "View data is not available"
+    if not reach.empty:
+        reach_row = reach.iloc[0]
+        reach_type = safe_str(reach_row["Creative Type"])
+        reach_detail = (
+            f"{_creative_performance_value_label_v68_91('Views', reach_row['Value'])} "
+            f"views across {int(reach_row['Posts']):,} posts"
+        )
+
+    response_type = "Metrics pending"
+    response_detail = "Engagement-rate data is not available"
+    if not response.empty:
+        eligible = response[response["Available Posts"].ge(2)]
+        response_row = (eligible if not eligible.empty else response).iloc[0]
+        response_type = safe_str(response_row["Creative Type"])
+        response_detail = (
+            f"{float(response_row['Value']):.1f}% average ER across "
+            f"{int(response_row['Available Posts']):,} measured posts"
+        )
+
+    market_column = "Market Display" if "Market Display" in df.columns else "Market"
+    markets = (
+        df[market_column].fillna("").astype(str).str.strip()
+        if market_column in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    known_markets = markets[~markets.str.casefold().isin({"", "other", "not specified"})]
+    test_market = safe_str(known_markets.mode().iloc[0]) if not known_markets.empty else ""
+    market_phrase = f" in {test_market}" if test_market else ""
+
+    if reach_type == "Metrics pending":
+        next_move = f"Validate {response_type}"
+        next_detail = "Add or refresh view metrics before deciding what to scale."
+    elif response_type == "Metrics pending":
+        next_move = f"Scale {reach_type} carefully"
+        next_detail = "Refresh engagement metrics before choosing the next creative test."
+    elif reach_type == response_type:
+        next_move = f"Scale {reach_type}{market_phrase}"
+        next_detail = "Use it as the control and test one new execution against the same brief."
+    else:
+        next_move = f"Test {response_type} vs {reach_type}{market_phrase}"
+        next_detail = "Keep the track and brief constant; compare response (ER) with reach (views)."
+
+    return [
+        ("Best for reach", reach_type, reach_detail, "focus-blue"),
+        ("Best for response", response_type, response_detail, "focus-green"),
+        ("Recommended next test", next_move, next_detail, "focus-orange"),
+    ]
+
+
 def filter_summary_by_selected_values_v68_50(
     df: pd.DataFrame,
     column: str,
@@ -5231,6 +5498,8 @@ def section_title(title: str, accent: str = "#6254e8") -> str:
     icon_map = {
         "Creative Type Mix": "CT",
         "Views by Creative Type": "V",
+        "Creative performance": "CP",
+        "From results to action": "→",
         "Market Summary": "M",
         "Drama Details": "D",
         "Top Creator Performance": "C",
@@ -10239,8 +10508,14 @@ elif st.session_state.step == 6:
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Interactive creative-type summary. The mix retains post counts while the
-    # accompanying percentage reports average engagement rate.
+    # Creative evidence first, then a deterministic recommendation. The metric
+    # switch changes only the comparison chart and never mutates dashboard data.
+    performance_metric = st.segmented_control(
+        "Compare creative types by",
+        list(CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91),
+        default="Views",
+        key="summary_creative_performance_metric_v68_91",
+    ) or "Views"
     c1, c2 = st.columns(2)
     with c1:
         with st.container(border=True):
@@ -10252,9 +10527,37 @@ elif st.session_state.step == 6:
             render_creative_type_bar_chart_v68_49(mix)
     with c2:
         with st.container(border=True):
-            st.markdown(section_title("Views by Creative Type", "#0ea5e9"), unsafe_allow_html=True)
-            views_mix = prepare_creative_type_chart_data_v68_49(filtered, "Views", max_categories=12)
-            render_creative_type_views_doughnut_v68_49(views_mix)
+            st.markdown(section_title("Creative performance", "#0ea5e9"), unsafe_allow_html=True)
+            performance = prepare_creative_type_performance_chart_data_v68_91(
+                filtered,
+                performance_metric,
+                max_categories=12,
+            )
+            render_creative_type_performance_bar_chart_v68_91(
+                performance,
+                performance_metric,
+            )
+            available_posts = int(performance["Available Posts"].sum()) if not performance.empty else 0
+            represented_posts = int(performance["Posts"].sum()) if not performance.empty else 0
+            if represented_posts and available_posts < represented_posts:
+                st.caption(
+                    f"{CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91[performance_metric]['label']} "
+                    f"is available for {available_posts:,} of {represented_posts:,} posts. "
+                    "Unavailable values are excluded, not treated as zero."
+                )
+
+    next_actions = prepare_marketing_next_actions_v68_91(filtered)
+    if next_actions:
+        with st.container(border=True):
+            st.markdown(
+                section_title("From results to action", "#f97316"),
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "A decision-ready read of the current filters. These recommendations "
+                "use only the posts and metrics shown above."
+            )
+            st.markdown(focus_cards(next_actions), unsafe_allow_html=True)
 
     if has_metrics:
         with st.container(border=True):
