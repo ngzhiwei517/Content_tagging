@@ -1,0 +1,457 @@
+[
+  {
+    "id": "tool_purpose",
+    "category": "Product",
+    "title": "What this tool is for",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "questions": [
+      "What does this tool do?",
+      "Why should I use this tool?",
+      "What problem does it solve?"
+    ],
+    "keywords": ["tool purpose", "content tagging", "music marketing", "creative analysis"],
+    "answer": "This tool turns TikTok and Instagram post links into a reviewable marketing dataset. It collects available public metrics, applies AI-assisted Creative Type and Narrative labels, supports human corrections, compares post and creator performance, and exports clean reports."
+  },
+  {
+    "id": "complements_existing_tools",
+    "category": "Product",
+    "title": "How it complements MelodyIQ and CreatorCore",
+    "steps": [1, 2, 6],
+    "questions": [
+      "How is this different from MelodyIQ?",
+      "How is this different from CreatorCore?",
+      "Does this replace our existing tools?"
+    ],
+    "keywords": ["melodyiq", "creatorcore", "existing tools", "replace", "complementary"],
+    "answer": "It complements rather than replaces those tools. MelodyIQ helps identify wider organic UGC activity, while CreatorCore provides campaign and creator source data. This tool adds post-level creative and narrative tagging, human review, cross-file comparison, creator context, and marketing-ready exports in one workflow."
+  },
+  {
+    "id": "common_use_cases",
+    "category": "Product",
+    "title": "Common marketing use cases",
+    "steps": [1, 2, 6],
+    "questions": [
+      "What can I use this for?",
+      "What are the main use cases?",
+      "Can it analyse a campaign?"
+    ],
+    "keywords": ["use case", "campaign analysis", "organic ugc", "creator selection", "creative trend"],
+    "answer": "Use it to identify creative patterns around a track, compare past campaign performance across markets, find strong posts and creators, review drama-edit subtypes, or collect public metrics without running AI tagging."
+  },
+  {
+    "id": "add_posts",
+    "category": "Inputs",
+    "title": "Add posts and files",
+    "steps": [2],
+    "questions": [
+      "How do I add posts?",
+      "Can I upload more than one file?",
+      "Can I paste links and upload files together?"
+    ],
+    "keywords": ["upload file", "paste links", "csv", "xlsx", "current batch", "add uploaded rows"],
+    "answer": "Upload one or more CSV/XLSX files or paste one TikTok or Instagram post link per line. Confirm the file details, then add the rows to Current batch. Uploaded rows and pasted links are additive, so one source does not erase the other."
+  },
+  {
+    "id": "required_inputs",
+    "category": "Inputs",
+    "title": "Required and optional inputs",
+    "steps": [2],
+    "questions": [
+      "What fields are required?",
+      "Do I need market or artist?",
+      "Why can I not add the uploaded rows?"
+    ],
+    "keywords": ["required input", "post link required", "track required", "artist optional", "market optional"],
+    "answer": "Every row needs a supported post link, and each uploaded file needs a Track name before it can be added. Artist and Market are optional. The app can suggest a track from the filename and may identify the artist through Apple Music/iTunes when Artist is blank."
+  },
+  {
+    "id": "track_artist_lookup",
+    "category": "Inputs",
+    "title": "Track and artist confirmation",
+    "steps": [2],
+    "questions": [
+      "Why is the track name filled automatically?",
+      "Do I need to type the artist?",
+      "What happens if the Apple Music match is wrong?"
+    ],
+    "keywords": ["track suggestion", "filename track", "artist lookup", "apple music", "itunes"],
+    "answer": "The filename is used only to suggest an editable Track name. Apple Music/iTunes can confirm the track and infer Artist when Artist is blank. If the match is not the intended song, correct the Track or type the intended Artist before adding the file."
+  },
+  {
+    "id": "market_handling",
+    "category": "Inputs",
+    "title": "Market handling",
+    "steps": [2, 3, 6],
+    "questions": [
+      "What if I do not know the market?",
+      "How is market detected?",
+      "Can I leave market blank?"
+    ],
+    "keywords": ["market optional", "other no market", "filename prefix", "market detection", "country"],
+    "answer": "Market is optional. The app keeps a market already present in the file, can detect filename prefixes such as [MY] or [SG], and otherwise groups the row as Other in summaries. Do not guess a market when the source does not provide one."
+  },
+  {
+    "id": "duplicates_and_sources",
+    "category": "Inputs",
+    "title": "Duplicate posts and source files",
+    "steps": [2],
+    "questions": [
+      "Will duplicate links be tagged twice?",
+      "What does Source mean?",
+      "Can the same post appear in two files?"
+    ],
+    "keywords": ["duplicate link", "deduplicate", "source file", "same post twice"],
+    "answer": "The Current batch combines all inputs and removes duplicate post URLs using the normalized post identity. Source records which uploaded file or pasted-link group supplied the row; it is reporting context, not a separate workflow."
+  },
+  {
+    "id": "select_posts",
+    "category": "Selection",
+    "title": "Choose posts for analysis",
+    "steps": [3],
+    "questions": [
+      "Should I use Top posts or Tag every link?",
+      "How should I rank the posts?",
+      "Should I add a date range?"
+    ],
+    "keywords": ["top posts", "tag every link", "rank by", "date range", "select posts"],
+    "answer": "Choose Top posts for a focused sample or Tag every link for the complete batch. Rank by Views for reach, Total Engagement for response volume, or Engagement Rate for response relative to views. Apply markets, tracks, platforms, or dates only when they match the question you are analysing."
+  },
+  {
+    "id": "metrics_only",
+    "category": "Selection",
+    "title": "Metrics only versus AI tagging",
+    "steps": [2, 3, 4, 6],
+    "questions": [
+      "Can I scrape metrics without tagging?",
+      "What does Metrics only do?",
+      "Will Metrics only use Gemini?"
+    ],
+    "keywords": ["metrics only", "fetch metrics", "without tagging", "skip gemini", "likes comments shares saves"],
+    "answer": "Choose Metrics only when you need available public metrics and calculated engagement fields without Creative Type, Narrative, or drama analysis. It skips Gemini classification and proceeds to downloadable results after scraping. AI tagging is needed only when you also want content labels and analysis."
+  },
+  {
+    "id": "scraping_sources",
+    "category": "Scraping",
+    "title": "Direct scraping and Apify fallback",
+    "steps": [2, 4, 6],
+    "questions": [
+      "Which scraper does the app use?",
+      "Does it always use Apify?",
+      "Why did my Apify credit change?"
+    ],
+    "keywords": ["free scraper", "direct scraper", "yt-dlp", "apify fallback", "scraping source", "apify credit"],
+    "answer": "The app tries direct public retrieval first. It uses Apify selectively when the direct result is blocked, unavailable, or missing required public fields. TikTok direct retrieval is usually more complete; Instagram more often needs fallback, especially for Shares, Saves, or profile data."
+  },
+  {
+    "id": "scraping_costs",
+    "category": "Scraping",
+    "title": "When the workflow may use credits",
+    "steps": [1, 3, 4, 6],
+    "questions": [
+      "Will this cost Apify credit?",
+      "What uses Gemini credit?",
+      "How can I reduce scraping cost?"
+    ],
+    "keywords": ["cost", "credit", "quota", "paid fallback", "reduce apify cost", "gemini credit"],
+    "answer": "Direct retrieval does not use Apify credit. Apify credit is used only for fallback work, and Instagram normally needs more fallback than TikTok. Gemini quota is used for AI tagging and Taggy's open-ended answers, not for local help answers or Metrics only classification. Check provider usage before very large runs."
+  },
+  {
+    "id": "unavailable_content",
+    "category": "Scraping",
+    "title": "Unavailable posts or metrics",
+    "steps": [2, 3, 4, 6],
+    "questions": [
+      "Why is a post unavailable?",
+      "Why are Views, Shares, or Saves blank?",
+      "Why does the table show Not available?"
+    ],
+    "keywords": ["unavailable post", "missing metrics", "not available", "private deleted", "blocked", "zero"],
+    "answer": "A public field can be absent because the post is private, deleted, region-restricted, renamed, rate-limited, or not returned by either retrieval source. The app should show Not available rather than a false zero when neither source supplies a metric. Unavailable selected posts can be replaced by the next-ranked valid posts when enough candidates exist."
+  },
+  {
+    "id": "link_compatibility",
+    "category": "Scraping",
+    "title": "Supported post links",
+    "steps": [2],
+    "questions": [
+      "Which TikTok links work?",
+      "Which Instagram links work?",
+      "Why does a short link fail?"
+    ],
+    "keywords": ["supported link", "short link", "vt.tiktok", "vm.tiktok", "instagram reel", "profile link"],
+    "answer": "Use a direct public TikTok /@creator/video or /photo URL, or an Instagram /reel or /p URL. Shortened TikTok share links and Instagram share paths may not resolve reliably. Creator profiles, Stories, Live, Explore, and hashtag pages are not individual supported posts."
+  },
+  {
+    "id": "tagging_process",
+    "category": "AI tagging",
+    "title": "What happens during tagging",
+    "steps": [4],
+    "questions": [
+      "What happens during tagging?",
+      "Why does tagging use several stages?",
+      "Does it analyse the whole video?"
+    ],
+    "keywords": ["tagging process", "multimodal", "frames", "full video", "gemini analysis", "protected chunks"],
+    "answer": "The app collects post evidence, then Gemini applies Creative Type and Narrative labels with validation and reusable guardrails. It starts with lighter evidence and checks more frames or the full video only when needed. Results are processed in protected chunks so completed work can be resumed."
+  },
+  {
+    "id": "tagging_speed",
+    "category": "AI tagging",
+    "title": "Why some posts take longer",
+    "steps": [4],
+    "questions": [
+      "Why is tagging slow?",
+      "Why are drama posts slower?",
+      "Why is Instagram slower than TikTok?"
+    ],
+    "keywords": ["slow tagging", "drama slow", "instagram slow", "media download", "more evidence"],
+    "answer": "Speed varies by platform availability and evidence needed. Instagram may require additional fallback requests, while drama posts may need more frame or full-video evidence to identify story, edit focus, subtype, and audio accurately. The app avoids skipping those checks merely to make the run faster."
+  },
+  {
+    "id": "tagging_accuracy",
+    "category": "AI tagging",
+    "title": "Accuracy and human review",
+    "steps": [4, 5, 6],
+    "questions": [
+      "Is the AI always correct?",
+      "How accurate is the tagging?",
+      "Why do I need human review?"
+    ],
+    "keywords": ["accuracy", "human reviewed", "benchmark", "ai error", "exact agreement", "acceptance rate"],
+    "answer": "No AI label is guaranteed. On the locked 100-post benchmark, 93 posts were evaluable: the final human-assisted workflow achieved 95.7% adjudicated semantic acceptance, while exact agreement with the legacy single-label benchmark was 73.1%. The 95.7% result must not be described as pure AI-only accuracy."
+  },
+  {
+    "id": "creative_narrative_drama",
+    "category": "AI tagging",
+    "title": "Creative Type, Narrative, and drama details",
+    "steps": [4, 5, 6],
+    "questions": [
+      "What is the difference between Creative Type and Narrative?",
+      "What extra details are shown for drama edits?",
+      "Can it identify BL or GL?"
+    ],
+    "keywords": ["creative type", "narrative", "drama details", "bl", "gl", "edit focus", "drama title"],
+    "answer": "Creative Type is the reusable format or content category, while Narrative is a short description of what the post communicates. Movie/TV/Drama Edits can also include a drama subtype such as BL, GL, or General drama, plus edit focus, format, country/region, show title, detected audio, and audio version when evidence is available."
+  },
+  {
+    "id": "review_posts",
+    "category": "Review",
+    "title": "Review and correct posts",
+    "steps": [5, 6],
+    "questions": [
+      "How should I review a post?",
+      "Can I edit the AI labels?",
+      "When should I remove a post?"
+    ],
+    "keywords": ["review post", "keep edit remove", "edit labels", "edit drama details", "human correction"],
+    "answer": "Check the preview or link, creator, market, track, Creative Type, Narrative, and any drama details. Keep correct results, edit incorrect fields directly where editing is enabled, and remove only unusable posts. Reviewed corrections affect the working results and export."
+  },
+  {
+    "id": "knowledge_policy",
+    "category": "Review",
+    "title": "How approved knowledge is reused",
+    "steps": [5, 6],
+    "questions": [
+      "Does the app learn from every AI result?",
+      "Will my correction improve future tagging?",
+      "Does it remember exact post labels?"
+    ],
+    "keywords": ["knowledge base", "learn corrections", "approved rows", "exact url memory"],
+    "answer": "The reusable Creative Knowledge Base should learn only from reviewed or approved patterns such as creator, track, market, format, keywords, hashtags, and corrected labels. It must not treat every raw AI output as truth or use an exact post URL-to-label memory for prediction."
+  },
+  {
+    "id": "engagement_calculation",
+    "category": "Metrics",
+    "title": "Total Engagement and Engagement Rate",
+    "steps": [4, 5, 6],
+    "questions": [
+      "How is Total Engagement calculated?",
+      "How is Engagement Rate calculated?",
+      "Why can Engagement Rate be above 100 percent?"
+    ],
+    "keywords": ["total engagement formula", "engagement rate formula", "likes comments shares saves", "above 100"],
+    "answer": "When no reliable source total is supplied, Total Engagement is Likes + Comments + Shares + Saves using available fields. Engagement Rate is Total Engagement divided by Views, multiplied by 100. It can exceed 100% when counted interactions are greater than reported views; unavailable inputs should remain unavailable rather than becoming false zeroes."
+  },
+  {
+    "id": "batch_profile_metrics",
+    "category": "Metrics",
+    "title": "Batch and three-month creator metrics",
+    "steps": [6],
+    "questions": [
+      "What is Batch Average Engagement?",
+      "What is Profile Average Engagement?",
+      "What do Posts 3m and Avg ER 3m mean?"
+    ],
+    "keywords": ["batch average engagement", "profile average engagement", "posts 3m", "avg views 3m", "avg er 3m"],
+    "answer": "Posts (3m), Avg. Views (3m), and Avg. ER (3m) use reachable public posts from the creator's latest three-month profile window. Posts, Total Views, Total Engagement, and Avg. ER use only that creator's posts in the current filtered batch. Total Views is not a three-month profile total."
+  },
+  {
+    "id": "creator_ranking",
+    "category": "Creators",
+    "title": "How top creators are chosen",
+    "steps": [6],
+    "questions": [
+      "How are Top creators ranked?",
+      "Which column should I use to choose a creator?",
+      "What happens when a creator is unavailable?"
+    ],
+    "keywords": ["top creator ranking", "ranked creator", "next ranked", "unavailable creator", "creator selection"],
+    "answer": "Creators are initially ranked by performance in the current batch, led by Total Engagement. Use batch metrics to judge performance on the analysed content and three-month profile metrics to judge recent consistency. If an early profile cannot be retrieved, the app can continue to the next-ranked creator to fill the requested count when possible."
+  },
+  {
+    "id": "creator_limits",
+    "category": "Creators",
+    "title": "Creator enrichment limits and fallback",
+    "steps": [6],
+    "questions": [
+      "How many creators can I check?",
+      "How many profile posts are scraped?",
+      "Why does Instagram show only 20 profile posts?"
+    ],
+    "keywords": ["top 100 creators", "2000 posts", "three months", "instagram latest 20", "profile limit"],
+    "answer": "You can request up to 100 unique ranked creators, or fewer when the batch contains fewer unique creators. TikTok profile enrichment checks reachable public activity from the latest three months with a 2,000-post-per-creator safety ceiling. Instagram may use a limited Apify fallback using the latest 20 posts when direct profile data is incomplete."
+  },
+  {
+    "id": "kol_size",
+    "category": "Creators",
+    "title": "KOL Size",
+    "steps": [5, 6],
+    "questions": [
+      "How is KOL Size calculated?",
+      "Why is KOL Size Unknown?",
+      "Can I compare KOL Size across markets?"
+    ],
+    "keywords": ["kol size", "nano micro medium macro mega", "followers", "unknown"],
+    "answer": "KOL Size is derived from follower count using supported market-specific thresholds. It can remain Unknown when Followers are unavailable or when the market has no supported definition. Because tier definitions differ by market, compare the underlying follower and performance metrics as well as the label."
+  },
+  {
+    "id": "resume_after_closing",
+    "category": "Recovery",
+    "title": "Close the app and continue later",
+    "steps": [2, 3, 4, 5, 6],
+    "questions": [
+      "Can I close the website and reopen it?",
+      "Can I continue tomorrow?",
+      "Will progress survive if I turn off my computer?"
+    ],
+    "keywords": ["close website", "close browser", "reopen", "continue tomorrow", "turn off computer", "resume tagging"],
+    "answer": "Yes, after the current protected chunk has saved. Choose Continue later and bookmark the private recovery link, then reopen that exact link. Local recovery works while the local checkpoint remains; recovery after a cloud restart or redeployment requires the optional Supabase/Postgres checkpoint backend to be configured."
+  },
+  {
+    "id": "recovery_link",
+    "category": "Recovery",
+    "title": "Private recovery link and Recovery ID",
+    "steps": [2, 3, 4, 5, 6],
+    "questions": [
+      "Where is my Recovery ID?",
+      "Do I need to copy the ID?",
+      "How do I reopen a saved batch?"
+    ],
+    "keywords": ["recovery id", "recovery link", "continue later", "bookmark", "saved batch", "run parameter"],
+    "answer": "The Recovery ID is carried automatically in the private Continue later URL, so normal users only need to bookmark that link. Keep it private because anyone with it may reopen the batch. Use the manual Recovery ID only if you no longer have the bookmark."
+  },
+  {
+    "id": "independent_batches",
+    "category": "Recovery",
+    "title": "Start a new independent batch",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "questions": [
+      "Why does the app reopen my unfinished batch?",
+      "Can I run two batches at the same time?",
+      "How do I start a new batch?"
+    ],
+    "keywords": ["new batch", "multiple batches", "separate tabs", "plain app url", "unfinished batch"],
+    "answer": "Open the plain app URL without the private run parameter to start a new independent batch. Open each saved recovery link in its own tab when you need separate jobs. A recovery URL intentionally reopens that specific unfinished or saved batch."
+  },
+  {
+    "id": "api_key_limit",
+    "category": "Recovery",
+    "title": "API key or token reaches its limit",
+    "steps": [1, 4],
+    "questions": [
+      "What if a key reaches its limit?",
+      "Can I replace the Gemini key and continue?",
+      "Will changing a key rerun completed posts?"
+    ],
+    "keywords": ["api key limit", "quota reached", "gemini limit", "apify limit", "replace key", "resume after key"],
+    "answer": "Let the current protected chunk save, replace the exhausted Gemini key or Apify token in Streamlit Secrets, then resume the recovery link. Completed checkpointed results should not repeat. Keys and tokens are never stored in the recovery payload."
+  },
+  {
+    "id": "api_key_setup",
+    "category": "Deployment",
+    "title": "Configure API keys safely",
+    "steps": [1],
+    "questions": [
+      "Where do I add the Gemini API key?",
+      "Where do I add the Apify token?",
+      "Should I paste keys into the app?"
+    ],
+    "keywords": ["streamlit secrets", "gemini api key", "apify token", "configure keys", "settings secrets"],
+    "answer": "Add GEMINI_API_KEY and APIFY_TOKEN in the deployed app's Settings > Secrets, then save. Never paste credentials into uploaded files, recovery links, Taggy questions, shared documents, or the GitHub repository."
+  },
+  {
+    "id": "data_safety",
+    "category": "Privacy",
+    "title": "What the app and recovery store",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "questions": [
+      "Does recovery save my API keys?",
+      "Are downloaded videos stored?",
+      "What data is saved to Supabase?"
+    ],
+    "keywords": ["what is saved", "store api keys", "downloaded media", "privacy", "supabase data", "recovery payload"],
+    "answer": "Recovery stores only allowlisted workflow state and sanitized tagging results needed to continue. It excludes provider and database credentials, downloaded or binary media, and local media paths. Media may be handled temporarily for analysis, but it must not be persisted in recovery or committed to the repository."
+  },
+  {
+    "id": "export_results",
+    "category": "Export",
+    "title": "Download and hand off results",
+    "steps": [6],
+    "questions": [
+      "Which file should I download?",
+      "What is in the Excel export?",
+      "What is the QA report for?"
+    ],
+    "keywords": ["download results", "export csv", "export xlsx", "qa report", "market sheets"],
+    "answer": "Use the marketing CSV for one flat row-per-post handoff. The XLSX contains All Posts and market sheets when market data exists. The internal Review/QA workbook may include confidence, validation, review reasons, and label history, so it is intended for internal checking rather than the marketing summary."
+  },
+  {
+    "id": "deploy_and_sync",
+    "category": "Deployment",
+    "title": "Deploy a fork and receive updates",
+    "steps": [1],
+    "questions": [
+      "How do I deploy my own copy?",
+      "Will the original repository update my fork automatically?",
+      "How do I sync the latest version?"
+    ],
+    "keywords": ["fork github", "deploy streamlit", "sync fork", "update branch", "app.py", "main branch"],
+    "answer": "Fork the Content_tagging repository, deploy that fork from Streamlit Community Cloud using branch main and main file app.py, then add secrets in the deployed app settings. Future changes to the original repository do not alter your fork automatically; use GitHub Sync fork > Update branch when you are ready to receive them."
+  },
+  {
+    "id": "taggy_behavior",
+    "category": "Taggy",
+    "title": "How Taggy answers questions",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "questions": [
+      "Does Taggy use Gemini?",
+      "What does Taggy know?",
+      "Does Taggy remember our chat?"
+    ],
+    "keywords": ["taggy gemini", "taggy knowledge", "chat memory", "local answer", "dashboard assistant"],
+    "answer": "Taggy first searches this approved local project knowledge for reliable workflow answers. Gemini is used for open-ended questions and dashboard interpretation, grounded in the current page, approved help, and current results. Chat history is not placed in recovery checkpoints, so Taggy does not keep long-term conversation memory."
+  },
+  {
+    "id": "taggy_scope",
+    "category": "Taggy",
+    "title": "What Taggy can and cannot answer",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "questions": [
+      "Can Taggy suggest a campaign?",
+      "Can Taggy explain how to use this page?",
+      "Can Taggy answer questions outside the dashboard?"
+    ],
+    "keywords": ["ask taggy", "campaign suggestion", "page help", "dashboard question", "outside knowledge"],
+    "answer": "Taggy can explain the current page, define metrics and limitations, summarize the current dashboard, recommend creators or creative tests, and suggest campaign ideas from the available evidence. Treat suggestions as hypotheses, not forecasts. It should not invent unavailable audience, conversion, cost, or private platform data."
+  }
+]

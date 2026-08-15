@@ -44,6 +44,7 @@ _DASHBOARD_ASSISTANT_API = (
     "dashboard_context_signature",
     "generate_page_assistant_answer",
     "page_help_answer",
+    "taggy_knowledge_answer",
 )
 if any(
     not hasattr(_dashboard_assistant, name)
@@ -60,6 +61,7 @@ dashboard_context_json = _dashboard_assistant.dashboard_context_json
 dashboard_context_signature = _dashboard_assistant.dashboard_context_signature
 generate_page_assistant_answer = _dashboard_assistant.generate_page_assistant_answer
 page_help_answer = _dashboard_assistant.page_help_answer
+taggy_knowledge_answer = _dashboard_assistant.taggy_knowledge_answer
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
@@ -1118,6 +1120,23 @@ def safe_str(v) -> str:
     except Exception:
         pass
     return str(v).strip()
+
+
+ANALYSIS_MODE_OPTIONS_V68_93 = ("AI tagging", "Metrics only")
+
+
+def _persist_analysis_mode_from_widget_v68_93() -> str:
+    """Copy temporary widget state into durable cross-page session state."""
+    selected_mode = safe_str(
+        st.session_state.get("analysis_mode_widget_v68_93")
+    )
+    if selected_mode not in ANALYSIS_MODE_OPTIONS_V68_93:
+        selected_mode = "AI tagging"
+    st.session_state.analysis_mode_v68_86 = selected_mode
+    if selected_mode == "Metrics only":
+        # A metrics-only choice must not inherit an unfinished AI-tagging job.
+        st.session_state.tagging_job_active_v68_43 = False
+    return selected_mode
 
 
 def review_queue_indices_v68_57(
@@ -4473,6 +4492,7 @@ def _start_metrics_only_run_v68_86(
 ) -> None:
     """Start or resume a metrics-only scrape for the current selection."""
     # Metrics-only runs must never inherit or resume an AI-tagging job.
+    st.session_state.analysis_mode_v68_86 = "Metrics only"
     st.session_state.tagging_job_active_v68_43 = False
     supported = selected[
         selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
@@ -5299,11 +5319,11 @@ def _creative_performance_value_label_v68_91(metric: str, value) -> str:
     return f"{numeric:,.0f}"
 
 
-def render_creative_type_performance_bar_chart_v68_91(
+def render_creative_type_performance_doughnut_v68_94(
     performance: pd.DataFrame,
     metric: str,
 ) -> None:
-    """Render a ranked creative comparison with coverage in the hover detail."""
+    """Render creative performance as a doughnut with coverage in the hover detail."""
     spec = CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91.get(metric)
     if performance is None or performance.empty or spec is None:
         label = str(spec["label"]) if spec else "The selected metric"
@@ -5314,7 +5334,7 @@ def render_creative_type_performance_bar_chart_v68_91(
         return
 
     chart_data = performance.copy().sort_values(
-        ["Value", "Creative Type"], ascending=[True, False], kind="stable"
+        ["Value", "Creative Type"], ascending=[False, True], kind="stable"
     )
     chart_data["Value Label"] = chart_data["Value"].map(
         lambda value: _creative_performance_value_label_v68_91(metric, value)
@@ -5329,13 +5349,12 @@ def render_creative_type_performance_bar_chart_v68_91(
         )
         return
 
-    fig = px.bar(
+    fig = px.pie(
         chart_data,
-        x="Value",
-        y="Creative Type",
-        orientation="h",
-        text="Value Label",
-        color_discrete_sequence=[str(spec["color"])],
+        values="Value",
+        names="Creative Type",
+        hole=0.58,
+        color_discrete_sequence=CREATIVE_TYPE_CHART_COLORS_V68_49,
         template="plotly_white",
     )
     fig.update_traces(
@@ -5343,32 +5362,47 @@ def render_creative_type_performance_bar_chart_v68_91(
             ["Value Label", "Posts", "Available Posts", "Coverage"]
         ].to_numpy(),
         hovertemplate=(
-            "<b>%{y}</b><br>"
+            "<b>%{label}</b><br>"
             + f"{spec['label']}: %{{customdata[0]}}"
+            + "<br>Share of selected metric: %{percent:.1%}"
             + "<br>Metric available: %{customdata[2]:,.0f} of %{customdata[1]:,.0f} posts"
             + "<br>Coverage: %{customdata[3]:.0f}%<extra></extra>"
         ),
-        textposition="outside",
-        cliponaxis=False,
-        marker=dict(color=str(spec["color"]), line=dict(color="#ffffff", width=1)),
+        sort=False,
+        textinfo="none",
+        marker=dict(line=dict(color="#ffffff", width=2)),
+    )
+    total_value = float(chart_data["Value"].sum())
+    if metric == "Avg. ER":
+        centre_label = "Average ER"
+    else:
+        centre_label = _creative_performance_value_label_v68_91(metric, total_value)
+    fig.add_annotation(
+        text=(
+            f"<b>{centre_label}</b><br>"
+            f"<span style='font-size:12px'>{spec['label']}</span>"
+        ),
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(color="#111827", size=20),
     )
     fig.update_layout(
         template="plotly_white",
-        showlegend=False,
-        height=max(360, 48 * len(chart_data) + 100),
-        margin=dict(l=12, r=72, t=18, b=58),
+        height=520,
+        margin=dict(l=12, r=12, t=18, b=92),
         font=dict(color="#111827", size=12),
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0)",
         hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
-        xaxis=dict(
-            title=str(spec["axis"]),
-            rangemode="tozero",
-            gridcolor="#e2e8f0",
-            zeroline=False,
-            automargin=True,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.06,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
         ),
-        yaxis=dict(title=None, showgrid=False, automargin=True),
     )
     render_plotly_chart(fig)
 
@@ -5568,6 +5602,11 @@ def _render_taggy_chat_content_v68_87(
         messages.append({"role": "user", "content": question})
 
         answer = page_help_answer(int(step), question)
+        trusted_fallback = taggy_knowledge_answer(
+            int(step),
+            question,
+            minimum_score=3.5,
+        )
         # Prefer the current managed key so a replacement Secret is available
         # to the independent companion session immediately.
         gemini_key = clean_api_secret(
@@ -5575,7 +5614,7 @@ def _render_taggy_chat_content_v68_87(
             or st.session_state.get("gemini_key")
         )
         if not answer and not gemini_key:
-            answer = (
+            answer = trusted_fallback or (
                 "I can guide you through this page, but an open-ended answer needs "
                 "the Gemini API key configured in Streamlit Secrets. No scraping was started."
             )
@@ -5597,7 +5636,9 @@ def _render_taggy_chat_content_v68_87(
             except Exception as exc:
                 LOGGER.warning("Taggy assistant request failed (%s)", type(exc).__name__)
                 error_text = safe_str(exc).lower()
-                if any(
+                if trusted_fallback:
+                    answer = trusted_fallback
+                elif any(
                     marker in error_text
                     for marker in ["quota", "429", "resource_exhausted"]
                 ):
@@ -8501,18 +8542,26 @@ if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
     with st.container(border=True):
+        durable_analysis_mode_v68_93 = safe_str(
+            st.session_state.get("analysis_mode_v68_86")
+        )
+        if durable_analysis_mode_v68_93 not in ANALYSIS_MODE_OPTIONS_V68_93:
+            durable_analysis_mode_v68_93 = "AI tagging"
+        if "analysis_mode_widget_v68_93" not in st.session_state:
+            st.session_state.analysis_mode_widget_v68_93 = (
+                durable_analysis_mode_v68_93
+            )
         st.segmented_control(
             "What do you want to run?",
-            ["AI tagging", "Metrics only"],
-            key="analysis_mode_v68_86",
+            ANALYSIS_MODE_OPTIONS_V68_93,
+            key="analysis_mode_widget_v68_93",
+            on_change=_persist_analysis_mode_from_widget_v68_93,
             help=(
                 "Metrics only refreshes public post metrics and calculates engagement "
                 "without sending posts to Gemini."
             ),
         )
-        selected_run_mode_v68_88 = safe_str(
-            st.session_state.get("analysis_mode_v68_86")
-        ) or "AI tagging"
+        selected_run_mode_v68_88 = _persist_analysis_mode_from_widget_v68_93()
         st.caption(
             "AI tagging analyses creative content and metrics."
             if selected_run_mode_v68_88 == "AI tagging"
@@ -10547,7 +10596,7 @@ elif st.session_state.step == 6:
                 performance_metric,
                 max_categories=12,
             )
-            render_creative_type_performance_bar_chart_v68_91(
+            render_creative_type_performance_doughnut_v68_94(
                 performance,
                 performance_metric,
             )
@@ -10562,14 +10611,9 @@ elif st.session_state.step == 6:
 
     next_actions = prepare_marketing_next_actions_v68_91(filtered)
     if next_actions:
-        with st.container(border=True):
-            st.markdown(
-                section_title("From results to action", "#f97316"),
-                unsafe_allow_html=True,
-            )
+        with st.expander("Suggested next steps", expanded=False):
             st.caption(
-                "A decision-ready read of the current filters. These recommendations "
-                "use only the posts and metrics shown above."
+                "Optional recommendations based only on the posts and metrics shown above."
             )
             st.markdown(focus_cards(next_actions), unsafe_allow_html=True)
 
