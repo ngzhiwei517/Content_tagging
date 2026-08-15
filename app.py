@@ -4472,6 +4472,8 @@ def _start_metrics_only_run_v68_86(
     restart: bool = False,
 ) -> None:
     """Start or resume a metrics-only scrape for the current selection."""
+    # Metrics-only runs must never inherit or resume an AI-tagging job.
+    st.session_state.tagging_job_active_v68_43 = False
     supported = selected[
         selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
     ].copy().reset_index(drop=True)
@@ -9268,12 +9270,24 @@ elif st.session_state.step == 3:
         ("Rank", rank_summary, "Selection logic"),
     ]), unsafe_allow_html=True)
     st.markdown(render_table(selected, max_rows=12, cols=["Platform", "Source", "Link", "Market", "Track", "Creator", "Followers", "KOL Size", "Views", "Likes", "Comments", "Shares", "Saves", "Total Engagement", "Engagement Rate"]), unsafe_allow_html=True)
+    metrics_only_selection_v68_92 = (
+        safe_str(st.session_state.get("analysis_mode_v68_86")) == "Metrics only"
+    )
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back", width="stretch"):
             go(2)
     with c2:
-        if st.button("Continue", type="primary", width="stretch"):
+        selection_continue_label_v68_92 = (
+            "Fetch metrics" if metrics_only_selection_v68_92 else "Continue"
+        )
+        if st.button(
+            selection_continue_label_v68_92,
+            type="primary",
+            width="stretch",
+        ):
+            if metrics_only_selection_v68_92:
+                _start_metrics_only_run_v68_86(selected, restart=False)
             go(4)
     st.markdown("</div>", unsafe_allow_html=True)
 

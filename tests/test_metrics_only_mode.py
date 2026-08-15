@@ -114,6 +114,10 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
             "# STEP 3: Select posts",
             1,
         )[0]
+        step_three = APP_SOURCE.split("# STEP 3: Select posts", 1)[1].split(
+            "# STEP 4: Run tagging",
+            1,
+        )[0]
         step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
             "# STEP 5: Review",
             1,
@@ -126,6 +130,8 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
         self.assertIn('st.session_state.get("analysis_mode_v68_86")', step_four)
         self.assertIn('run_page_title_v68_86 = "Fetch metrics"', step_four)
         self.assertIn('metrics_button_label_v68_86 = "Fetch metrics"', step_four)
+        self.assertIn('"Fetch metrics" if metrics_only_selection_v68_92', step_three)
+        self.assertIn("_start_metrics_only_run_v68_86(selected, restart=False)", step_three)
         self.assertIn("if metrics_complete_v68_86:", step_four)
         self.assertIn("go(6)", step_four)
         self.assertNotIn('"Download metrics CSV"', step_four)
@@ -166,6 +172,13 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
         self.assertNotIn("final_update2_tag_candidates(", runner)
         self.assertNotIn("gemini_key", runner.casefold())
         self.assertNotIn("load_backend", runner.casefold())
+
+    def test_metrics_start_disables_any_ai_tagging_job(self):
+        starter = APP_SOURCE.split(
+            "def _start_metrics_only_run_v68_86",
+            1,
+        )[1].split("def _run_metrics_only_chunk_v68_86", 1)[0]
+        self.assertIn("tagging_job_active_v68_43 = False", starter)
 
     def test_adapter_function_contains_no_ai_backend_call(self):
         source = inspect.getsource(metrics_candidates).casefold()
