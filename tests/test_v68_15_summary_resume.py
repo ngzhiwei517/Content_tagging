@@ -165,6 +165,28 @@ class SummaryV6815Tests(unittest.TestCase):
         cls.creative_type_engagement_chart_data = staticmethod(
             load_function("prepare_creative_type_engagement_chart_data_v68_70", namespace)
         )
+        namespace["CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91"] = {
+            "Views": {"column": "Views", "aggregation": "sum", "label": "Views", "axis": "Views", "color": "#0ea5e9"},
+            "Engagement": {"column": "Total Engagement", "aggregation": "sum", "label": "Total engagement", "axis": "Total engagement", "color": "#10b981"},
+            "Avg. ER": {"column": "Engagement Rate", "aggregation": "mean", "label": "Average engagement rate", "axis": "Average engagement rate (%)", "color": "#6254e8"},
+            "Shares": {"column": "Shares", "aggregation": "sum", "label": "Shares", "axis": "Shares", "color": "#f97316"},
+            "Saves": {"column": "Saves", "aggregation": "sum", "label": "Saves", "axis": "Saves", "color": "#ec4899"},
+        }
+        cls.creative_type_performance_chart_data = staticmethod(
+            load_function("prepare_creative_type_performance_chart_data_v68_91", namespace)
+        )
+        namespace["prepare_creative_type_performance_chart_data_v68_91"] = (
+            cls.creative_type_performance_chart_data
+        )
+        cls.creative_performance_value_label = staticmethod(
+            load_function("_creative_performance_value_label_v68_91", namespace)
+        )
+        namespace["_creative_performance_value_label_v68_91"] = (
+            cls.creative_performance_value_label
+        )
+        cls.marketing_next_actions = staticmethod(
+            load_function("prepare_marketing_next_actions_v68_91", namespace)
+        )
         cls.filter_summary = staticmethod(
             load_function("filter_summary_by_selected_values_v68_50", namespace)
         )
@@ -191,6 +213,7 @@ class SummaryV6815Tests(unittest.TestCase):
             "Optional": __import__("typing").Optional,
             "safe_str": namespace["safe_str"],
             "clean_num": namespace["clean_num"],
+            "esc": lambda value: str(value),
             "st": SimpleNamespace(
                 markdown=lambda *args, **kwargs: None,
                 caption=lambda *args, **kwargs: None,
@@ -199,12 +222,19 @@ class SummaryV6815Tests(unittest.TestCase):
             "chart_bar": lambda *args, **kwargs: None,
             "render_plotly_chart": lambda fig: cls.rendered_chart_figures.append(fig),
             "CREATIVE_TYPE_CHART_COLORS_V68_49": ["#6254e8", "#0ea5e9", "#10b981"],
+            "CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91": namespace[
+                "CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91"
+            ],
+            "_creative_performance_value_label_v68_91": cls.creative_performance_value_label,
         }
         cls.render_creative_type_bar = staticmethod(
             load_function("render_creative_type_bar_chart_v68_49", chart_namespace)
         )
         cls.render_creative_type_views = staticmethod(
             load_function("render_creative_type_views_doughnut_v68_49", chart_namespace)
+        )
+        cls.render_creative_type_performance = staticmethod(
+            load_function("render_creative_type_performance_bar_chart_v68_91", chart_namespace)
         )
         cls.render_drama_breakdown = staticmethod(
             load_function("render_drama_breakdown_v68_89", chart_namespace)
@@ -260,16 +290,17 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(float(chart["Views"].sum()), 1850.0)
         self.assertAlmostEqual(float(chart["Share"].sum()), 100.0)
 
-    def test_visual_summary_uses_interactive_post_bar_and_views_doughnut(self):
+    def test_visual_summary_uses_metric_switch_and_ranked_performance_chart(self):
         step_six = APP_SOURCE.split("# STEP 6", 1)[1]
         self.assertIn(
             "render_creative_type_bar_chart_v68_49(mix)",
             step_six,
         )
-        self.assertIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
+        self.assertIn("summary_creative_performance_metric_v68_91", step_six)
+        self.assertIn("render_creative_type_performance_bar_chart_v68_91", step_six)
+        self.assertIn("prepare_marketing_next_actions_v68_91(filtered)", step_six)
         self.assertIn("prepare_creative_type_engagement_chart_data_v68_70", step_six)
-        self.assertIn('prepare_creative_type_chart_data_v68_49(filtered, "Views"', step_six)
-        self.assertNotIn("metric_for_chart = focus_metric", step_six)
+        self.assertNotIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
 
     def test_summary_click_drilldown_matches_one_category(self):
         rows = pd.DataFrame({
@@ -603,6 +634,43 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(chart["Posts"].tolist(), [2, 1])
         self.assertTrue(chart["Average Engagement Rate"].isna().all())
 
+    def test_creative_performance_excludes_missing_metrics_instead_of_using_zero(self):
+        rows = pd.DataFrame({
+            "Primary Creative Type": ["Dance", "Dance", "Comedy"],
+            "Shares": [100, None, 40],
+        })
+        chart = self.creative_type_performance_chart_data(rows, "Shares")
+        dance = chart.loc[chart["Creative Type"] == "Dance"].iloc[0]
+        self.assertEqual(float(dance["Value"]), 100.0)
+        self.assertEqual(int(dance["Posts"]), 2)
+        self.assertEqual(int(dance["Available Posts"]), 1)
+        self.assertAlmostEqual(float(dance["Coverage"]), 50.0)
+
+    def test_creative_performance_recalculates_average_er_from_valid_views(self):
+        rows = pd.DataFrame({
+            "Primary Creative Type": ["Dance", "Dance", "Comedy"],
+            "Views": [1000, None, 2000],
+            "Total Engagement": [100, 500, 400],
+            "Engagement Rate": [10.0, 0.0, 20.0],
+        })
+        chart = self.creative_type_performance_chart_data(rows, "Avg. ER")
+        dance = chart.loc[chart["Creative Type"] == "Dance"].iloc[0]
+        self.assertAlmostEqual(float(dance["Value"]), 10.0)
+        self.assertEqual(int(dance["Available Posts"]), 1)
+
+    def test_marketing_next_actions_compare_reach_and_response(self):
+        rows = pd.DataFrame({
+            "Primary Creative Type": ["Dance", "Dance", "Comedy", "Comedy"],
+            "Views": [5000, 5000, 1000, 1000],
+            "Total Engagement": [250, 250, 300, 300],
+            "Engagement Rate": [5.0, 5.0, 30.0, 30.0],
+            "Market Display": ["SG", "SG", "SG", "SG"],
+        })
+        actions = self.marketing_next_actions(rows)
+        self.assertEqual(actions[0][1], "Dance")
+        self.assertEqual(actions[1][1], "Comedy")
+        self.assertIn("Test Comedy vs Dance in SG", actions[2][1])
+
     def test_creative_type_bar_hover_shows_posts_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
         mix = pd.DataFrame({
@@ -633,6 +701,22 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(float(trace.hole), 0.58)
         self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
         self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
+
+    def test_creative_performance_bar_is_ranked_and_shows_coverage(self):
+        self.rendered_chart_figures.clear()
+        performance = pd.DataFrame({
+            "Creative Type": ["Dance", "Comedy"],
+            "Value": [8000, 2000],
+            "Posts": [8, 4],
+            "Available Posts": [8, 2],
+            "Coverage": [100.0, 50.0],
+        })
+        self.render_creative_type_performance(performance, "Views")
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertEqual(trace.orientation, "h")
+        self.assertIn("Metric available", trace.hovertemplate)
+        self.assertIn("Coverage", trace.hovertemplate)
+        self.assertEqual(list(trace.y), ["Comedy", "Dance"])
 
     def test_drama_breakdown_compares_volume_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
