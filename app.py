@@ -123,6 +123,11 @@ from ugc_tagger.manual_metrics import (
     build_manual_metric_updates,
     missing_metric_names,
 )
+from ugc_tagger.selection_metrics import (
+    merge_refreshed_metrics,
+    metric_refresh_was_attempted,
+    ranking_metrics_missing_count,
+)
 
 try:
     import plotly.express as px
@@ -1080,6 +1085,8 @@ DEFAULT_STATE = {
     "metrics_only_active_v68_86": False,
     "metrics_only_next_position_v68_86": 0,
     "metrics_only_fingerprint_v68_86": "",
+    "metrics_only_purpose_v68_95": "export",
+    "metrics_only_previous_analysis_mode_v68_95": "AI tagging",
     # Public profile metrics never contain API tokens or media and are included
     # in restart checkpoints so completed profile enrichment is not lost.
     "creator_profile_metrics_v68_51": pd.DataFrame(),
@@ -1424,6 +1431,8 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "metrics_only_active_v68_86",
     "metrics_only_next_position_v68_86",
     "metrics_only_fingerprint_v68_86",
+    "metrics_only_purpose_v68_95",
+    "metrics_only_previous_analysis_mode_v68_95",
     "tiktok_follower_attempted_keys_v68_65",
     "creator_profile_metrics_v68_51",
     "creator_profile_updated_at_v68_51",
@@ -2985,7 +2994,11 @@ def step_strip(active: int):
     st.markdown(html_out, unsafe_allow_html=True)
 
 
-def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
+def selected_posts_preview(
+    batch: pd.DataFrame,
+    *,
+    apply_top_n: bool = True,
+) -> pd.DataFrame:
     if batch.empty:
         return batch
     out = add_performance_fields(batch.copy())
@@ -3041,7 +3054,10 @@ def selected_posts_preview(batch: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out.reset_index(drop=True)
 
-    if st.session_state.get("selection_mode", "Top posts") == "Tag every link":
+    if (
+        not apply_top_n
+        or st.session_state.get("selection_mode", "Top posts") == "Tag every link"
+    ):
         return out.reset_index(drop=True)
 
     n = int(st.session_state.get("top_n", min(20, len(out))))
@@ -4474,6 +4490,8 @@ METRICS_ONLY_EXPORT_COLUMNS_V68_86 = (
 # ``input_fingerprint`` also separates work by analysis pipeline. Metrics-only
 # runs do not use a Gemini model, so use a stable workflow identifier instead.
 METRICS_ONLY_FINGERPRINT_MODEL_V68_94 = "metrics-only"
+METRICS_ONLY_PURPOSE_EXPORT_V68_95 = "export"
+METRICS_ONLY_PURPOSE_RANKING_V68_95 = "ranking"
 
 
 def _metrics_only_export_frame_v68_86(frame: pd.DataFrame) -> pd.DataFrame:
@@ -4493,9 +4511,28 @@ def _start_metrics_only_run_v68_86(
     selected: pd.DataFrame,
     *,
     restart: bool = False,
+    purpose: str = METRICS_ONLY_PURPOSE_EXPORT_V68_95,
 ) -> None:
-    """Start or resume a metrics-only scrape for the current selection."""
+    """Start or resume a metrics scrape for export or accurate Top N ranking."""
     # Metrics-only runs must never inherit or resume an AI-tagging job.
+    purpose = (
+        purpose
+        if purpose in {
+            METRICS_ONLY_PURPOSE_EXPORT_V68_95,
+            METRICS_ONLY_PURPOSE_RANKING_V68_95,
+        }
+        else METRICS_ONLY_PURPOSE_EXPORT_V68_95
+    )
+    if purpose == METRICS_ONLY_PURPOSE_RANKING_V68_95:
+        current_mode = safe_str(
+            st.session_state.get("analysis_mode_v68_86")
+        ) or "AI tagging"
+        previous_purpose = safe_str(
+            st.session_state.get("metrics_only_purpose_v68_95")
+        )
+        if previous_purpose != METRICS_ONLY_PURPOSE_RANKING_V68_95:
+            st.session_state.metrics_only_previous_analysis_mode_v68_95 = current_mode
+    st.session_state.metrics_only_purpose_v68_95 = purpose
     st.session_state.analysis_mode_v68_86 = "Metrics only"
     st.session_state.tagging_job_active_v68_43 = False
     supported = selected[
@@ -4513,6 +4550,35 @@ def _start_metrics_only_run_v68_86(
         st.session_state.metrics_only_next_position_v68_86 = 0
         st.session_state.metrics_only_fingerprint_v68_86 = fingerprint
     st.session_state.metrics_only_active_v68_86 = True
+
+
+def _restore_analysis_mode_after_ranking_v68_95() -> None:
+    """Return to the workflow the user chose before a ranking metrics pass."""
+    previous_mode = safe_str(
+        st.session_state.get("metrics_only_previous_analysis_mode_v68_95")
+    ) or "AI tagging"
+    st.session_state.analysis_mode_v68_86 = previous_mode
+
+
+def _finish_ranking_metrics_run_v68_95(refreshed: pd.DataFrame) -> None:
+    """Persist refreshed candidate metrics in the batch, then clear scratch state."""
+    merged = merge_refreshed_metrics(
+        st.session_state.get("batch_df", pd.DataFrame()),
+        refreshed,
+        normalize_url=final_update2_normalize_url,
+    )
+    st.session_state.batch_df = add_performance_fields(merged).reset_index(drop=True)
+    st.session_state.selected_df = pd.DataFrame()
+    _restore_analysis_mode_after_ranking_v68_95()
+    st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
+    st.session_state.metrics_only_active_v68_86 = False
+    st.session_state.metrics_only_next_position_v68_86 = 0
+    st.session_state.metrics_only_fingerprint_v68_86 = ""
+    st.session_state.metrics_only_purpose_v68_95 = METRICS_ONLY_PURPOSE_EXPORT_V68_95
+    st.session_state.last_message = (
+        f"Updated metrics for {len(refreshed):,} eligible posts. "
+        "Top posts are now ranked using those results."
+    )
 
 
 def _run_metrics_only_chunk_v68_86(
@@ -8920,6 +8986,8 @@ if st.session_state.step == 2:
                 st.session_state.metrics_only_active_v68_86 = False
                 st.session_state.metrics_only_next_position_v68_86 = 0
                 st.session_state.metrics_only_fingerprint_v68_86 = ""
+                st.session_state.metrics_only_purpose_v68_95 = METRICS_ONLY_PURPOSE_EXPORT_V68_95
+                st.session_state.metrics_only_previous_analysis_mode_v68_95 = "AI tagging"
                 st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
                 st.session_state.creator_profile_updated_at_v68_51 = ""
                 st.session_state.creator_profile_aliases_v68_67 = {}
@@ -9307,6 +9375,66 @@ elif st.session_state.step == 3:
                 unsafe_allow_html=True,
             )
 
+    ranking_candidates_v68_95 = selected_posts_preview(
+        batch,
+        apply_top_n=False,
+    )
+    ranking_missing_count_v68_95 = 0
+    if st.session_state.selection_mode == "Top posts":
+        ranking_missing_count_v68_95 = ranking_metrics_missing_count(
+            ranking_candidates_v68_95,
+            st.session_state.get("rank_metrics", ["Total Engagement"]),
+        )
+
+    if ranking_missing_count_v68_95 > 0:
+        st.session_state.selected_df = pd.DataFrame()
+        st.markdown("<div class='card'><h3>Fetch metrics before ranking</h3>", unsafe_allow_html=True)
+        st.warning(
+            f"{ranking_missing_count_v68_95:,} of "
+            f"{len(ranking_candidates_v68_95):,} eligible posts do not yet have "
+            "the metrics needed for this ranking. Fetching the eligible pool first "
+            "prevents an arbitrary Top N selection."
+        )
+        st.caption(
+            "The free scraper runs first. Apify is used only when the public method "
+            "needs a fallback; Gemini is not used for this step."
+        )
+        ranking_fingerprint_v68_95 = input_fingerprint(
+            ranking_candidates_v68_95,
+            METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
+        )
+        ranking_resume_v68_95 = (
+            safe_str(st.session_state.get("metrics_only_purpose_v68_95"))
+            == METRICS_ONLY_PURPOSE_RANKING_V68_95
+            and safe_str(st.session_state.get("metrics_only_fingerprint_v68_86"))
+            == ranking_fingerprint_v68_95
+            and int(st.session_state.get("metrics_only_next_position_v68_86", 0)) > 0
+        )
+        ranking_back_v68_95, ranking_fetch_v68_95 = st.columns(2)
+        with ranking_back_v68_95:
+            if st.button("Back", width="stretch", key="ranking_metrics_back_v68_95"):
+                go(2)
+        with ranking_fetch_v68_95:
+            if st.button(
+                "Resume metrics and rank posts"
+                if ranking_resume_v68_95
+                else "Fetch metrics and rank posts",
+                type="primary",
+                width="stretch",
+                key="ranking_metrics_fetch_v68_95",
+            ):
+                st.session_state.selected_df = ranking_candidates_v68_95.copy()
+                _start_metrics_only_run_v68_86(
+                    ranking_candidates_v68_95,
+                    restart=False,
+                    purpose=METRICS_ONLY_PURPOSE_RANKING_V68_95,
+                )
+                _persist_runtime_checkpoint_v68_15()
+                go(4)
+        st.markdown("</div>", unsafe_allow_html=True)
+        _persist_runtime_checkpoint_v68_15()
+        st.stop()
+
     selected = selected_posts_preview(batch)
     st.session_state.selected_df = selected
     st.markdown("<div class='card'><h3>Selected posts</h3>", unsafe_allow_html=True)
@@ -9351,7 +9479,27 @@ elif st.session_state.step == 3:
             width="stretch",
         ):
             if metrics_only_selection_v68_92:
-                _start_metrics_only_run_v68_86(selected, restart=False)
+                if metric_refresh_was_attempted(selected):
+                    supported_selected_v68_95 = selected[
+                        selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
+                    ].copy().reset_index(drop=True)
+                    st.session_state.metrics_only_df_v68_86 = supported_selected_v68_95
+                    st.session_state.metrics_only_next_position_v68_86 = len(
+                        supported_selected_v68_95
+                    )
+                    st.session_state.metrics_only_fingerprint_v68_86 = input_fingerprint(
+                        supported_selected_v68_95,
+                        METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
+                    )
+                    st.session_state.metrics_only_active_v68_86 = False
+                    st.session_state.metrics_only_purpose_v68_95 = METRICS_ONLY_PURPOSE_EXPORT_V68_95
+                    go(6)
+                _start_metrics_only_run_v68_86(
+                    selected,
+                    restart=False,
+                    purpose=METRICS_ONLY_PURPOSE_EXPORT_V68_95,
+                )
+                go(4)
             go(4)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -9362,7 +9510,19 @@ elif st.session_state.step == 4:
         st.session_state.get("analysis_mode_v68_86")
     ) or "AI tagging"
     metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
-    run_page_title_v68_86 = "Fetch metrics" if metrics_only_mode_v68_86 else "Run tagging"
+    metrics_purpose_v68_95 = safe_str(
+        st.session_state.get("metrics_only_purpose_v68_95")
+    ) or METRICS_ONLY_PURPOSE_EXPORT_V68_95
+    ranking_metrics_mode_v68_95 = (
+        metrics_only_mode_v68_86
+        and metrics_purpose_v68_95 == METRICS_ONLY_PURPOSE_RANKING_V68_95
+    )
+    run_page_title_v68_86 = (
+        "Fetch metrics for ranking"
+        if ranking_metrics_mode_v68_95
+        else "Fetch metrics" if metrics_only_mode_v68_86
+        else "Run tagging"
+    )
     st.markdown(
         f"<div class='card page-heading'><h2>{run_page_title_v68_86}</h2></div>",
         unsafe_allow_html=True,
@@ -9423,6 +9583,10 @@ elif st.session_state.step == 4:
 
         if metrics_complete_v68_86:
             _persist_runtime_checkpoint_v68_15()
+            if ranking_metrics_mode_v68_95:
+                _finish_ranking_metrics_run_v68_95(metrics_result_v68_86)
+                _persist_runtime_checkpoint_v68_15()
+                go(3)
             go(6)
 
         if isinstance(metrics_result_v68_86, pd.DataFrame) and not metrics_result_v68_86.empty:
@@ -9434,6 +9598,8 @@ elif st.session_state.step == 4:
         metrics_back_v68_86, metrics_run_v68_86 = st.columns(2)
         with metrics_back_v68_86:
             if st.button("Back", width="stretch", key="metrics_only_back_v68_86"):
+                if ranking_metrics_mode_v68_95:
+                    _restore_analysis_mode_after_ranking_v68_95()
                 go(3)
         with metrics_run_v68_86:
             if completed_positions_v68_86 > 0:
@@ -9449,6 +9615,7 @@ elif st.session_state.step == 4:
                 _start_metrics_only_run_v68_86(
                     selected,
                     restart=False,
+                    purpose=metrics_purpose_v68_95,
                 )
                 _persist_runtime_checkpoint_v68_15()
                 st.rerun()
@@ -10189,6 +10356,8 @@ elif st.session_state.step == 6:
                 st.session_state.metrics_only_active_v68_86 = False
                 st.session_state.metrics_only_next_position_v68_86 = 0
                 st.session_state.metrics_only_fingerprint_v68_86 = ""
+                st.session_state.metrics_only_purpose_v68_95 = METRICS_ONLY_PURPOSE_EXPORT_V68_95
+                st.session_state.metrics_only_previous_analysis_mode_v68_95 = "AI tagging"
                 st.session_state.last_message = ""
                 reset_date_filter_state_v68()
                 _new_runtime_recovery_id_v68_44()
