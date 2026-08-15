@@ -797,22 +797,14 @@ table.clean-table tr:hover td{background:#eef6ff !important;}
   background:#ffffff !important;
   box-shadow:none !important;
 }
-.taggy-companion-link{
-  display:inline-flex;
-  align-items:center;
-  min-height:38px;
-  padding:8px 14px;
-  border:1px solid #cbd5e1;
-  border-radius:15px;
-  background:#ffffff;
-  color:#172033 !important;
-  font-weight:700;
-  text-decoration:none !important;
-  white-space:nowrap;
+.st-key-taggy_companion_embed_v68_91{
+  width:min(390px, calc(100vw - 48px)) !important;
+  min-width:min(390px, calc(100vw - 48px)) !important;
 }
-.taggy-companion-link:hover{
-  border-color:#6254e8;
-  color:#5145cd !important;
+.st-key-taggy_companion_embed_v68_91 [data-testid="stIFrame"]{
+  border:0 !important;
+  border-radius:16px !important;
+  overflow:hidden !important;
 }
 @media (max-width:640px){
   .st-key-taggy_floating_launcher_v68_78{
@@ -5415,8 +5407,8 @@ def render_taggy_assistant_v68_76(
         or st.session_state.get("metrics_only_active_v68_86", False)
     )
     # A Streamlit script run owns its browser session until the current tagging
-    # call returns. The Run Tagging page therefore opens the read-only Taggy
-    # route in the current browser tab. Other workflow pages keep the popover.
+    # call returns. The Run Tagging page therefore embeds the read-only Taggy
+    # route as a separate session inside the same compact popover.
     companion_url = (
         _taggy_companion_url_v68_87(int(step)) if int(step) == 4 else ""
     )
@@ -5428,9 +5420,9 @@ def render_taggy_assistant_v68_76(
         gap=None,
     ):
         st.caption(
-            "Tagging is running"
+            "Taggy stays available while tagging"
             if tagging_is_busy
-            else ("Opens Taggy in this tab" if use_companion else "May I help?")
+            else "May I help?"
         )
         with st.container(
             horizontal=True,
@@ -5441,30 +5433,29 @@ def render_taggy_assistant_v68_76(
         ):
             if TAGGY_ASSET_V68_76.exists():
                 st.image(str(TAGGY_ASSET_V68_76), width=56)
-            if use_companion:
-                st.markdown(
-                    "<a class='taggy-companion-link' target='_self' href='"
-                    + html.escape(companion_url, quote=True)
-                    + "'>Ask Taggy</a>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                assistant_popover = st.popover(
-                    "Ask Taggy",
-                    icon=":material/chat:",
-                    width="content",
-                )
+            assistant_popover = st.popover(
+                "Ask Taggy",
+                icon=":material/chat:",
+                width="content",
+            )
 
-    if use_companion:
-        return
     with assistant_popover:
-        _render_taggy_chat_content_v68_87(
-            step=int(step),
-            context_json=context_json,
-            messages=messages,
-            messages_key=messages_key,
-            suggestions_key=suggestions_key,
-        )
+        if use_companion:
+            with st.container(key="taggy_companion_embed_v68_91", gap=None):
+                st.iframe(
+                    companion_url,
+                    width="stretch",
+                    height=520,
+                    tab_index=0,
+                )
+        else:
+            _render_taggy_chat_content_v68_87(
+                step=int(step),
+                context_json=context_json,
+                messages=messages,
+                messages_key=messages_key,
+                suggestions_key=suggestions_key,
+            )
 
 
 def aggregate_summary_performance_v68_15(df: pd.DataFrame, group_columns: List[str]) -> pd.DataFrame:
@@ -8186,13 +8177,24 @@ if taggy_companion_session_v68_87:
         min(6, int(st.session_state.get("step", 4))),
     )
     st.markdown(
-        "<div class='card page-heading'><h2>Ask Taggy</h2>"
-        "<p class='sub'>Use your browser Back button to return to your tagging run.</p></div>",
+        """
+        <style>
+        [data-testid="stHeader"], [data-testid="stToolbar"], footer{display:none !important;}
+        [data-testid="stAppViewContainer"] .block-container{
+          max-width:100% !important;
+          padding:.65rem .75rem 1rem !important;
+        }
+        .st-key-taggy_companion_panel_v68_87{
+          border:0 !important;
+          box-shadow:none !important;
+          padding:0 !important;
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
     st.caption(
-        "This companion is read-only and uses the latest saved batch snapshot. "
-        "Refresh this tab to load newer saved progress."
+        "Uses the latest saved batch snapshot. Refresh Taggy to load newer progress."
     )
     render_taggy_assistant_v68_76(
         companion_step_v68_87,

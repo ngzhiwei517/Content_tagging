@@ -222,8 +222,8 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("render_taggy_assistant_v68_76(6, filtered)", APP_SOURCE)
         self.assertIn("assets\" / \"taggy-assistant.png", APP_SOURCE)
         self.assertIn('key="taggy_floating_launcher_v68_78"', APP_SOURCE)
-        self.assertIn('"Tagging is running"', APP_SOURCE)
-        self.assertIn('"Opens Taggy in this tab" if use_companion else "May I help?"', APP_SOURCE)
+        self.assertIn('"Taggy stays available while tagging"', APP_SOURCE)
+        self.assertIn('else "May I help?"', APP_SOURCE)
         self.assertIn("position:fixed !important", APP_SOURCE)
         self.assertIn("bottom:max(76px", APP_SOURCE)
         self.assertIn("assistant_popover = st.popover(", APP_SOURCE)
@@ -275,7 +275,7 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("*, persist: bool = True", restore_source)
         self.assertIn("if persist:\n        _persist_runtime_checkpoint_v68_15()", restore_source)
 
-    def test_run_tagging_launcher_opens_companion_in_same_tab(self):
+    def test_run_tagging_launcher_embeds_companion_in_small_popover(self):
         taggy_start = APP_SOURCE.index("def render_taggy_assistant_v68_76")
         taggy_end = APP_SOURCE.index("def aggregate_summary_performance_v68_15", taggy_start)
         taggy_source = APP_SOURCE[taggy_start:taggy_end]
@@ -287,7 +287,10 @@ class DashboardAssistantTests(unittest.TestCase):
         )
         self.assertIn("use_companion = bool(companion_url)", taggy_source)
         self.assertIn("if use_companion:", taggy_source)
-        self.assertIn("target='_self'", taggy_source)
+        self.assertIn('key="taggy_companion_embed_v68_91"', taggy_source)
+        self.assertIn("st.iframe(", taggy_source)
+        self.assertIn("height=520", taggy_source)
+        self.assertNotIn("target='_self'", taggy_source)
         self.assertNotIn("target='_blank'", taggy_source)
         self.assertNotIn("Ask Taggy ↗", taggy_source)
 
