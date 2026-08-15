@@ -703,7 +703,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
         self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
 
-    def test_creative_performance_doughnut_shows_share_and_coverage(self):
+    def test_creative_performance_doughnut_shows_total_and_metric_share(self):
         self.rendered_chart_figures.clear()
         performance = pd.DataFrame({
             "Creative Type": ["Dance", "Comedy"],
@@ -716,9 +716,43 @@ class SummaryV6815Tests(unittest.TestCase):
         trace = self.rendered_chart_figures[-1].data[0]
         self.assertEqual(float(trace.hole), 0.58)
         self.assertEqual(list(trace.labels), ["Dance", "Comedy"])
-        self.assertIn("Share of selected metric: %{percent:.1%}", trace.hovertemplate)
-        self.assertIn("Metric available", trace.hovertemplate)
-        self.assertIn("Coverage", trace.hovertemplate)
+        self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
+        self.assertNotIn("Metric available", trace.hovertemplate)
+        self.assertNotIn("Coverage", trace.hovertemplate)
+
+    def test_creative_performance_hover_uses_metric_specific_share_label(self):
+        self.rendered_chart_figures.clear()
+        performance = pd.DataFrame({
+            "Creative Type": ["Dance", "Comedy"],
+            "Value": [60, 40],
+            "Posts": [3, 2],
+            "Available Posts": [3, 2],
+            "Coverage": [100.0, 100.0],
+        })
+        self.render_creative_type_performance(performance, "Shares")
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertIn("Shares: %{value:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of shares: %{percent:.1%}", trace.hovertemplate)
+
+        self.render_creative_type_performance(performance, "Saves")
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertIn("Saves: %{value:,.0f}", trace.hovertemplate)
+        self.assertIn("Share of saves: %{percent:.1%}", trace.hovertemplate)
+
+    def test_average_er_hover_does_not_show_a_misleading_share(self):
+        self.rendered_chart_figures.clear()
+        performance = pd.DataFrame({
+            "Creative Type": ["Dance"],
+            "Value": [14.6],
+            "Posts": [3],
+            "Available Posts": [3],
+            "Coverage": [100.0],
+        })
+        self.render_creative_type_performance(performance, "Avg. ER")
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertIn("Average engagement rate: %{value:.1f}%", trace.hovertemplate)
+        self.assertNotIn("Share of", trace.hovertemplate)
 
     def test_creative_performance_doughnut_renders_one_category(self):
         self.rendered_chart_figures.clear()
@@ -925,11 +959,6 @@ class SummaryV6815Tests(unittest.TestCase):
             "render_top_creator_performance_v68_47", 1
         )[0]
         self.assertIn("render_editable_top_posts_v68_73(top_posts)", top_posts_block)
-        self.assertIn('st.expander(', top_posts_block)
-        self.assertIn('f"Drama performance · {total_drama_posts:,} post"', top_posts_block)
-        self.assertIn("DRAMA_BREAKDOWN_VIEWS_V68_90", top_posts_block)
-        self.assertIn("prepare_drama_breakdown_view_v68_90", top_posts_block)
-        self.assertIn("render_drama_breakdown_v68_89(", top_posts_block)
         self.assertIn("st.data_editor(", APP_SOURCE)
         for column in [
             "Creator", "Market", "Track", "Creative Type", "Narrative",
@@ -945,6 +974,23 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("summary_column_config_v68_80(table)", APP_SOURCE)
         self.assertIn("st.column_config.NumberColumn", APP_SOURCE)
         self.assertIn("st.column_config.LinkColumn", APP_SOURCE)
+
+    def test_drama_performance_follows_creative_charts_and_uses_full_filtered_batch(self):
+        step_six = APP_SOURCE.split("# STEP 6", 1)[1]
+        creative_position = step_six.index('section_title("Creative performance"')
+        drama_position = step_six.index('f"Drama performance · {total_drama_posts:,} post"')
+        recommendation_position = step_six.index(
+            'st.expander("Suggested next steps", expanded=False)'
+        )
+        top_posts_position = step_six.index('section_title("Top Posts"')
+        self.assertLess(creative_position, drama_position)
+        self.assertLess(drama_position, recommendation_position)
+        self.assertLess(recommendation_position, top_posts_position)
+        drama_block = step_six[creative_position:recommendation_position]
+        self.assertIn("prepare_drama_insights_v68_85(filtered)", drama_block)
+        self.assertIn("prepare_drama_breakdown_view_v68_90(\n                    filtered", drama_block)
+        self.assertIn("All drama posts in the current filtered batch are included.", drama_block)
+        self.assertNotIn("prepare_drama_insights_v68_85(top_posts)", drama_block)
 
     def test_drama_detail_is_shown_only_for_drama_rows(self):
         row = pd.Series({

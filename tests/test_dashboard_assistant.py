@@ -217,6 +217,17 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("bookmark the private recovery link", answer)
         self.assertIn("reopen that exact link", answer)
 
+    def test_csv_template_request_does_not_return_generic_upload_help(self):
+        question = "can u create a csv with the format i want i mean the col that i need"
+        matches = retrieve_taggy_knowledge(question, step=2, limit=1)
+        self.assertTrue(matches)
+        self.assertEqual("csv_template", matches[0]["id"])
+
+        answer = page_help_answer(2, question)
+        self.assertIn("`Link,Market,Track,Artist`", answer)
+        self.assertIn("exact columns and order", answer)
+        self.assertNotIn("paste one TikTok or Instagram post link per line", answer)
+
     def test_retrieval_ranks_metric_definition_for_summary_question(self):
         matches = retrieve_taggy_knowledge(
             "What is the difference between batch average engagement and Avg ER 3m?",

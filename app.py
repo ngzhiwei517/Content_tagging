@@ -5333,7 +5333,7 @@ def render_creative_type_performance_doughnut_v68_94(
     performance: pd.DataFrame,
     metric: str,
 ) -> None:
-    """Render creative performance as a doughnut with coverage in the hover detail."""
+    """Render creative performance with concise metric-specific hover details."""
     spec = CREATIVE_PERFORMANCE_METRIC_SPECS_V68_91.get(metric)
     if performance is None or performance.empty or spec is None:
         label = str(spec["label"]) if spec else "The selected metric"
@@ -5345,9 +5345,6 @@ def render_creative_type_performance_doughnut_v68_94(
 
     chart_data = performance.copy().sort_values(
         ["Value", "Creative Type"], ascending=[False, True], kind="stable"
-    )
-    chart_data["Value Label"] = chart_data["Value"].map(
-        lambda value: _creative_performance_value_label_v68_91(metric, value)
     )
     if px is None:
         chart_bar(
@@ -5367,17 +5364,25 @@ def render_creative_type_performance_doughnut_v68_94(
         color_discrete_sequence=CREATIVE_TYPE_CHART_COLORS_V68_49,
         template="plotly_white",
     )
-    fig.update_traces(
-        customdata=chart_data[
-            ["Value Label", "Posts", "Available Posts", "Coverage"]
-        ].to_numpy(),
-        hovertemplate=(
+    if metric == "Avg. ER":
+        hovertemplate = (
             "<b>%{label}</b><br>"
-            + f"{spec['label']}: %{{customdata[0]}}"
-            + "<br>Share of selected metric: %{percent:.1%}"
-            + "<br>Metric available: %{customdata[2]:,.0f} of %{customdata[1]:,.0f} posts"
-            + "<br>Coverage: %{customdata[3]:.0f}%<extra></extra>"
-        ),
+            f"{spec['label']}: %{{value:.1f}}%<extra></extra>"
+        )
+    else:
+        share_label = {
+            "Views": "Share of views",
+            "Engagement": "Share of engagement",
+            "Shares": "Share of shares",
+            "Saves": "Share of saves",
+        }.get(metric, "Share")
+        hovertemplate = (
+            "<b>%{label}</b><br>"
+            f"{spec['label']}: %{{value:,.0f}}"
+            f"<br>{share_label}: %{{percent:.1%}}<extra></extra>"
+        )
+    fig.update_traces(
+        hovertemplate=hovertemplate,
         sort=False,
         textinfo="none",
         marker=dict(line=dict(color="#ffffff", width=2)),
@@ -10620,6 +10625,48 @@ elif st.session_state.step == 6:
                     "Unavailable values are excluded, not treated as zero."
                 )
 
+    # Drama is a creative-type analysis, so keep it beside the creative charts
+    # and calculate it from every post in the current filtered batch.
+    drama_insights = prepare_drama_insights_v68_85(filtered)
+    total_drama_posts = int(drama_insights["Posts"].sum())
+    if total_drama_posts > 0:
+        with st.expander(
+            f"Drama performance · {total_drama_posts:,} post"
+            f"{'s' if total_drama_posts != 1 else ''}",
+            expanded=False,
+        ):
+            st.caption(
+                "All drama posts in the current filtered batch are included. "
+                "Compare what they are, which audience they serve, their production "
+                "format, featured show, or audio treatment."
+            )
+            drama_view_options = list(DRAMA_BREAKDOWN_VIEWS_V68_90[:3])
+            optional_drama_insights = {}
+            for optional_view in DRAMA_BREAKDOWN_VIEWS_V68_90[3:]:
+                optional_insights = prepare_drama_breakdown_view_v68_90(
+                    filtered, optional_view
+                )
+                if not optional_insights.empty:
+                    drama_view_options.append(optional_view)
+                    optional_drama_insights[optional_view] = optional_insights
+            selected_drama_view = st.segmented_control(
+                "Break down by",
+                drama_view_options,
+                default=drama_view_options[0],
+                key="summary_drama_breakdown_view_v68_90",
+            ) or drama_view_options[0]
+            selected_drama_insights = (
+                optional_drama_insights[selected_drama_view]
+                if selected_drama_view in optional_drama_insights
+                else prepare_drama_breakdown_view_v68_90(
+                    filtered, selected_drama_view
+                )
+            )
+            render_drama_breakdown_v68_89(
+                selected_drama_insights,
+                dimension_label=selected_drama_view,
+            )
+
     next_actions = prepare_marketing_next_actions_v68_91(filtered)
     if next_actions:
         with st.expander("Suggested next steps", expanded=False):
@@ -10638,44 +10685,6 @@ elif st.session_state.step == 6:
                 "Creative Type to open the full drama analysis. Use Edit to update "
                 "post fields; KOL Size and Engagement Rate recalculate automatically."
             )
-            drama_insights = prepare_drama_insights_v68_85(filtered)
-            total_drama_posts = int(drama_insights["Posts"].sum())
-            if total_drama_posts > 0:
-                with st.expander(
-                    f"Drama performance · {total_drama_posts:,} post"
-                    f"{'s' if total_drama_posts != 1 else ''}",
-                    expanded=False,
-                ):
-                    st.caption(
-                        "Compare what the drama posts are, which audience they serve, "
-                        "their production format, featured show, or audio treatment."
-                    )
-                    drama_view_options = list(DRAMA_BREAKDOWN_VIEWS_V68_90[:3])
-                    optional_drama_insights = {}
-                    for optional_view in DRAMA_BREAKDOWN_VIEWS_V68_90[3:]:
-                        optional_insights = prepare_drama_breakdown_view_v68_90(
-                            filtered, optional_view
-                        )
-                        if not optional_insights.empty:
-                            drama_view_options.append(optional_view)
-                            optional_drama_insights[optional_view] = optional_insights
-                    selected_drama_view = st.segmented_control(
-                        "Break down by",
-                        drama_view_options,
-                        default=drama_view_options[0],
-                        key="summary_drama_breakdown_view_v68_90",
-                    ) or drama_view_options[0]
-                    selected_drama_insights = (
-                        optional_drama_insights[selected_drama_view]
-                        if selected_drama_view in optional_drama_insights
-                        else prepare_drama_breakdown_view_v68_90(
-                            filtered, selected_drama_view
-                        )
-                    )
-                    render_drama_breakdown_v68_89(
-                        selected_drama_insights,
-                        dimension_label=selected_drama_view,
-                    )
 
     # Keep creator contribution last among the analytical sections.
     render_top_creator_performance_v68_47(filtered)
