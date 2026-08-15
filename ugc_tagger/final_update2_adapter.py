@@ -32,7 +32,10 @@ from ugc_tagger.drama_analysis import (
     drama_review_defaults,
     has_drama_label,
 )
-from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
+from ugc_tagger.direct_post_scraper import (
+    enrich_tiktok_records_with_oembed,
+    scrape_tiktok_posts_direct,
+)
 
 
 # Keep the runtime version beside the UI/backend schema boundary.  Importing
@@ -942,6 +945,7 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
             if isinstance(record, dict):
                 record.setdefault("_platform", TIKTOK)
                 record.setdefault("platform", TIKTOK)
+        tiktok_records = enrich_tiktok_records_with_oembed(tiktok_records)
 
         # Attach the submitted short URL as an alias to the matching canonical
         # actor result. This keeps display/audit data unchanged while allowing

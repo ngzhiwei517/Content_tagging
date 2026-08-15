@@ -180,6 +180,22 @@ def _row_get(row, key: str, default=""):
     return current if current is not None else direct
 
 
+def _row_caption(row) -> str:
+    for key in (
+        "text",
+        "caption",
+        "Caption",
+        "description",
+        "Description",
+        "Post Caption",
+        "Text",
+    ):
+        value = _text(_row_get(row, key))
+        if value:
+            return value
+    return ""
+
+
 def _labels(value) -> List[str]:
     if isinstance(value, (list, tuple, set)):
         items = value
@@ -302,7 +318,7 @@ def promote_entertainment_news_label(result: Dict, row=None) -> Dict:
     evidence = " ".join([
         _text(output.get("narrative")),
         _text(output.get("content_details")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ]).casefold()
     news_cue = _has_entertainment_news_purpose(evidence)
@@ -648,14 +664,26 @@ def promote_entertainment_news_label(result: Dict, row=None) -> Dict:
 
 
 def _hashtags(row) -> str:
-    raw = _row_get(row, "hashtags", [])
-    if not isinstance(raw, list):
-        return _text(raw)
     names = []
-    for value in raw:
+    seen = set()
+    raw = []
+    for key in ("hashtags", "hashTags", "Hashtags"):
+        candidate = _row_get(row, key, [])
+        if candidate:
+            raw = candidate
+            break
+    values = raw if isinstance(raw, list) else [_text(raw)]
+    for value in values:
         name = value.get("name", "") if isinstance(value, Mapping) else value
-        if _text(name):
-            names.append(f"#{_text(name).lstrip('#')}")
+        cleaned = _text(name).lstrip("#")
+        if cleaned and cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            names.append(f"#{cleaned}")
+    for match in re.findall(r"(?<!\w)#([\w-]+)", _row_caption(row), flags=re.UNICODE):
+        cleaned = match.strip().lstrip("#")
+        if cleaned and cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            names.append(f"#{cleaned}")
     return " ".join(names)
 
 
@@ -666,7 +694,7 @@ def _hashtags(row) -> str:
 
 def build_drama_prompt(result: Mapping, row=None) -> str:
     """Build the conditional second-pass prompt for drama/entertainment detail."""
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     music_name = _text(_row_get(row, "musicMeta.musicName"))
     music_author = _text(_row_get(row, "musicMeta.musicAuthor"))
     campaign_track = _text(_row_get(row, "_campaign_track"))
@@ -1295,7 +1323,7 @@ def resolve_audio_fields(response: Mapping, row=None, http_get=None) -> Dict[str
     """Combine Gemini observations, TikTok metadata and Apple/iTunes identity lookup."""
     music_name = _text(_row_get(row, "musicMeta.musicName"))
     music_author = _text(_row_get(row, "musicMeta.musicAuthor"))
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     campaign_track = _text(_row_get(row, "_campaign_track"))
     campaign_artist, campaign_song = split_campaign_track(campaign_track)
     verified_apple = response.get("_verified_itunes")
@@ -1626,7 +1654,7 @@ def route_thailand_carousel_ambiguity_to_review(result: Dict, row=None) -> Dict:
         _text(output.get("narrative")),
         details_text,
         _text(output.get("visual_summary")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
     carousel_context = bool(
@@ -1785,7 +1813,7 @@ def _drama_subtype_evidence_blob(
         _text(response.get("visual_summary")),
         _text(response.get("review_reason")),
         " ".join(_text(item) for item in evidence if _text(item)),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
 
@@ -2038,7 +2066,7 @@ def _readable_hashtag_title(value: str) -> str:
 
 def _explicit_title_from_metadata(response: Mapping, row, evidence: Iterable[str]) -> str:
     """Recover a title only from an explicit title statement or corroboration."""
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     evidence_text = " ".join(filter(None, [
         _text(response.get("visual_summary")),
         *(_text(item) for item in evidence if _text(item)),
@@ -2104,7 +2132,7 @@ def _explicit_fictional_same_gender_drama_subtype(
     the detailed category is a drama edit rather than entertainment news.
     """
     metadata_blob = " ".join(filter(None, [
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
     observed_blob = " ".join(filter(None, [
@@ -2164,7 +2192,7 @@ def _content_kinds(response: Mapping, result: Mapping, row, evidence: List[str])
         _text(result.get("narrative")),
         _text(result.get("content_details")),
         _text(response.get("visual_summary")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
         *evidence,
     ]).casefold()
@@ -2637,7 +2665,7 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
         _text(output.get("content_details")),
         _text(response.get("visual_summary")),
         _text(response.get("review_reason")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
         title,
         *evidence,

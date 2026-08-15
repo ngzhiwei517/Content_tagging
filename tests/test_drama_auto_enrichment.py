@@ -1497,6 +1497,38 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched["drama_type"], "BL Drama")
         self.assertEqual(enriched["edit_focus"], "Fictional Story")
 
+    def test_bl_series_caption_alias_without_hashtag_array_is_still_bl(self):
+        result = {
+            "creative_type": ["Movie/Tv/Drama Edits"],
+            "narrative": "Heartbreak drama edit",
+            "content_details": "A montage edit featuring scenes from a drama.",
+        }
+        response = {
+            "content_categories": ["Drama Edit"],
+            "drama_type": "General Drama",
+            "edit_focus": "Fictional Story",
+            "drama_format": "Long-form Drama",
+            "country_region": "China",
+            "drama_title": "Double Helix",
+            "visual_summary": (
+                "A montage edit featuring scenes from the drama Double Helix "
+                "depicting a wedding ceremony and emotional heartbreak."
+            ),
+            "evidence": ["The post shows fictional drama characters."],
+        }
+        row = {
+            "Caption": (
+                "He's getting married... but not to him "
+                "#cdrama #DOUBLEHELIX #shortfilm #blseries #SHUANGCHENG"
+            )
+        }
+
+        enriched = apply_drama_enrichment(result, response, row)
+
+        self.assertEqual(enriched["content_categories"], ["Drama Edit"])
+        self.assertEqual(enriched["drama_type"], "BL Drama")
+        self.assertEqual(enriched["edit_focus"], "Fictional Story")
+
     def test_bl_hashtag_does_not_turn_real_interview_into_drama_edit(self):
         result = {
             "creative_type": ["Movie/Tv/Drama Edits", "Celebrity Edits"],
