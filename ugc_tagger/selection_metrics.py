@@ -74,6 +74,35 @@ def metric_refresh_was_attempted(frame: pd.DataFrame) -> bool:
     return bool(statuses.isin(METRICS_REFRESH_ATTEMPTED).all())
 
 
+def _ranking_metrics_missing_mask(
+    frame: pd.DataFrame,
+    rank_metrics: Sequence[str] | str | None,
+) -> pd.Series:
+    """Return a row-aligned mask for posts that still need ranking metrics."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.Series(False, index=getattr(frame, "index", None), dtype=bool)
+
+    metrics: Iterable[str]
+    if isinstance(rank_metrics, str):
+        metrics = (rank_metrics,)
+    else:
+        metrics = tuple(rank_metrics or ("Total Engagement",))
+
+    dependencies = {
+        dependency
+        for metric in metrics
+        for dependency in RANK_METRIC_DEPENDENCIES.get(metric, (metric,))
+    }
+    needs_refresh = []
+    for _, row in frame.iterrows():
+        status = _text(row.get("Metrics Status")).casefold()
+        needs_refresh.append(
+            status not in METRICS_REFRESH_ATTEMPTED
+            and any(not _positive_number(row.get(column)) for column in dependencies)
+        )
+    return pd.Series(needs_refresh, index=frame.index, dtype=bool)
+
+
 def ranking_metrics_missing_count(
     frame: pd.DataFrame,
     rank_metrics: Sequence[str] | str | None,
@@ -84,25 +113,27 @@ def ranking_metrics_missing_count(
     return a metric.  Their unavailable values can then sort to the bottom
     without repeatedly spending credits on the same inaccessible post.
     """
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return 0
-    metrics: Iterable[str]
-    if isinstance(rank_metrics, str):
-        metrics = (rank_metrics,)
-    else:
-        metrics = tuple(rank_metrics or ("Total Engagement",))
+    return int(_ranking_metrics_missing_mask(frame, rank_metrics).sum())
 
-    missing = 0
-    for _, row in frame.iterrows():
-        status = _text(row.get("Metrics Status")).casefold()
-        if status in METRICS_REFRESH_ATTEMPTED:
-            continue
-        dependencies = []
-        for metric in metrics:
-            dependencies.extend(RANK_METRIC_DEPENDENCIES.get(metric, (metric,)))
-        if any(not _positive_number(row.get(column)) for column in set(dependencies)):
-            missing += 1
-    return missing
+
+def pasted_links_requiring_metrics(
+    frame: pd.DataFrame,
+    rank_metrics: Sequence[str] | str | None,
+) -> pd.DataFrame:
+    """Return only pasted-link rows missing metrics needed for Top N ranking.
+
+    Uploaded files normally carry their own performance columns, so they must
+    never trigger a potentially large provider run during selection.  Their
+    existing values remain in the full candidate pool and are still ranked.
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Source" not in frame.columns:
+        return frame.iloc[0:0].copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    pasted_mask = frame["Source"].map(
+        lambda value: _text(value).casefold() == "pasted links"
+    )
+    missing_mask = _ranking_metrics_missing_mask(frame, rank_metrics)
+    return frame.loc[pasted_mask & missing_mask].copy().reset_index(drop=True)
 
 
 def merge_refreshed_metrics(
