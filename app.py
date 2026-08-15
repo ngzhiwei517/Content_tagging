@@ -1761,7 +1761,7 @@ def _runtime_recovery_url_v68_44() -> str:
 
 
 def _taggy_companion_url_v68_87(step: int) -> str:
-    """Return a new-session Taggy URL without paid-job continuation markers."""
+    """Return the read-only Taggy route without paid-job continuation markers."""
     run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
     if not run_id:
         return ""
@@ -4453,6 +4453,27 @@ def _run_checkpointed_tag_every_link_v68_43(
     return None
 
 
+METRICS_ONLY_EXPORT_COLUMNS_V68_86 = (
+    "Platform", "Source", "Link", "Market", "Track", "Creator",
+    "Followers", "Views", "Likes", "Comments", "Shares", "Saves",
+    "Total Engagement", "Engagement Rate", "Likes Rate", "Comments Rate",
+    "Shares Rate", "Saves Rate", "Metrics Status", "Metrics Unavailable",
+)
+
+
+def _metrics_only_export_frame_v68_86(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the concise, user-facing metrics-only download frame."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame(columns=list(METRICS_ONLY_EXPORT_COLUMNS_V68_86))
+    return frame[
+        [
+            column
+            for column in METRICS_ONLY_EXPORT_COLUMNS_V68_86
+            if column in frame.columns
+        ]
+    ].copy()
+
+
 def _start_metrics_only_run_v68_86(
     selected: pd.DataFrame,
     *,
@@ -5394,9 +5415,8 @@ def render_taggy_assistant_v68_76(
         or st.session_state.get("metrics_only_active_v68_86", False)
     )
     # A Streamlit script run owns its browser session until the current tagging
-    # call returns. The Run Tagging page must therefore always launch Taggy in
-    # a separate session, even immediately before the active flag is reconciled
-    # lower down the page. Other workflow pages keep the convenient popover.
+    # call returns. The Run Tagging page therefore opens the read-only Taggy
+    # route in the current browser tab. Other workflow pages keep the popover.
     companion_url = (
         _taggy_companion_url_v68_87(int(step)) if int(step) == 4 else ""
     )
@@ -5410,7 +5430,7 @@ def render_taggy_assistant_v68_76(
         st.caption(
             "Tagging is running"
             if tagging_is_busy
-            else ("Opens in a separate tab" if use_companion else "May I help?")
+            else ("Opens Taggy in this tab" if use_companion else "May I help?")
         )
         with st.container(
             horizontal=True,
@@ -5423,10 +5443,9 @@ def render_taggy_assistant_v68_76(
                 st.image(str(TAGGY_ASSET_V68_76), width=56)
             if use_companion:
                 st.markdown(
-                    "<a class='taggy-companion-link' target='_blank' "
-                    "rel='noopener noreferrer' href='"
+                    "<a class='taggy-companion-link' target='_self' href='"
                     + html.escape(companion_url, quote=True)
-                    + "'>Ask Taggy ↗</a>",
+                    + "'>Ask Taggy</a>",
                     unsafe_allow_html=True,
                 )
             else:
@@ -5967,18 +5986,220 @@ def prepare_drama_insights_v68_85(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=columns)
 
 
-def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
-    """Render a compact drama comparison for the optional Top Posts detail."""
+DRAMA_BREAKDOWN_VIEWS_V68_90 = (
+    "Content type",
+    "Drama genre",
+    "Format",
+    "Show / title",
+    "Audio version",
+)
+
+
+def prepare_drama_breakdown_view_v68_90(
+    df: pd.DataFrame,
+    view: str,
+) -> pd.DataFrame:
+    """Aggregate one useful drama dimension without mixing different concepts."""
+    columns = ["Category", "Posts", "Average Engagement Rate", "Total Views"]
+    if df is None or df.empty or "Creative Type" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    drama_rows = df[
+        df["Creative Type"].fillna("").astype(str).map(
+            lambda value: "Movie/Tv/Drama Edits" in split_creative_labels(value)
+        )
+    ].copy()
+    if drama_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    def parsed_detail(row, field: str) -> str:
+        for line in safe_str(row.get("Content Details")).splitlines():
+            if ":" not in line:
+                continue
+            label, value = line.split(":", 1)
+            if label.strip().casefold() == field.casefold():
+                return safe_str(value)
+        return ""
+
+    def content_type(row) -> str:
+        raw_value = (
+            safe_str(row.get("Drama Content Category"))
+            or parsed_detail(row, "Content Category")
+        )
+        first_value = next(
+            (
+                part.strip()
+                for part in re.split(r"\s*[,|]\s*", raw_value)
+                if part.strip()
+            ),
+            "Drama Edit",
+        )
+        normalized_value = re.sub(r"\s+", " ", first_value.casefold()).strip()
+        if "micro" in normalized_value and "drama edit" in normalized_value:
+            return "Micro-drama Edit"
+        if "drama edit" in normalized_value and "carousel" not in normalized_value:
+            return "Drama Edit"
+        aliases = {
+            "drama": "Drama Edit",
+            "drama edits": "Drama Edit",
+            "bl drama edits": "Drama Edit",
+            "gl drama edits": "Drama Edit",
+            "micro drama edits": "Micro-drama Edit",
+            "micro-drama edits": "Micro-drama Edit",
+            "cp edits": "CP Edit",
+            "bl cp edits": "CP Edit",
+            "gl cp edits": "CP Edit",
+            "entertainment": "Entertainment News",
+            "anime edits": "Anime Edit",
+            "actor carousel": "Actor/Actress Carousel",
+            "actress carousel": "Actor/Actress Carousel",
+            "actor/actress carousel": "Actor/Actress Carousel",
+            "actor / actress carousel": "Actor/Actress Carousel",
+            "drama carousel": "Drama Carousel",
+            "drama carousel edits": "Drama Carousel",
+            "behind the scene edits": "Behind-the-Scenes Edit",
+            "behind-the-scenes": "Behind-the-Scenes Edit",
+            "kpop show cut": "K-pop Show Cut",
+            "actor daily vlog": "Actor/Actress Daily Vlog",
+            "actress daily vlog": "Actor/Actress Daily Vlog",
+            "actor/actress daily vlog": "Actor/Actress Daily Vlog",
+            "actor / actress daily vlog": "Actor/Actress Daily Vlog",
+        }
+        return aliases.get(normalized_value, first_value)
+
+    def drama_genre(row) -> str:
+        evidence = " ".join([
+            safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type"),
+            safe_str(row.get("Drama Edit Focus")) or parsed_detail(row, "Edit Focus"),
+            safe_str(row.get("Drama Content Category"))
+            or parsed_detail(row, "Content Category"),
+        ]).casefold()
+        if re.search(r"\bbl\b|boys[ -]?love", evidence):
+            return "BL"
+        if re.search(r"\bgl\b|girls[ -]?love", evidence):
+            return "GL"
+        if "general" in evidence:
+            return "General drama"
+        return "Other / unclear"
+
+    def drama_format(row) -> str:
+        value = safe_str(row.get("Drama Format")) or parsed_detail(row, "Format")
+        evidence = " ".join([
+            value,
+            safe_str(row.get("Drama Content Category")),
+        ]).casefold()
+        if "micro" in evidence or "short-form" in evidence or "short form" in evidence:
+            return "Short-form drama"
+        if "long-form" in evidence or "long form" in evidence or "longform" in evidence:
+            return "Long-form drama"
+        if value.casefold() in {"", "unknown", "not specified", "not applicable"}:
+            return "Not specified"
+        return value
+
+    def show_title(row) -> str:
+        value = safe_str(row.get("Drama Title")) or parsed_detail(row, "Drama Title")
+        if value.casefold() in {"", "unknown", "not specified", "not applicable"}:
+            return ""
+        return value
+
+    def audio_version(row) -> str:
+        value = safe_str(row.get("Audio Version")) or parsed_detail(
+            row, "Audio Version"
+        )
+        if value.casefold() in {"", "unknown", "not specified", "not applicable"}:
+            return ""
+        return value
+
+    category_builders = {
+        "Content type": content_type,
+        "Drama genre": drama_genre,
+        "Format": drama_format,
+        "Show / title": show_title,
+        "Audio version": audio_version,
+    }
+    selected_view = view if view in category_builders else "Content type"
+    drama_rows["_Drama Category"] = drama_rows.apply(
+        category_builders[selected_view], axis=1
+    )
+    drama_rows = drama_rows[
+        drama_rows["_Drama Category"].astype(str).str.strip().ne("")
+    ]
+    if drama_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    def engagement_rate(row) -> float:
+        raw_views = row.get("Views")
+        raw_engagement = row.get("Total Engagement")
+        unavailable_values = {"", "none", "nan", "<na>", "not available"}
+        if (
+            safe_str(raw_views).casefold() not in unavailable_values
+            and safe_str(raw_engagement).casefold() not in unavailable_values
+        ):
+            views = clean_num(raw_views)
+            if views > 0:
+                return clean_num(raw_engagement) / views * 100
+        try:
+            return float(safe_str(row.get("Engagement Rate")).replace("%", ""))
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drama_rows["_Drama ER"] = drama_rows.apply(engagement_rate, axis=1)
+    drama_rows["_Drama Views"] = drama_rows.get(
+        "Views", pd.Series(0, index=drama_rows.index)
+    ).map(clean_num)
+
+    if selected_view == "Show / title" and drama_rows["_Drama Category"].nunique() > 8:
+        leading_titles = (
+            drama_rows["_Drama Category"].value_counts().head(7).index.tolist()
+        )
+        drama_rows["_Drama Category"] = drama_rows["_Drama Category"].where(
+            drama_rows["_Drama Category"].isin(leading_titles),
+            "Other titles",
+        )
+
+    result = (
+        drama_rows.groupby("_Drama Category", dropna=False)
+        .agg(
+            Posts=("_Drama Category", "size"),
+            **{
+                "Average Engagement Rate": ("_Drama ER", "mean"),
+                "Total Views": ("_Drama Views", "sum"),
+            },
+        )
+        .reset_index()
+        .rename(columns={"_Drama Category": "Category"})
+    )
+    result["Posts"] = result["Posts"].astype(int)
+    result = result.sort_values(
+        ["Posts", "Average Engagement Rate", "Category"],
+        ascending=[False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    return result[columns]
+
+
+def render_drama_breakdown_v68_89(
+    insights: pd.DataFrame,
+    *,
+    dimension_label: str = "Drama genre",
+) -> None:
+    """Render one compact drama comparison inside the Top Posts section."""
     if insights is None or insights.empty:
         return
 
     chart_data = insights.copy()
+    category_column = "Category" if "Category" in chart_data.columns else "Drama Type"
     chart_data["Posts"] = pd.to_numeric(
         chart_data["Posts"], errors="coerce"
     ).fillna(0).clip(lower=0).round().astype(int)
     chart_data["Average Engagement Rate"] = pd.to_numeric(
         chart_data["Average Engagement Rate"], errors="coerce"
     )
+    chart_data["Total Views"] = pd.to_numeric(
+        chart_data.get("Total Views", pd.Series(0, index=chart_data.index)),
+        errors="coerce",
+    ).fillna(0)
+    chart_data = chart_data[chart_data["Posts"] > 0].copy()
     total_posts = int(chart_data["Posts"].sum())
     if total_posts <= 0:
         return
@@ -6001,17 +6222,13 @@ def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
         axis=1,
     )
 
-    available = chart_data[
-        (chart_data["Posts"] > 0) & chart_data["Average Engagement Rate"].notna()
-    ]
-    leading_volume = chart_data.loc[chart_data["Posts"].idxmax(), "Drama Type"]
+    available = chart_data[chart_data["Average Engagement Rate"].notna()]
+    leading_volume = chart_data.loc[chart_data["Posts"].idxmax(), category_column]
     if available.empty:
-        takeaway = (
-            f"{leading_volume} is the most common drama type in this filtered batch."
-        )
+        takeaway = f"{leading_volume} has the most posts in this filtered batch."
     else:
         leading_er = available.loc[
-            available["Average Engagement Rate"].idxmax(), "Drama Type"
+            available["Average Engagement Rate"].idxmax(), category_column
         ]
         if leading_er == leading_volume:
             takeaway = (
@@ -6028,36 +6245,39 @@ def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
     if px is None:
         chart_bar(
             chart_data,
-            "Drama Type",
+            category_column,
             "Posts",
             orientation="h",
             value_format="integer",
         )
         st.caption(
-            "Bar length shows post count. Average ER uses available post metrics."
+            f"Showing {dimension_label.casefold()}. Bar length shows post count; "
+            "labels show average engagement rate from available post metrics."
         )
         return
 
     fig = px.bar(
         chart_data,
         x="Posts",
-        y="Drama Type",
+        y=category_column,
         orientation="h",
         text="Bar Label",
         template="plotly_white",
     )
+    palette = ["#f59e0b", "#8b5cf6", "#0ea5e9", "#14b8a6", "#ec4899", "#64748b"]
     fig.update_traces(
         marker=dict(
-            color=["#8b5cf6", "#ec4899", "#0ea5e9", "#94a3b8"],
+            color=[palette[index % len(palette)] for index in range(len(chart_data))],
             line=dict(color="#ffffff", width=1),
         ),
         customdata=chart_data[
-            ["Share of Drama Posts", "Average ER Label"]
+            ["Share of Drama Posts", "Average ER Label", "Total Views"]
         ].to_numpy(),
         hovertemplate=(
             "<b>%{y}</b><br>Posts: %{x:,.0f}"
-            "<br>Share of drama posts: %{customdata[0]:.1f}%"
-            "<br>Average engagement rate: %{customdata[1]}<extra></extra>"
+            "<br>Share of shown posts: %{customdata[0]:.1f}%"
+            "<br>Average engagement rate: %{customdata[1]}"
+            "<br>Total views: %{customdata[2]:,.0f}<extra></extra>"
         ),
         textposition="outside",
         cliponaxis=False,
@@ -6065,7 +6285,7 @@ def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
     )
     fig.update_layout(
         showlegend=False,
-        height=300,
+        height=max(270, min(520, 76 + len(chart_data) * 54)),
         margin=dict(l=10, r=185, t=12, b=42),
         font=dict(color="#111827", size=12),
         paper_bgcolor="rgba(255,255,255,0)",
@@ -6081,13 +6301,14 @@ def render_drama_breakdown_v68_89(insights: pd.DataFrame) -> None:
         yaxis=dict(
             title="",
             categoryorder="array",
-            categoryarray=chart_data["Drama Type"].tolist()[::-1],
+            categoryarray=chart_data[category_column].tolist()[::-1],
             automargin=True,
         ),
     )
     render_plotly_chart(fig)
     st.caption(
-        "Bar length shows post count. Average ER uses available post metrics."
+        f"Showing {dimension_label.casefold()}. Bar length shows post count; "
+        "labels show average engagement rate from available post metrics."
     )
 
 
@@ -7966,7 +8187,7 @@ if taggy_companion_session_v68_87:
     )
     st.markdown(
         "<div class='card page-heading'><h2>Ask Taggy</h2>"
-        "<p class='sub'>Your tagging run continues in the original tab.</p></div>",
+        "<p class='sub'>Use your browser Back button to return to your tagging run.</p></div>",
         unsafe_allow_html=True,
     )
     st.caption(
@@ -8763,7 +8984,13 @@ elif st.session_state.step == 3:
         group_summary = "No grouping"
         rank_caption = "Every filtered link"
     st.markdown(metric_row([
-        ("Selected", str(len(selected)), "Posts to tag"),
+        (
+            "Selected",
+            str(len(selected)),
+            "Posts to fetch"
+            if safe_str(st.session_state.get("analysis_mode_v68_86")) == "Metrics only"
+            else "Posts to tag",
+        ),
         ("From batch", str(len(batch)), "Total added"),
         ("Group by", group_summary, rank_caption),
         ("Markets", str(selected_markets_count) if selected_markets_count else "—", "Other included if blank"),
@@ -8779,19 +9006,23 @@ elif st.session_state.step == 3:
             go(4)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# STEP 4: Run tagging
+# STEP 4: Run tagging or fetch metrics
 elif st.session_state.step == 4:
     selected = st.session_state.selected_df if not st.session_state.selected_df.empty else selected_posts_preview(st.session_state.batch_df)
-    st.markdown("<div class='card page-heading'><h2>Run tagging</h2></div>", unsafe_allow_html=True)
+    analysis_mode_v68_86 = safe_str(
+        st.session_state.get("analysis_mode_v68_86")
+    ) or "AI tagging"
+    metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
+    run_page_title_v68_86 = "Fetch metrics" if metrics_only_mode_v68_86 else "Run tagging"
+    st.markdown(
+        f"<div class='card page-heading'><h2>{run_page_title_v68_86}</h2></div>",
+        unsafe_allow_html=True,
+    )
     if selected.empty:
         st.markdown("<div class='warn-note'>No selected posts yet.</div>", unsafe_allow_html=True)
         if st.button("Go to Select Posts", type="primary"):
             go(3)
         st.stop()
-    analysis_mode_v68_86 = safe_str(
-        st.session_state.get("analysis_mode_v68_86")
-    ) or "AI tagging"
-    metrics_only_mode_v68_86 = analysis_mode_v68_86 == "Metrics only"
     st.markdown(metric_row([
         ("Posts", str(len(selected)), "To refresh" if metrics_only_mode_v68_86 else "To tag"),
         ("Mode", analysis_mode_v68_86, "No Gemini" if metrics_only_mode_v68_86 else "General taxonomy"),
@@ -8840,94 +9071,25 @@ elif st.session_state.step == 4:
             and not metrics_result_v68_86.empty
         )
 
+        if metrics_complete_v68_86:
+            _persist_runtime_checkpoint_v68_15()
+            go(6)
+
         if isinstance(metrics_result_v68_86, pd.DataFrame) and not metrics_result_v68_86.empty:
-            if metrics_complete_v68_86:
-                st.success(
-                    f"Metrics refreshed for {len(metrics_result_v68_86):,} posts. "
-                    "No Gemini tagging was run."
-                )
-            else:
-                st.warning(
-                    f"Saved metrics for {len(metrics_result_v68_86):,} posts so far. "
-                    "Resume to collect the remaining posts."
-                )
-            total_views_v68_86 = sum(
-                clean_num(value) for value in metrics_result_v68_86.get("Views", [])
+            st.warning(
+                f"Saved metrics for {len(metrics_result_v68_86):,} posts so far. "
+                "Resume to collect the remaining posts."
             )
-            total_engagement_v68_86 = sum(
-                clean_num(value)
-                for value in metrics_result_v68_86.get("Total Engagement", [])
-            )
-            rates_v68_86 = pd.to_numeric(
-                metrics_result_v68_86.get(
-                    "Engagement Rate",
-                    pd.Series(dtype=float),
-                ),
-                errors="coerce",
-            ).dropna()
-            average_rate_v68_86 = (
-                float(rates_v68_86.mean()) if not rates_v68_86.empty else float("nan")
-            )
-            st.markdown(metric_row([
-                ("Refreshed", f"{len(metrics_result_v68_86):,}", "Posts"),
-                ("Views", short_num(total_views_v68_86), "Available total"),
-                ("Engagement", short_num(total_engagement_v68_86), "Available total"),
-                (
-                    "Average engagement rate",
-                    f"{average_rate_v68_86:.2f}%" if not pd.isna(average_rate_v68_86) else "—",
-                    "Mean post rate",
-                ),
-            ]), unsafe_allow_html=True)
-            metrics_columns_v68_86 = [
-                "Platform", "Source", "Link", "Market", "Track", "Creator",
-                "Followers", "Views", "Likes", "Comments", "Shares", "Saves",
-                "Total Engagement", "Engagement Rate", "Likes Rate",
-                "Comments Rate", "Shares Rate", "Saves Rate", "Metrics Status",
-                "Metrics Unavailable",
-            ]
-            st.markdown(
-                render_table(
-                    metrics_result_v68_86,
-                    max_rows=20,
-                    cols=metrics_columns_v68_86,
-                ),
-                unsafe_allow_html=True,
-            )
-            csv_col_v68_86, excel_col_v68_86 = st.columns(2)
-            export_metrics_v68_86 = metrics_result_v68_86[
-                [
-                    column for column in metrics_columns_v68_86
-                    if column in metrics_result_v68_86.columns
-                ]
-            ].copy()
-            with csv_col_v68_86:
-                st.download_button(
-                    "Download metrics CSV",
-                    export_metrics_v68_86.to_csv(index=False).encode("utf-8-sig"),
-                    file_name="post_metrics.csv",
-                    mime="text/csv",
-                    width="stretch",
-                )
-            with excel_col_v68_86:
-                st.download_button(
-                    "Download metrics Excel",
-                    to_excel_bytes({"Post Metrics": export_metrics_v68_86}),
-                    file_name="post_metrics.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width="stretch",
-                )
 
         metrics_back_v68_86, metrics_run_v68_86 = st.columns(2)
         with metrics_back_v68_86:
             if st.button("Back", width="stretch", key="metrics_only_back_v68_86"):
                 go(3)
         with metrics_run_v68_86:
-            if metrics_complete_v68_86:
-                metrics_button_label_v68_86 = "Refresh metrics"
-            elif completed_positions_v68_86 > 0:
+            if completed_positions_v68_86 > 0:
                 metrics_button_label_v68_86 = "Resume metrics"
             else:
-                metrics_button_label_v68_86 = "Collect metrics"
+                metrics_button_label_v68_86 = "Fetch metrics"
             if st.button(
                 metrics_button_label_v68_86,
                 type="primary",
@@ -8936,7 +9098,7 @@ elif st.session_state.step == 4:
             ):
                 _start_metrics_only_run_v68_86(
                     selected,
-                    restart=metrics_complete_v68_86,
+                    restart=False,
                 )
                 _persist_runtime_checkpoint_v68_15()
                 st.rerun()
@@ -9570,6 +9732,120 @@ elif st.session_state.step == 5:
 
 # STEP 6: Summary and export
 elif st.session_state.step == 6:
+    metrics_only_export_mode_v68_86 = (
+        safe_str(st.session_state.get("analysis_mode_v68_86")) == "Metrics only"
+    )
+    if metrics_only_export_mode_v68_86:
+        metrics_result_v68_86 = st.session_state.get(
+            "metrics_only_df_v68_86",
+            pd.DataFrame(),
+        )
+        export_metrics_v68_86 = _metrics_only_export_frame_v68_86(
+            metrics_result_v68_86
+        )
+        st.markdown(
+            "<div class='card page-heading'><h2>Metrics & Export</h2></div>",
+            unsafe_allow_html=True,
+        )
+        if export_metrics_v68_86.empty:
+            st.markdown(
+                "<div class='warn-note'>No refreshed metrics are ready yet.</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("Go to Fetch Metrics", type="primary"):
+                go(4)
+            st.stop()
+
+        total_views_v68_86 = sum(
+            clean_num(value) for value in export_metrics_v68_86.get("Views", [])
+        )
+        total_engagement_v68_86 = sum(
+            clean_num(value)
+            for value in export_metrics_v68_86.get("Total Engagement", [])
+        )
+        rates_v68_86 = pd.to_numeric(
+            export_metrics_v68_86.get(
+                "Engagement Rate",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        average_rate_v68_86 = (
+            float(rates_v68_86.mean()) if not rates_v68_86.empty else float("nan")
+        )
+        st.success(
+            f"Metrics refreshed for {len(export_metrics_v68_86):,} posts. "
+            "No Gemini tagging was run."
+        )
+        st.markdown(metric_row([
+            ("Refreshed", f"{len(export_metrics_v68_86):,}", "Posts"),
+            ("Views", short_num(total_views_v68_86), "Available total"),
+            ("Engagement", short_num(total_engagement_v68_86), "Available total"),
+            (
+                "Average engagement rate",
+                f"{average_rate_v68_86:.2f}%" if not pd.isna(average_rate_v68_86) else "—",
+                "Mean post rate",
+            ),
+        ]), unsafe_allow_html=True)
+        st.markdown(
+            render_table(
+                export_metrics_v68_86,
+                max_rows=20,
+                cols=list(METRICS_ONLY_EXPORT_COLUMNS_V68_86),
+            ),
+            unsafe_allow_html=True,
+        )
+        csv_col_v68_86, excel_col_v68_86 = st.columns(2)
+        with csv_col_v68_86:
+            st.download_button(
+                "Download metrics CSV",
+                export_metrics_v68_86.to_csv(index=False).encode("utf-8-sig"),
+                file_name="post_metrics.csv",
+                mime="text/csv",
+                width="stretch",
+            )
+        with excel_col_v68_86:
+            st.download_button(
+                "Download metrics Excel",
+                to_excel_bytes({"Post Metrics": export_metrics_v68_86}),
+                file_name="post_metrics.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
+            )
+
+        metrics_back_v68_86, metrics_refresh_v68_86, metrics_new_v68_86 = st.columns(3)
+        with metrics_back_v68_86:
+            if st.button("Back to Select Posts", width="stretch"):
+                go(3)
+        with metrics_refresh_v68_86:
+            if st.button("Refresh metrics", width="stretch"):
+                selected_metrics_v68_86 = (
+                    st.session_state.selected_df
+                    if not st.session_state.selected_df.empty
+                    else selected_posts_preview(st.session_state.batch_df)
+                )
+                _start_metrics_only_run_v68_86(
+                    selected_metrics_v68_86,
+                    restart=True,
+                )
+                _persist_runtime_checkpoint_v68_15()
+                go(4)
+        with metrics_new_v68_86:
+            if st.button("Start new batch", type="primary", width="stretch"):
+                st.session_state.batch_df = pd.DataFrame()
+                st.session_state.selected_df = pd.DataFrame()
+                st.session_state.tagged_df = pd.DataFrame()
+                st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
+                st.session_state.metrics_only_active_v68_86 = False
+                st.session_state.metrics_only_next_position_v68_86 = 0
+                st.session_state.metrics_only_fingerprint_v68_86 = ""
+                st.session_state.last_message = ""
+                reset_date_filter_state_v68()
+                _new_runtime_recovery_id_v68_44()
+                go(2)
+        _persist_runtime_checkpoint_v68_15()
+        st.stop()
+
     tagged = st.session_state.tagged_df
     st.markdown("<div class='card page-heading'><h2>Summary & Export</h2></div>", unsafe_allow_html=True)
     if tagged.empty:
@@ -9992,11 +10268,40 @@ elif st.session_state.step == 6:
             total_drama_posts = int(drama_insights["Posts"].sum())
             if total_drama_posts > 0:
                 with st.expander(
-                    f"Drama breakdown · {total_drama_posts:,} post"
+                    f"Drama performance · {total_drama_posts:,} post"
                     f"{'s' if total_drama_posts != 1 else ''}",
                     expanded=False,
                 ):
-                    render_drama_breakdown_v68_89(drama_insights)
+                    st.caption(
+                        "Compare what the drama posts are, which audience they serve, "
+                        "their production format, featured show, or audio treatment."
+                    )
+                    drama_view_options = list(DRAMA_BREAKDOWN_VIEWS_V68_90[:3])
+                    optional_drama_insights = {}
+                    for optional_view in DRAMA_BREAKDOWN_VIEWS_V68_90[3:]:
+                        optional_insights = prepare_drama_breakdown_view_v68_90(
+                            filtered, optional_view
+                        )
+                        if not optional_insights.empty:
+                            drama_view_options.append(optional_view)
+                            optional_drama_insights[optional_view] = optional_insights
+                    selected_drama_view = st.segmented_control(
+                        "Break down by",
+                        drama_view_options,
+                        default=drama_view_options[0],
+                        key="summary_drama_breakdown_view_v68_90",
+                    ) or drama_view_options[0]
+                    selected_drama_insights = (
+                        optional_drama_insights[selected_drama_view]
+                        if selected_drama_view in optional_drama_insights
+                        else prepare_drama_breakdown_view_v68_90(
+                            filtered, selected_drama_view
+                        )
+                    )
+                    render_drama_breakdown_v68_89(
+                        selected_drama_insights,
+                        dimension_label=selected_drama_view,
+                    )
 
     # Keep creator contribution last among the analytical sections.
     render_top_creator_performance_v68_47(filtered)
