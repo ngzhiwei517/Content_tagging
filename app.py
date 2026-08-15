@@ -5560,31 +5560,56 @@ def prepare_drama_next_actions_v68_96(
         return ""
 
     def drama_subtype(row) -> str:
-        evidence = " ".join([
-            safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type"),
-            safe_str(row.get("Drama Edit Focus")) or parsed_detail(row, "Edit Focus"),
+        drama_type = (
+            safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type")
+        ).casefold()
+        edit_focus = (
+            safe_str(row.get("Drama Edit Focus")) or parsed_detail(row, "Edit Focus")
+        ).casefold()
+        content_category = (
             safe_str(row.get("Drama Content Category"))
-            or parsed_detail(row, "Content Category"),
-            safe_str(row.get("Content Subtype")),
-        ]).casefold()
-        if re.search(r"\bbl\b|boys[ -]?love", evidence):
-            return "BL edits"
-        if re.search(r"\bgl\b|girls[ -]?love", evidence):
-            return "GL edits"
-        if "anime" in evidence:
-            return "Anime edits"
-        if re.search(r"\bidol\b|\bk[ -]?pop\b|celebrity|actor|actress", evidence):
-            return "Idol / celebrity edits"
-        if re.search(r"\bcp\b", evidence):
-            return "CP edits"
-        if "micro" in evidence:
-            return "Micro-drama edits"
-        if "behind" in evidence and "scene" in evidence:
+            or parsed_detail(row, "Content Category")
+        ).casefold()
+        content_subtype = safe_str(row.get("Content Subtype")).casefold()
+        purpose_evidence = " ".join(
+            [content_category, edit_focus, content_subtype]
+        )
+        relationship_evidence = " ".join([drama_type, edit_focus])
+
+        # Content purpose outranks relationship subtype. This prevents stale or
+        # supporting BL/GL fields from turning Anime, BTS, or CP rows into a
+        # generic fictional-drama recommendation.
+        if "behind" in purpose_evidence and "scene" in purpose_evidence:
             return "Behind-the-scenes edits"
-        if "carousel" in evidence:
-            return "Drama carousel"
-        if "entertainment news" in evidence:
+        if "anime" in purpose_evidence:
+            return "Anime edits"
+        if re.search(r"\bcp\b", purpose_evidence):
+            has_bl = bool(re.search(r"\bbl\b|boys[ -]?love", relationship_evidence))
+            has_gl = bool(re.search(r"\bgl\b|girls[ -]?love", relationship_evidence))
+            if has_bl and not has_gl:
+                return "BL CP edits"
+            if has_gl and not has_bl:
+                return "GL CP edits"
+            return "CP edits"
+        if "entertainment news" in purpose_evidence:
             return "Entertainment news"
+        if re.search(
+            r"\bidol\b|\bk[ -]?pop\b|celebrity|actor|actress",
+            purpose_evidence,
+        ):
+            return "Idol / celebrity edits"
+        if "carousel" in purpose_evidence:
+            return "Drama carousel"
+        has_bl = bool(re.search(r"\bbl\b|boys[ -]?love", relationship_evidence))
+        has_gl = bool(re.search(r"\bgl\b|girls[ -]?love", relationship_evidence))
+        if has_bl and has_gl:
+            return "Mixed BL / GL edits"
+        if has_bl:
+            return "BL edits"
+        if has_gl:
+            return "GL edits"
+        if "micro" in purpose_evidence:
+            return "Micro-drama edits"
         return "General drama edits"
 
     def audio_version(row) -> str:
