@@ -215,10 +215,16 @@ def load_taggy_knowledge() -> tuple[Dict[str, object], ...]:
             {
                 "id": entry_id,
                 "title": str(raw_entry.get("title") or entry_id).strip(),
+                "category": str(raw_entry.get("category") or "General").strip(),
                 "steps": tuple(
                     int(step)
                     for step in raw_entry.get("steps", [])
                     if str(step).isdigit()
+                ),
+                "questions": tuple(
+                    str(question).strip()
+                    for question in raw_entry.get("questions", [])
+                    if str(question).strip()
                 ),
                 "keywords": tuple(
                     str(keyword).strip()
@@ -237,21 +243,29 @@ def _knowledge_score(entry: Mapping[str, object], question: str, step: int) -> f
     if not normalized_question or not question_tokens:
         return 0.0
 
-    keywords = [
-        _normalized_query(keyword)
-        for keyword in entry.get("keywords", ())
-        if _normalized_query(keyword)
+    phrases = [
+        _normalized_query(phrase)
+        for phrase in (
+            *entry.get("questions", ()),
+            *entry.get("keywords", ()),
+        )
+        if _normalized_query(phrase)
     ]
     entry_text = " ".join(
-        [str(entry.get("title") or ""), *keywords, str(entry.get("answer") or "")]
+        [
+            str(entry.get("category") or ""),
+            str(entry.get("title") or ""),
+            *phrases,
+            str(entry.get("answer") or ""),
+        ]
     )
     entry_tokens = _query_tokens(entry_text)
     overlap = question_tokens.intersection(entry_tokens)
     score = float(len(overlap)) * 1.6
 
-    for keyword in keywords:
-        if keyword and keyword in normalized_question:
-            score += 6.0 + min(4.0, len(keyword.split()) * 0.8)
+    for phrase in phrases:
+        if phrase and phrase in normalized_question:
+            score += 6.0 + min(4.0, len(phrase.split()) * 0.8)
 
     title = _normalized_query(entry.get("title"))
     if title and title in normalized_question:

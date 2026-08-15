@@ -165,19 +165,57 @@ class DashboardAssistantTests(unittest.TestCase):
 
     def test_approved_knowledge_base_is_local_and_substantial(self):
         entries = load_taggy_knowledge()
-        self.assertGreaterEqual(len(entries), 10)
+        self.assertGreaterEqual(len(entries), 30)
+        self.assertTrue(all(entry["category"] for entry in entries))
+        self.assertTrue(all(entry["questions"] for entry in entries))
         serialized = json.dumps(entries)
         self.assertNotIn("must-not-leak", serialized)
         self.assertNotIn("paste-your-key", serialized)
+
+    def test_project_knowledge_covers_product_workflow_and_limitations(self):
+        entry_ids = {entry["id"] for entry in load_taggy_knowledge()}
+        expected = {
+            "tool_purpose",
+            "complements_existing_tools",
+            "required_inputs",
+            "metrics_only",
+            "scraping_sources",
+            "tagging_accuracy",
+            "creative_narrative_drama",
+            "engagement_calculation",
+            "creator_limits",
+            "resume_after_closing",
+            "export_results",
+            "deploy_and_sync",
+            "taggy_behavior",
+        }
+        self.assertTrue(expected.issubset(entry_ids))
+
+    def test_project_questions_use_the_expected_trusted_entries(self):
+        cases = [
+            (1, "How is this different from MelodyIQ and CreatorCore?", "complements_existing_tools"),
+            (2, "What fields are required and do I need artist?", "required_inputs"),
+            (2, "What if I do not know the market?", "market_handling"),
+            (4, "Why is drama tagging slower than normal posts?", "tagging_speed"),
+            (6, "How is total engagement and engagement rate calculated?", "engagement_calculation"),
+            (6, "How many creators and profile posts can I check?", "creator_limits"),
+            (1, "Does Taggy use Gemini and remember our chat?", "taggy_behavior"),
+            (2, "Why does a short TikTok link fail?", "link_compatibility"),
+        ]
+        for step, question, expected_id in cases:
+            with self.subTest(question=question):
+                matches = retrieve_taggy_knowledge(question, step=step, limit=1)
+                self.assertTrue(matches)
+                self.assertEqual(expected_id, matches[0]["id"])
 
     def test_close_and_reopen_question_uses_trusted_recovery_answer(self):
         answer = page_help_answer(
             4,
             "Can I close the website and reopen it again tomorrow?",
         )
-        self.assertIn("Wait until the current chunk is saved", answer)
-        self.assertIn("bookmark the recovery link", answer)
-        self.assertIn("Reopen that same link later", answer)
+        self.assertIn("current protected chunk has saved", answer)
+        self.assertIn("bookmark the private recovery link", answer)
+        self.assertIn("reopen that exact link", answer)
 
     def test_retrieval_ranks_metric_definition_for_summary_question(self):
         matches = retrieve_taggy_knowledge(
@@ -185,7 +223,7 @@ class DashboardAssistantTests(unittest.TestCase):
             step=6,
         )
         self.assertTrue(matches)
-        self.assertEqual("metric_definitions", matches[0]["id"])
+        self.assertEqual("batch_profile_metrics", matches[0]["id"])
         self.assertIn("current filtered batch", matches[0]["answer"])
 
     def test_api_key_help_does_not_require_gemini(self):
@@ -195,7 +233,7 @@ class DashboardAssistantTests(unittest.TestCase):
         )
         self.assertIn("Settings", answer)
         self.assertIn("Secrets", answer)
-        self.assertIn("Never paste keys", answer)
+        self.assertIn("Never paste credentials", answer)
 
     def test_page_prompt_is_grounded_in_current_workflow_step(self):
         prompt = build_page_assistant_prompt(
@@ -214,7 +252,7 @@ class DashboardAssistantTests(unittest.TestCase):
             context_json=dashboard_context_json(pd.DataFrame()),
         )
         self.assertIn("TRUSTED_HELP_KNOWLEDGE", prompt)
-        self.assertIn("bookmark the recovery link", prompt)
+        self.assertIn("bookmark the private recovery link", prompt)
         self.assertIn("source of truth for app behavior", prompt)
 
     def test_page_generation_can_be_validated_without_live_credit(self):
@@ -247,7 +285,7 @@ class DashboardAssistantTests(unittest.TestCase):
             context_json=dashboard_context_json(pd.DataFrame()),
             request_fn=failed_request,
         )
-        self.assertIn("Reopen that same link later", answer)
+        self.assertIn("reopen that exact link", answer)
 
     def test_generated_markdown_keeps_line_breaks(self):
         answer = generate_page_assistant_answer(
