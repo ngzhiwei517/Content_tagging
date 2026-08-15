@@ -48,8 +48,21 @@
       "Can I upload more than one file?",
       "Can I paste links and upload files together?"
     ],
-    "keywords": ["upload file", "paste links", "csv", "xlsx", "current batch", "add uploaded rows"],
+    "keywords": ["upload csv or xlsx", "upload file", "paste links", "current batch", "add uploaded rows"],
     "answer": "Upload one or more CSV/XLSX files or paste one TikTok or Instagram post link per line. Confirm the file details, then add the rows to Current batch. Uploaded rows and pasted links are additive, so one source does not erase the other."
+  },
+  {
+    "id": "csv_template",
+    "category": "Inputs",
+    "title": "Create a CSV template",
+    "steps": [2],
+    "questions": [
+      "Can you create a CSV with the columns I need?",
+      "Can I get a CSV template?",
+      "What columns should my CSV have?"
+    ],
+    "keywords": ["create a csv", "csv template", "csv format", "columns i need", "col that i need", "column headers"],
+    "answer": "Yes. Start with this CSV-ready header row:\n\n`Link,Market,Track,Artist`\n\nLink is the required post field. The app asks you to confirm a Track for each uploaded file before adding its rows; Market and Artist are optional. Extra source columns can remain in the file. If you tell me the exact columns and order you want, I can format the header row for you."
   },
   {
     "id": "required_inputs",

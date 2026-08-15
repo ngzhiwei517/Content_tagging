@@ -217,6 +217,36 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn("bookmark the private recovery link", answer)
         self.assertIn("reopen that exact link", answer)
 
+    def test_csv_template_request_does_not_return_generic_upload_help(self):
+        question = "can u create a csv with the format i want i mean the col that i need"
+        matches = retrieve_taggy_knowledge(question, step=2, limit=1)
+        self.assertTrue(matches)
+        self.assertEqual("csv_template", matches[0]["id"])
+
+        answer = page_help_answer(2, question)
+        self.assertEqual("", answer)
+
+        prompt = build_page_assistant_prompt(
+            step=2,
+            question=question,
+            context_json=dashboard_context_json(pd.DataFrame()),
+        )
+        self.assertIn("Create a CSV template", prompt)
+        self.assertIn("`Link,Market,Track,Artist`", prompt)
+
+    def test_custom_requests_route_to_gemini_instead_of_local_faq(self):
+        self.assertEqual(
+            "",
+            page_help_answer(6, "Suggest a campaign based on this dashboard"),
+        )
+
+    def test_clear_factual_questions_still_answer_locally(self):
+        answer = page_help_answer(
+            4,
+            "Why is drama tagging slower than normal posts?",
+        )
+        self.assertIn("drama posts may need more frame or full-video evidence", answer)
+
     def test_retrieval_ranks_metric_definition_for_summary_question(self):
         matches = retrieve_taggy_knowledge(
             "What is the difference between batch average engagement and Avg ER 3m?",

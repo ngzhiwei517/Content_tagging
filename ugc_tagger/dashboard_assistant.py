@@ -308,6 +308,66 @@ def taggy_knowledge_answer(
     )
     return str(matches[0]["answer"]) if matches else ""
 
+
+_GENERATIVE_REQUEST_MARKERS = (
+    "analyse",
+    "analyze",
+    "build",
+    "compare",
+    "create",
+    "customise",
+    "customize",
+    "design",
+    "draft",
+    "format",
+    "generate",
+    "make",
+    "prepare",
+    "recommend",
+    "rewrite",
+    "suggest",
+    "summarise",
+    "summarize",
+    "write",
+)
+
+
+def _needs_generative_answer(question: str) -> bool:
+    """Identify requests that need composition or judgement, not a canned FAQ."""
+    normalized = _normalized_query(question)
+    tokens = set(normalized.split())
+    return any(
+        marker in tokens or (" " in marker and marker in normalized)
+        for marker in _GENERATIVE_REQUEST_MARKERS
+    )
+
+
+def taggy_direct_knowledge_answer(
+    step: int,
+    question: str,
+    *,
+    minimum_score: float = 7.5,
+    minimum_margin: float = 2.0,
+) -> str:
+    """Answer only clear factual FAQs locally; route flexible requests onward."""
+    if _needs_generative_answer(question):
+        return ""
+
+    matches = retrieve_taggy_knowledge(
+        question,
+        step=int(step),
+        limit=2,
+        minimum_score=minimum_score,
+    )
+    if not matches:
+        return ""
+    if len(matches) > 1:
+        lead = float(matches[0]["score"])
+        runner_up = float(matches[1]["score"])
+        if lead - runner_up < float(minimum_margin):
+            return ""
+    return str(matches[0]["answer"])
+
 MAX_GROUP_ROWS = 12
 MAX_POST_ROWS = 10
 MAX_CREATOR_ROWS = 10
@@ -612,10 +672,9 @@ USER_QUESTION:
 def page_help_answer(step: int, question: str) -> str:
     """Answer common page-usage questions locally without an API call."""
     normalized = _text(question, limit=1200).casefold()
-    trusted_answer = taggy_knowledge_answer(
+    trusted_answer = taggy_direct_knowledge_answer(
         int(step),
         normalized,
-        minimum_score=6.0,
     )
     if trusted_answer:
         return trusted_answer
