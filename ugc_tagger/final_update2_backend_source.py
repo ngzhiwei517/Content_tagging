@@ -1354,6 +1354,72 @@ def download_video(
             )
         raise
 
+
+def _clean_prefetch_text(value):
+    """Return stable text for the optional one-row media prefetch path."""
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    if value is None:
+        return ''
+    text = str(value).strip()
+    return '' if text.lower() in {'nan', 'none', 'null'} else text
+
+
+def _download_video_bytes_for_prefetch(row, apify_token=''):
+    """Download one video's bytes without retaining media on disk."""
+    video_url = get_video_url(row)
+    if not video_url:
+        return b''
+    with tempfile.TemporaryDirectory() as tmp:
+        video_path = os.path.join(tmp, 'prefetched_video.mp4')
+        download_video(
+            video_url,
+            video_path,
+            apify_token,
+            fallback_url=get_video_fallback_url(row),
+            request_headers=get_media_request_headers(row),
+        )
+        with open(video_path, 'rb') as handle:
+            return handle.read()
+
+
+def start_video_prefetch(row, apify_token=''):
+    """Start a bounded, one-row-ahead media download when it is safe."""
+    error_text = ' '.join(
+        _clean_prefetch_text(row.get(key, ''))
+        for key in ('error', 'errorCode')
+    ).strip()
+    if error_text or _kb_url_type(row) != 'video' or not get_video_url(row):
+        return None
+
+    # The executor accepts one task only. ``wait=False`` lets that task overlap
+    # the current Gemini call, then the worker exits immediately when complete.
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix='tagging-video-prefetch',
+    )
+    future = executor.submit(_download_video_bytes_for_prefetch, row, apify_token)
+    executor.shutdown(wait=False)
+    return future
+
+
+def materialize_prefetched_video(future, output_path):
+    """Write prefetched bytes to the active row's temporary path if available."""
+    if future is None:
+        return False
+    try:
+        video_bytes = future.result()
+    except Exception:
+        return False
+    if not isinstance(video_bytes, bytes) or not video_bytes:
+        return False
+    with open(output_path, 'wb') as handle:
+        handle.write(video_bytes)
+    return True
+
 # Frame sampling presets
 # 3-frame mode is fast and works well for static / text / lifestyle content.
 # 9-frame mode gives better temporal coverage for motion-heavy content such as Dance and Lip Sync,
@@ -5165,7 +5231,9 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
     raw_records_map = {str(rec.get('id', i)): rec for i, rec in enumerate(records) if isinstance(rec, dict)}
     df = pd.json_normalize(records)
     results = []
+    video_prefetches = {}
     for i, (_, row) in enumerate(df.iterrows()):
+        current_video_prefetch = video_prefetches.pop(i, None)
         # Temporary in-memory evidence only. It is never included in output or
         # checkpoints and is released after this row completes.
         drama_media_cache = {}
@@ -5209,6 +5277,16 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
             raw_source['_campaign_track'] = track
             raw_source['_campaign_market'] = market
             raw_source['_tiktok_reported_location'] = tiktok_location
+
+        # Download only the next eligible video's bytes while the current row
+        # waits for Gemini. AI calls and result callbacks remain serialized, so
+        # model quota, output order and checkpoint behavior do not change.
+        next_index = i + 1
+        if next_index < len(df) and next_index not in video_prefetches:
+            video_prefetches[next_index] = start_video_prefetch(
+                df.iloc[next_index].copy(),
+                apify_token,
+            )
 
         # Special case: scraper failed / sensitive / unavailable post.
         # Important: pandas creates NaN for missing error columns; NaN is truthy in Python.
@@ -5335,13 +5413,20 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         video_path = os.path.join(tmp, f'{vid_id}.mp4')
-                        download_video(
-                            video_url,
+                        prefetched = materialize_prefetched_video(
+                            current_video_prefetch,
                             video_path,
-                            apify_token,
-                            fallback_url=get_video_fallback_url(row),
-                            request_headers=get_media_request_headers(row),
                         )
+                        if prefetched:
+                            log_list.append("  -> Reused prefetched video media")
+                        else:
+                            download_video(
+                                video_url,
+                                video_path,
+                                apify_token,
+                                fallback_url=get_video_fallback_url(row),
+                                request_headers=get_media_request_headers(row),
+                            )
                         frame_paths = extract_frames(video_path, os.path.join(tmp, 'frames'))
                         contents_v = [vague_prompt]
                         for fp in frame_paths:
@@ -5453,13 +5538,20 @@ def run_pipeline(records, track, gemini_key, apify_token, log_list, delay_second
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         video_path = os.path.join(tmp, f'{vid_id}.mp4')
-                        download_video(
-                            video_url,
+                        prefetched = materialize_prefetched_video(
+                            current_video_prefetch,
                             video_path,
-                            apify_token,
-                            fallback_url=get_video_fallback_url(row),
-                            request_headers=get_media_request_headers(row),
                         )
+                        if prefetched:
+                            log_list.append("  -> Reused prefetched video media")
+                        else:
+                            download_video(
+                                video_url,
+                                video_path,
+                                apify_token,
+                                fallback_url=get_video_fallback_url(row),
+                                request_headers=get_media_request_headers(row),
+                            )
 
                         # Tier 2A: fast default pass using 3 frames.
                         frame_paths = extract_frames(video_path, os.path.join(tmp, 'frames_3'), FRAME_POINTS_3)
