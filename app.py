@@ -126,7 +126,7 @@ from ugc_tagger.manual_metrics import (
 from ugc_tagger.selection_metrics import (
     merge_refreshed_metrics,
     metric_refresh_was_attempted,
-    ranking_metrics_missing_count,
+    pasted_links_requiring_metrics,
 )
 
 try:
@@ -9646,28 +9646,33 @@ elif st.session_state.step == 3:
         batch,
         apply_top_n=False,
     )
-    ranking_missing_count_v68_95 = 0
+    ranking_refresh_candidates_v68_96 = ranking_candidates_v68_95.iloc[0:0].copy()
     if st.session_state.selection_mode == "Top posts":
-        ranking_missing_count_v68_95 = ranking_metrics_missing_count(
+        ranking_refresh_candidates_v68_96 = pasted_links_requiring_metrics(
             ranking_candidates_v68_95,
             st.session_state.get("rank_metrics", ["Total Engagement"]),
         )
+    ranking_missing_count_v68_95 = len(ranking_refresh_candidates_v68_96)
 
     if ranking_missing_count_v68_95 > 0:
         st.session_state.selected_df = pd.DataFrame()
         st.markdown("<div class='card'><h3>Fetch metrics before ranking</h3>", unsafe_allow_html=True)
         st.warning(
-            f"{ranking_missing_count_v68_95:,} of "
-            f"{len(ranking_candidates_v68_95):,} eligible posts do not yet have "
-            "the metrics needed for this ranking. Fetching the eligible pool first "
-            "prevents an arbitrary Top N selection."
+            f"{ranking_missing_count_v68_95:,} pasted link(s) do not yet have "
+            "the metrics needed for this ranking. Only those missing pasted links "
+            "will be fetched; uploaded-file metrics are reused as provided."
         )
+        if ranking_missing_count_v68_95 > 200:
+            st.caption(
+                "Large run reminder: progress is saved in batches. The free scraper "
+                "runs first, but Apify fallback may use credits."
+            )
         st.caption(
             "The free scraper runs first. Apify is used only when the public method "
             "needs a fallback; Gemini is not used for this step."
         )
         ranking_fingerprint_v68_95 = input_fingerprint(
-            ranking_candidates_v68_95,
+            ranking_refresh_candidates_v68_96,
             METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
         )
         ranking_resume_v68_95 = (
@@ -9690,9 +9695,9 @@ elif st.session_state.step == 3:
                 width="stretch",
                 key="ranking_metrics_fetch_v68_95",
             ):
-                st.session_state.selected_df = ranking_candidates_v68_95.copy()
+                st.session_state.selected_df = ranking_refresh_candidates_v68_96.copy()
                 _start_metrics_only_run_v68_86(
-                    ranking_candidates_v68_95,
+                    ranking_refresh_candidates_v68_96,
                     restart=False,
                     purpose=METRICS_ONLY_PURPOSE_RANKING_V68_95,
                 )

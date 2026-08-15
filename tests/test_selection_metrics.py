@@ -5,6 +5,7 @@ import pandas as pd
 from ugc_tagger.selection_metrics import (
     merge_refreshed_metrics,
     metric_refresh_was_attempted,
+    pasted_links_requiring_metrics,
     ranking_metrics_missing_count,
 )
 
@@ -72,6 +73,42 @@ class SelectionMetricsTests(unittest.TestCase):
 
         self.assertEqual(ranking_metrics_missing_count(frame, ["Shares"]), 0)
         self.assertTrue(metric_refresh_was_attempted(frame))
+
+    def test_ranking_refresh_fetches_only_missing_pasted_links(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Link": "uploaded-ready",
+                    "Source": "campaign.csv",
+                    "Total Engagement": 200,
+                },
+                {
+                    "Link": "uploaded-missing",
+                    "Source": "campaign.csv",
+                    "Total Engagement": 0,
+                },
+                {
+                    "Link": "pasted-ready",
+                    "Source": "Pasted links",
+                    "Total Engagement": 100,
+                },
+                {
+                    "Link": "pasted-missing",
+                    "Source": " PASTED LINKS ",
+                    "Total Engagement": 0,
+                },
+                {
+                    "Link": "pasted-attempted",
+                    "Source": "Pasted links",
+                    "Total Engagement": 0,
+                    "Metrics Status": "Partial",
+                },
+            ]
+        )
+
+        candidates = pasted_links_requiring_metrics(frame, ["Total Engagement"])
+
+        self.assertEqual(candidates["Link"].tolist(), ["pasted-missing"])
 
     def test_refreshed_metrics_merge_by_normalized_link_and_preserve_order(self):
         batch = pd.DataFrame(
