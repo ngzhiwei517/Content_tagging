@@ -125,7 +125,10 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
         step_six = APP_SOURCE.split("# STEP 6: Summary and export", 1)[1]
 
         self.assertIn('"What do you want to run?"', step_two)
-        self.assertIn('["AI tagging", "Metrics only"]', APP_SOURCE)
+        self.assertIn('("AI tagging", "Metrics only")', APP_SOURCE)
+        self.assertIn('key="analysis_mode_widget_v68_93"', step_two)
+        self.assertNotIn('key="analysis_mode_v68_86"', step_two)
+        self.assertIn("_persist_analysis_mode_from_widget_v68_93()", step_two)
         self.assertNotIn('"What do you want to run?"', step_four)
         self.assertIn('st.session_state.get("analysis_mode_v68_86")', step_four)
         self.assertIn('run_page_title_v68_86 = "Fetch metrics"', step_four)
@@ -178,7 +181,18 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
             "def _start_metrics_only_run_v68_86",
             1,
         )[1].split("def _run_metrics_only_chunk_v68_86", 1)[0]
+        self.assertIn('analysis_mode_v68_86 = "Metrics only"', starter)
         self.assertIn("tagging_job_active_v68_43 = False", starter)
+
+    def test_analysis_mode_uses_durable_state_separate_from_widget(self):
+        helper = APP_SOURCE.split(
+            "def _persist_analysis_mode_from_widget_v68_93",
+            1,
+        )[1].split("def review_queue_indices_v68_57", 1)[0]
+
+        self.assertIn('get("analysis_mode_widget_v68_93")', helper)
+        self.assertIn("st.session_state.analysis_mode_v68_86 = selected_mode", helper)
+        self.assertIn('"analysis_mode_v68_86"', APP_SOURCE)
 
     def test_adapter_function_contains_no_ai_backend_call(self):
         source = inspect.getsource(metrics_candidates).casefold()

@@ -234,7 +234,7 @@ class SummaryV6815Tests(unittest.TestCase):
             load_function("render_creative_type_views_doughnut_v68_49", chart_namespace)
         )
         cls.render_creative_type_performance = staticmethod(
-            load_function("render_creative_type_performance_bar_chart_v68_91", chart_namespace)
+            load_function("render_creative_type_performance_doughnut_v68_94", chart_namespace)
         )
         cls.render_drama_breakdown = staticmethod(
             load_function("render_drama_breakdown_v68_89", chart_namespace)
@@ -297,8 +297,9 @@ class SummaryV6815Tests(unittest.TestCase):
             step_six,
         )
         self.assertIn("summary_creative_performance_metric_v68_91", step_six)
-        self.assertIn("render_creative_type_performance_bar_chart_v68_91", step_six)
+        self.assertIn("render_creative_type_performance_doughnut_v68_94", step_six)
         self.assertIn("prepare_marketing_next_actions_v68_91(filtered)", step_six)
+        self.assertIn('st.expander("Suggested next steps", expanded=False)', step_six)
         self.assertIn("prepare_creative_type_engagement_chart_data_v68_70", step_six)
         self.assertNotIn("render_creative_type_views_doughnut_v68_49(views_mix)", step_six)
 
@@ -702,7 +703,7 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertIn("Views: %{value:,.0f}", trace.hovertemplate)
         self.assertIn("Share of views: %{percent:.1%}", trace.hovertemplate)
 
-    def test_creative_performance_bar_is_ranked_and_shows_coverage(self):
+    def test_creative_performance_doughnut_shows_share_and_coverage(self):
         self.rendered_chart_figures.clear()
         performance = pd.DataFrame({
             "Creative Type": ["Dance", "Comedy"],
@@ -713,10 +714,26 @@ class SummaryV6815Tests(unittest.TestCase):
         })
         self.render_creative_type_performance(performance, "Views")
         trace = self.rendered_chart_figures[-1].data[0]
-        self.assertEqual(trace.orientation, "h")
+        self.assertEqual(float(trace.hole), 0.58)
+        self.assertEqual(list(trace.labels), ["Dance", "Comedy"])
+        self.assertIn("Share of selected metric: %{percent:.1%}", trace.hovertemplate)
         self.assertIn("Metric available", trace.hovertemplate)
         self.assertIn("Coverage", trace.hovertemplate)
-        self.assertEqual(list(trace.y), ["Comedy", "Dance"])
+
+    def test_creative_performance_doughnut_renders_one_category(self):
+        self.rendered_chart_figures.clear()
+        performance = pd.DataFrame({
+            "Creative Type": ["Movie/Tv/Drama Edits"],
+            "Value": [150900],
+            "Posts": [19],
+            "Available Posts": [19],
+            "Coverage": [100.0],
+        })
+        self.render_creative_type_performance(performance, "Views")
+        trace = self.rendered_chart_figures[-1].data[0]
+        self.assertEqual(list(trace.labels), ["Movie/Tv/Drama Edits"])
+        self.assertEqual(list(trace.values), [150900])
+        self.assertEqual(float(trace.hole), 0.58)
 
     def test_drama_breakdown_compares_volume_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
