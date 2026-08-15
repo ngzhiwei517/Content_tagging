@@ -2998,6 +2998,7 @@ def selected_posts_preview(
     batch: pd.DataFrame,
     *,
     apply_top_n: bool = True,
+    preserve_input_order: bool = True,
 ) -> pd.DataFrame:
     if batch.empty:
         return batch
@@ -3086,6 +3087,15 @@ def selected_posts_preview(
     def sort_and_take(df_part: pd.DataFrame) -> pd.DataFrame:
         return df_part.sort_values(valid_metrics, ascending=[False] * len(valid_metrics)).head(n)
 
+    def finish_selection(selected_rows: pd.DataFrame) -> pd.DataFrame:
+        # Ranking decides which posts qualify; it should not silently reorder the
+        # user's uploaded or pasted sequence in Review and the final downloads.
+        # The original indexes still point to positions in ``batch`` because all
+        # filters above retain them.
+        if preserve_input_order:
+            selected_rows = selected_rows.sort_index(kind="stable")
+        return selected_rows.reset_index(drop=True)
+
     group_by = st.session_state.get("group_by", "No grouping")
     group_map = {
         "Platform": ["Platform Display"],
@@ -3102,9 +3112,38 @@ def selected_posts_preview(
             pieces.append(sort_and_take(g))
         if not pieces:
             return out.iloc[0:0].reset_index(drop=True)
-        return pd.concat(pieces, ignore_index=True).reset_index(drop=True)
+        return finish_selection(pd.concat(pieces, axis=0))
 
-    return sort_and_take(out).reset_index(drop=True)
+    return finish_selection(sort_and_take(out))
+
+
+def restore_batch_input_order_v68_96(
+    rows: pd.DataFrame,
+    batch: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return result rows in the same order as their links in the input batch."""
+    if rows.empty or batch.empty or "Link" not in rows.columns or "Link" not in batch.columns:
+        return rows.reset_index(drop=True)
+
+    input_positions: Dict[str, int] = {}
+    for position, link in enumerate(batch["Link"].tolist()):
+        normalized = final_update2_normalize_url(link)
+        if normalized and normalized not in input_positions:
+            input_positions[normalized] = position
+
+    fallback_position = len(batch)
+    ordered = rows.copy()
+    ordered["_input_position_v68_96"] = ordered["Link"].map(
+        lambda value: input_positions.get(
+            final_update2_normalize_url(value),
+            fallback_position,
+        )
+    )
+    return (
+        ordered.sort_values("_input_position_v68_96", kind="stable")
+        .drop(columns=["_input_position_v68_96"])
+        .reset_index(drop=True)
+    )
 
 
 # Review media helpers
@@ -3325,7 +3364,7 @@ def _all_ranked_candidates_v56(batch: pd.DataFrame) -> pd.DataFrame:
     old_top_n = st.session_state.get("top_n", 20)
     try:
         st.session_state.top_n = max(len(batch), int(old_top_n))
-        return selected_posts_preview(batch)
+        return selected_posts_preview(batch, preserve_input_order=False)
     finally:
         st.session_state.top_n = old_top_n
 
@@ -5488,6 +5527,193 @@ def render_creative_type_performance_doughnut_v68_94(
     render_plotly_chart(fig)
 
 
+def prepare_drama_next_actions_v68_96(
+    df: pd.DataFrame,
+) -> List[Tuple[str, str, str, str]]:
+    """Build drama-specific recommendations from subtype and audio evidence."""
+    if df is None or df.empty:
+        return []
+
+    creative_column = (
+        "Creative Type" if "Creative Type" in df.columns else "Primary Creative Type"
+    )
+    if creative_column not in df.columns:
+        return []
+    drama_rows = df[
+        df[creative_column].fillna("").astype(str).map(
+            lambda value: any(
+                label.casefold() == "movie/tv/drama edits"
+                for label in split_creative_labels(value)
+            )
+        )
+    ].copy()
+    if drama_rows.empty:
+        return []
+
+    def parsed_detail(row, field: str) -> str:
+        for line in safe_str(row.get("Content Details")).splitlines():
+            if ":" not in line:
+                continue
+            label, value = line.split(":", 1)
+            if label.strip().casefold() == field.casefold():
+                return safe_str(value)
+        return ""
+
+    def drama_subtype(row) -> str:
+        evidence = " ".join([
+            safe_str(row.get("Drama Type")) or parsed_detail(row, "Drama Type"),
+            safe_str(row.get("Drama Edit Focus")) or parsed_detail(row, "Edit Focus"),
+            safe_str(row.get("Drama Content Category"))
+            or parsed_detail(row, "Content Category"),
+            safe_str(row.get("Content Subtype")),
+        ]).casefold()
+        if re.search(r"\bbl\b|boys[ -]?love", evidence):
+            return "BL edits"
+        if re.search(r"\bgl\b|girls[ -]?love", evidence):
+            return "GL edits"
+        if "anime" in evidence:
+            return "Anime edits"
+        if re.search(r"\bidol\b|\bk[ -]?pop\b|celebrity|actor|actress", evidence):
+            return "Idol / celebrity edits"
+        if re.search(r"\bcp\b", evidence):
+            return "CP edits"
+        if "micro" in evidence:
+            return "Micro-drama edits"
+        if "behind" in evidence and "scene" in evidence:
+            return "Behind-the-scenes edits"
+        if "carousel" in evidence:
+            return "Drama carousel"
+        if "entertainment news" in evidence:
+            return "Entertainment news"
+        return "General drama edits"
+
+    def audio_version(row) -> str:
+        value = safe_str(row.get("Audio Version")) or parsed_detail(
+            row, "Audio Version"
+        )
+        normalized = re.sub(r"[\s_-]+", " ", value.casefold()).strip()
+        if not normalized or normalized in {"unknown", "not specified", "not applicable"}:
+            return ""
+        if "original" in normalized:
+            return "Original"
+        if "sped" in normalized or "speed" in normalized:
+            return "Sped Up"
+        if "slow" in normalized:
+            return "Slowed"
+        if "remix" in normalized:
+            return "Remix"
+        return value.strip().title()
+
+    unavailable_values = {"", "none", "nan", "<na>", "not available"}
+
+    def view_metric(row) -> float:
+        raw_value = row.get("Views")
+        if safe_str(raw_value).casefold() in unavailable_values:
+            return float("nan")
+        return float(clean_num(raw_value))
+
+    def engagement_rate(row) -> float:
+        raw_views = row.get("Views")
+        raw_engagement = row.get("Total Engagement")
+        if (
+            safe_str(raw_views).casefold() not in unavailable_values
+            and safe_str(raw_engagement).casefold() not in unavailable_values
+        ):
+            views = clean_num(raw_views)
+            if views > 0:
+                return clean_num(raw_engagement) / views * 100.0
+        try:
+            return float(safe_str(row.get("Engagement Rate")).replace("%", ""))
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drama_rows["_Drama Suggestion Type"] = drama_rows.apply(drama_subtype, axis=1)
+    drama_rows["_Drama Suggestion Audio"] = drama_rows.apply(audio_version, axis=1)
+    drama_rows["_Drama Suggestion Views"] = drama_rows.apply(view_metric, axis=1)
+    drama_rows["_Drama Suggestion ER"] = drama_rows.apply(engagement_rate, axis=1)
+
+    grouped = (
+        drama_rows.groupby("_Drama Suggestion Type", dropna=False)
+        .agg(
+            Posts=("_Drama Suggestion Type", "size"),
+            **{
+                "Total Views": ("_Drama Suggestion Views", "sum"),
+                "View Posts": ("_Drama Suggestion Views", "count"),
+                "Average ER": ("_Drama Suggestion ER", "mean"),
+                "ER Posts": ("_Drama Suggestion ER", "count"),
+            },
+        )
+        .reset_index()
+    )
+
+    reach_type = "Drama metrics pending"
+    reach_detail = "View data is not available by drama subtype"
+    reach_candidates = grouped[grouped["View Posts"].gt(0)].sort_values(
+        ["Total Views", "Posts", "_Drama Suggestion Type"],
+        ascending=[False, False, True],
+    )
+    if not reach_candidates.empty:
+        reach_row = reach_candidates.iloc[0]
+        reach_type = safe_str(reach_row["_Drama Suggestion Type"])
+        reach_detail = (
+            f"{_creative_performance_value_label_v68_91('Views', reach_row['Total Views'])} "
+            f"views across {int(reach_row['Posts']):,} posts"
+        )
+
+    response_type = "Drama metrics pending"
+    response_detail = "Engagement-rate data is not available by drama subtype"
+    response_candidates = grouped[grouped["ER Posts"].gt(0)].copy()
+    if not response_candidates.empty:
+        stronger_evidence = response_candidates[response_candidates["ER Posts"].ge(2)]
+        response_candidates = stronger_evidence if not stronger_evidence.empty else response_candidates
+        response_candidates = response_candidates.sort_values(
+            ["Average ER", "ER Posts", "_Drama Suggestion Type"],
+            ascending=[False, False, True],
+        )
+        response_row = response_candidates.iloc[0]
+        response_type = safe_str(response_row["_Drama Suggestion Type"])
+        response_detail = (
+            f"{float(response_row['Average ER']):.1f}% average ER across "
+            f"{int(response_row['ER Posts']):,} measured posts"
+        )
+
+    test_type = response_type
+    if test_type == "Drama metrics pending":
+        test_type = reach_type
+    if test_type == "Drama metrics pending":
+        test_type = safe_str(grouped.sort_values("Posts", ascending=False).iloc[0]["_Drama Suggestion Type"])
+    test_rows = drama_rows[drama_rows["_Drama Suggestion Type"].eq(test_type)]
+    observed_audio = [
+        value
+        for value in test_rows["_Drama Suggestion Audio"].value_counts().index.tolist()
+        if safe_str(value)
+    ]
+    if "Original" in observed_audio and "Sped Up" in observed_audio:
+        baseline_audio, challenger_audio = "Original", "Sped Up"
+    elif "Original" in observed_audio:
+        baseline_audio = "Original"
+        challenger_audio = next(
+            (value for value in observed_audio if value != "Original"), "Sped Up"
+        )
+    elif "Sped Up" in observed_audio:
+        baseline_audio, challenger_audio = "Original", "Sped Up"
+    elif observed_audio:
+        baseline_audio, challenger_audio = "Original", observed_audio[0]
+    else:
+        baseline_audio, challenger_audio = "Original", "Sped Up"
+
+    return [
+        ("Drama subtype for reach", reach_type, reach_detail, "focus-blue"),
+        ("Drama subtype for response", response_type, response_detail, "focus-green"),
+        (
+            "Recommended drama test",
+            f"Test {test_type}: {baseline_audio} vs {challenger_audio}",
+            "Keep the scene, creator tier and edit format constant; compare views and average ER.",
+            "focus-orange",
+        ),
+    ]
+
+
 def prepare_marketing_next_actions_v68_91(df: pd.DataFrame) -> List[Tuple[str, str, str, str]]:
     """Translate filtered dashboard evidence into three deterministic next actions."""
     if df is None or df.empty:
@@ -5518,6 +5744,16 @@ def prepare_marketing_next_actions_v68_91(df: pd.DataFrame) -> List[Tuple[str, s
             f"{float(response_row['Value']):.1f}% average ER across "
             f"{int(response_row['Available Posts']):,} measured posts"
         )
+
+    drama_label = "movie/tv/drama edits"
+    if (
+        reach_type.casefold() in {drama_label, "metrics pending"}
+        and response_type.casefold() in {drama_label, "metrics pending"}
+        and drama_label in {reach_type.casefold(), response_type.casefold()}
+    ):
+        drama_actions = prepare_drama_next_actions_v68_96(df)
+        if drama_actions:
+            return drama_actions
 
     market_column = "Market Display" if "Market Display" in df.columns else "Market"
     markets = (
@@ -9729,6 +9965,10 @@ elif st.session_state.step == 4:
         if tagged_result is not None and not tagged_result.empty:
             reset_review_state_for_new_tagging_run()
             st.session_state.tagged_df = tagged_result
+            st.session_state.tagged_df = restore_batch_input_order_v68_96(
+                st.session_state.tagged_df,
+                st.session_state.get("batch_df", pd.DataFrame()),
+            )
             go(5)
         retry_label = (
             "Resume tagging"

@@ -47,6 +47,15 @@ class ExportInputOrderTests(unittest.TestCase):
         namespace["safe_sheet_name"] = load_function("safe_sheet_name", namespace)
         cls.grouped_excel_bytes = staticmethod(load_function("grouped_excel_bytes", namespace))
 
+        order_namespace = {
+            "pd": pd,
+            "Dict": Dict,
+            "final_update2_normalize_url": lambda value: str(value).strip().lower(),
+        }
+        cls.restore_input_order = staticmethod(
+            load_function("restore_batch_input_order_v68_96", order_namespace)
+        )
+
     def test_download_contract_does_not_sort_final_csv(self):
         download_block = APP_SOURCE.split('section_title("Downloads"', 1)[1]
         self.assertIn("same order as the uploaded or pasted posts", download_block)
@@ -74,6 +83,33 @@ class ExportInputOrderTests(unittest.TestCase):
         id_headers = [cell.value for cell in next(id_sheet.iter_rows(min_row=1, max_row=1))]
         market_col = id_headers.index("Market") + 1
         self.assertEqual(id_sheet.cell(row=2, column=market_col).value, "ID")
+
+    def test_final_results_restore_batch_order_after_backfill(self):
+        batch = pd.DataFrame({"Link": ["first", "second", "third", "fourth"]})
+        results = pd.DataFrame([
+            {"Link": "third", "Views": 300},
+            {"Link": "first", "Views": 200},
+            {"Link": "fourth", "Views": 100},
+        ])
+
+        ordered = self.restore_input_order(results, batch)
+
+        self.assertEqual(ordered["Link"].tolist(), ["first", "third", "fourth"])
+
+    def test_unknown_result_links_stay_last_in_their_existing_order(self):
+        batch = pd.DataFrame({"Link": ["first", "second"]})
+        results = pd.DataFrame([
+            {"Link": "unknown-a"},
+            {"Link": "second"},
+            {"Link": "unknown-b"},
+        ])
+
+        ordered = self.restore_input_order(results, batch)
+
+        self.assertEqual(
+            ordered["Link"].tolist(),
+            ["second", "unknown-a", "unknown-b"],
+        )
 
     def test_backend_grouping_restores_interleaved_input_order(self):
         class FakeBackend:
