@@ -1,3 +1,4 @@
+import ast
 import inspect
 import unittest
 from pathlib import Path
@@ -219,6 +220,22 @@ class MetricsOnlyUiContractTests(unittest.TestCase):
             1,
         )[1].split("def run_real_tagging_backend", 1)[0]
         self.assertIn("start + MAX_APIFY_POSTS_PER_REQUEST", runner)
+
+    def test_every_input_fingerprint_call_in_app_includes_pipeline_identifier(self):
+        tree = ast.parse(APP_SOURCE)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "input_fingerprint"
+        ]
+
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertTrue(
+            all(len(call.args) >= 2 for call in calls),
+            "Every input_fingerprint call must include its model or workflow identifier.",
+        )
 
 
 if __name__ == "__main__":
