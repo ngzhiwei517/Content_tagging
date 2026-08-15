@@ -184,6 +184,10 @@ class SummaryV6815Tests(unittest.TestCase):
         namespace["_creative_performance_value_label_v68_91"] = (
             cls.creative_performance_value_label
         )
+        cls.drama_next_actions = staticmethod(
+            load_function("prepare_drama_next_actions_v68_96", namespace)
+        )
+        namespace["prepare_drama_next_actions_v68_96"] = cls.drama_next_actions
         cls.marketing_next_actions = staticmethod(
             load_function("prepare_marketing_next_actions_v68_91", namespace)
         )
@@ -671,6 +675,46 @@ class SummaryV6815Tests(unittest.TestCase):
         self.assertEqual(actions[0][1], "Dance")
         self.assertEqual(actions[1][1], "Comedy")
         self.assertIn("Test Comedy vs Dance in SG", actions[2][1])
+
+    def test_marketing_next_actions_use_drama_subtype_and_audio_evidence(self):
+        rows = pd.DataFrame([
+            {
+                "Primary Creative Type": "Movie/Tv/Drama Edits",
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Drama Content Category": "Micro-drama edits",
+                "Audio Version": "Original",
+                "Views": 5000,
+                "Total Engagement": 500,
+            },
+            {
+                "Primary Creative Type": "Movie/Tv/Drama Edits",
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Drama Content Category": "Drama Edit",
+                "Audio Version": "Sped Up",
+                "Views": 4000,
+                "Total Engagement": 600,
+            },
+            {
+                "Primary Creative Type": "Movie/Tv/Drama Edits",
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Content Category": "Anime Edit",
+                "Audio Version": "Original",
+                "Views": 1000,
+                "Total Engagement": 400,
+            },
+        ])
+        actions = self.marketing_next_actions(rows)
+        self.assertEqual(actions[0][0], "Drama subtype for reach")
+        self.assertEqual(actions[0][1], "BL edits")
+        self.assertEqual(actions[1][0], "Drama subtype for response")
+        self.assertEqual(actions[1][1], "BL edits")
+        self.assertEqual(
+            actions[2][1],
+            "Test BL edits: Original vs Sped Up",
+        )
+        self.assertNotIn("Scale Movie/Tv/Drama Edits", str(actions))
 
     def test_creative_type_bar_hover_shows_posts_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()

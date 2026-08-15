@@ -206,6 +206,34 @@ class PerTrackDateSelectionTests(unittest.TestCase):
         result = self.all_candidates(self.sample_batch())
         self.assertEqual(result[["Track", "Views"]].values.tolist(), [["A", 100], ["B", 200]])
 
+    def test_top_posts_qualify_by_metric_then_return_to_input_order(self):
+        self.state["use_date_filter"] = False
+        self.state["group_by"] = "No grouping"
+        self.state["top_n"] = 2
+        batch = pd.DataFrame([
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "first", "Views": 200},
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "second", "Views": 100},
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "third", "Views": 300},
+        ])
+
+        result = self.preview(batch)
+
+        self.assertEqual(result["Link"].tolist(), ["first", "third"])
+
+    def test_backfill_pool_remains_ranked_even_when_selected_output_is_ordered(self):
+        self.state["use_date_filter"] = False
+        self.state["group_by"] = "No grouping"
+        self.state["top_n"] = 2
+        batch = pd.DataFrame([
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "first", "Views": 200},
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "second", "Views": 100},
+            {"Track": "A", "Market": "MY", "Source": "Pasted links", "Link": "third", "Views": 300},
+        ])
+
+        result = self.all_candidates(batch)
+
+        self.assertEqual(result["Link"].tolist(), ["third", "first", "second"])
+
 
 class PerTrackDateStateAndSourceTests(unittest.TestCase):
     def test_numeric_excel_date_text_is_supported(self):
