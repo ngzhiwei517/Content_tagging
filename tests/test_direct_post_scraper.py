@@ -10,7 +10,10 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import requests
 
-from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
+from ugc_tagger.direct_post_scraper import (
+    enrich_tiktok_records_with_oembed,
+    scrape_tiktok_posts_direct,
+)
 from ugc_tagger.final_update2_backend import SOURCE_PATH
 from ugc_tagger.final_update2_adapter import (
     _resolved_creator_handle,
@@ -59,6 +62,47 @@ def _video_info(url):
 
 
 class DirectPostScraperTests(unittest.TestCase):
+    def test_oembed_fills_missing_caption_and_hashtags_without_overwriting_metrics(self):
+        link = "https://www.tiktok.com/@jer.rukbl/video/7651572053631307021"
+        record = {
+            "submittedVideoUrl": link,
+            "playCount": 1350,
+            "diggCount": 62,
+            "commentCount": 0,
+            "authorMeta": {"name": "jer.rukbl"},
+        }
+        response = Mock()
+        response.json.return_value = {
+            "title": (
+                "He's getting married... but not to him "
+                "#cdrama #DOUBLEHELIX #shortfilm #blseries #SHUANGCHENG"
+            ),
+            "author_name": "jer.rukbl",
+        }
+        getter = Mock(return_value=response)
+
+        enriched = enrich_tiktok_records_with_oembed([record], http_get=getter)
+
+        self.assertEqual(enriched[0]["playCount"], 1350)
+        self.assertIn("#blseries", enriched[0]["text"])
+        self.assertIn({"name": "blseries"}, enriched[0]["hashtags"])
+        self.assertEqual(enriched[0]["_caption_provider"], "tiktok_oembed")
+        getter.assert_called_once()
+
+    def test_oembed_is_not_called_when_an_alternate_caption_field_exists(self):
+        link = "https://www.tiktok.com/@creator/video/123"
+        record = {
+            "submittedVideoUrl": link,
+            "Caption": "Already available #blseries",
+        }
+        getter = Mock()
+
+        enriched = enrich_tiktok_records_with_oembed([record], http_get=getter)
+
+        self.assertEqual(enriched[0]["text"], "Already available #blseries")
+        self.assertIn({"name": "blseries"}, enriched[0]["hashtags"])
+        getter.assert_not_called()
+
     def test_metadata_only_scrape_does_not_create_media_files(self):
         link = "https://www.tiktok.com/@creator/video/123"
         with tempfile.TemporaryDirectory() as folder:

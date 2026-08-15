@@ -21,6 +21,126 @@ DirectExtractor = Callable[[str], Optional[Dict]]
 # entire checkpoint window for up to 30 seconds per worker wave.
 DIRECT_SCRAPE_TIMEOUT_SECONDS = 12
 DIRECT_SCRAPE_MAX_WORKERS = 8
+TIKTOK_OEMBED_URL = "https://www.tiktok.com/oembed"
+TIKTOK_OEMBED_TIMEOUT_SECONDS = 8
+
+
+def _clean_text(value) -> str:
+    text = str(value or "").strip()
+    return "" if text.casefold() in {"nan", "none", "null"} else text
+
+
+def _record_caption(record: Dict) -> str:
+    for key in (
+        "text",
+        "caption",
+        "Caption",
+        "description",
+        "Description",
+        "Post Caption",
+        "title",
+    ):
+        value = _clean_text(record.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _record_post_url(record: Dict) -> str:
+    for key in (
+        "webVideoUrl",
+        "submittedVideoUrl",
+        "_resolved_url",
+        "url",
+        "_requested_url",
+    ):
+        value = _clean_text(record.get(key))
+        if _regular_video_url(value):
+            return value
+    return ""
+
+
+def _caption_hashtags(caption: str) -> List[Dict[str, str]]:
+    seen = set()
+    hashtags = []
+    for match in re.findall(r"(?<!\w)#([\w-]+)", caption, flags=re.UNICODE):
+        name = match.strip().lstrip("#")
+        folded = name.casefold()
+        if name and folded not in seen:
+            seen.add(folded)
+            hashtags.append({"name": name})
+    return hashtags
+
+
+def enrich_tiktok_records_with_oembed(
+    records: Iterable[Dict],
+    *,
+    http_get=None,
+    max_workers: int = DIRECT_SCRAPE_MAX_WORKERS,
+    timeout: int = TIKTOK_OEMBED_TIMEOUT_SECONDS,
+) -> List[Dict]:
+    """Fill missing TikTok captions from the public oEmbed response.
+
+    Existing scraper values always win. The fallback retrieves public metadata
+    only; it does not download media or use an API key.
+    """
+    output = [record for record in records if isinstance(record, dict)]
+    pending = []
+    for record in output:
+        caption = _record_caption(record)
+        if caption:
+            # Normalize alternate scraper field names for downstream guardrails.
+            record["text"] = caption
+            if not record.get("hashtags"):
+                record["hashtags"] = _caption_hashtags(caption)
+            continue
+        post_url = _record_post_url(record)
+        if post_url:
+            pending.append((record, post_url))
+
+    if not pending:
+        return output
+
+    if http_get is None:
+        import requests
+
+        http_get = requests.get
+
+    def fetch_caption(item):
+        record, post_url = item
+        try:
+            response = http_get(
+                TIKTOK_OEMBED_URL,
+                params={"url": post_url},
+                timeout=timeout,
+            )
+            if hasattr(response, "raise_for_status"):
+                response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return record, {}
+        return record, payload if isinstance(payload, dict) else {}
+
+    workers = max(1, min(int(max_workers), len(pending)))
+    if len(pending) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            fetched = list(executor.map(fetch_caption, pending))
+    else:
+        fetched = [fetch_caption(pending[0])]
+
+    for record, payload in fetched:
+        caption = _clean_text(payload.get("title"))
+        if not caption:
+            continue
+        record["text"] = caption
+        record["hashtags"] = _caption_hashtags(caption)
+        record["_caption_provider"] = "tiktok_oembed"
+        author_name = _clean_text(payload.get("author_name"))
+        author = record.get("authorMeta")
+        if author_name and isinstance(author, dict) and not _clean_text(author.get("name")):
+            author["name"] = author_name.lstrip("@")
+            record["authorMeta.name"] = author_name.lstrip("@")
+    return output
 
 
 def _number(value, default=0):

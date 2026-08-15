@@ -716,6 +716,77 @@ class SummaryV6815Tests(unittest.TestCase):
         )
         self.assertNotIn("Scale Movie/Tv/Drama Edits", str(actions))
 
+    def test_drama_next_actions_prioritise_content_purpose_over_relationship_type(self):
+        rows = pd.DataFrame([
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Drama Content Category": "CP Edit",
+                "Drama Edit Focus": "BL CP Edit",
+                "Views": 9000,
+                "Total Engagement": 900,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Drama Content Category": "Behind-the-Scenes Edit",
+                "Drama Edit Focus": "Cast/Actor Edit",
+                "Views": 8000,
+                "Total Engagement": 400,
+            },
+            {
+                "Creative Type": "Movie/Tv/Drama Edits",
+                "Drama Type": "BL Drama",
+                "Drama Content Category": "Anime Edit",
+                "Content Details": (
+                    "Content Category: Drama Edit\nDrama Type: GL Drama"
+                ),
+                "Views": 7000,
+                "Total Engagement": 350,
+            },
+        ])
+
+        actions = self.drama_next_actions(rows)
+
+        self.assertEqual(actions[0][1], "BL CP edits")
+        self.assertNotIn("BL edits", {action[1] for action in actions})
+
+    def test_drama_next_actions_do_not_silently_choose_bl_for_mixed_subtype(self):
+        rows = pd.DataFrame([{
+            "Creative Type": "Movie/Tv/Drama Edits",
+            "Drama Type": "BL Drama / GL Drama",
+            "Drama Content Category": "Drama Edit",
+            "Views": 5000,
+            "Total Engagement": 500,
+        }])
+
+        actions = self.drama_next_actions(rows)
+
+        self.assertEqual(actions[0][1], "Mixed BL / GL edits")
+        self.assertEqual(actions[1][1], "Mixed BL / GL edits")
+
+    def test_drama_next_actions_keep_bts_and_anime_purpose_despite_stale_bl_fields(self):
+        for category, expected in (
+            ("Behind-the-Scenes Edit", "Behind-the-scenes edits"),
+            ("Anime Edit", "Anime edits"),
+        ):
+            with self.subTest(category=category):
+                rows = pd.DataFrame([{
+                    "Creative Type": "Movie/Tv/Drama Edits",
+                    "Drama Type": "BL Drama",
+                    "Drama Content Category": category,
+                    "Content Details": (
+                        "Content Category: Drama Edit\nDrama Type: GL Drama"
+                    ),
+                    "Views": 5000,
+                    "Total Engagement": 500,
+                }])
+
+                actions = self.drama_next_actions(rows)
+
+                self.assertEqual(actions[0][1], expected)
+                self.assertEqual(actions[1][1], expected)
+
     def test_creative_type_bar_hover_shows_posts_and_average_engagement_rate(self):
         self.rendered_chart_figures.clear()
         mix = pd.DataFrame({

@@ -180,6 +180,22 @@ def _row_get(row, key: str, default=""):
     return current if current is not None else direct
 
 
+def _row_caption(row) -> str:
+    for key in (
+        "text",
+        "caption",
+        "Caption",
+        "description",
+        "Description",
+        "Post Caption",
+        "Text",
+    ):
+        value = _text(_row_get(row, key))
+        if value:
+            return value
+    return ""
+
+
 def _labels(value) -> List[str]:
     if isinstance(value, (list, tuple, set)):
         items = value
@@ -302,7 +318,7 @@ def promote_entertainment_news_label(result: Dict, row=None) -> Dict:
     evidence = " ".join([
         _text(output.get("narrative")),
         _text(output.get("content_details")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ]).casefold()
     news_cue = _has_entertainment_news_purpose(evidence)
@@ -648,14 +664,26 @@ def promote_entertainment_news_label(result: Dict, row=None) -> Dict:
 
 
 def _hashtags(row) -> str:
-    raw = _row_get(row, "hashtags", [])
-    if not isinstance(raw, list):
-        return _text(raw)
     names = []
-    for value in raw:
+    seen = set()
+    raw = []
+    for key in ("hashtags", "hashTags", "Hashtags"):
+        candidate = _row_get(row, key, [])
+        if candidate:
+            raw = candidate
+            break
+    values = raw if isinstance(raw, list) else [_text(raw)]
+    for value in values:
         name = value.get("name", "") if isinstance(value, Mapping) else value
-        if _text(name):
-            names.append(f"#{_text(name).lstrip('#')}")
+        cleaned = _text(name).lstrip("#")
+        if cleaned and cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            names.append(f"#{cleaned}")
+    for match in re.findall(r"(?<!\w)#([\w-]+)", _row_caption(row), flags=re.UNICODE):
+        cleaned = match.strip().lstrip("#")
+        if cleaned and cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            names.append(f"#{cleaned}")
     return " ".join(names)
 
 
@@ -666,7 +694,7 @@ def _hashtags(row) -> str:
 
 def build_drama_prompt(result: Mapping, row=None) -> str:
     """Build the conditional second-pass prompt for drama/entertainment detail."""
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     music_name = _text(_row_get(row, "musicMeta.musicName"))
     music_author = _text(_row_get(row, "musicMeta.musicAuthor"))
     campaign_track = _text(_row_get(row, "_campaign_track"))
@@ -1295,7 +1323,7 @@ def resolve_audio_fields(response: Mapping, row=None, http_get=None) -> Dict[str
     """Combine Gemini observations, TikTok metadata and Apple/iTunes identity lookup."""
     music_name = _text(_row_get(row, "musicMeta.musicName"))
     music_author = _text(_row_get(row, "musicMeta.musicAuthor"))
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     campaign_track = _text(_row_get(row, "_campaign_track"))
     campaign_artist, campaign_song = split_campaign_track(campaign_track)
     verified_apple = response.get("_verified_itunes")
@@ -1626,7 +1654,7 @@ def route_thailand_carousel_ambiguity_to_review(result: Dict, row=None) -> Dict:
         _text(output.get("narrative")),
         details_text,
         _text(output.get("visual_summary")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
     carousel_context = bool(
@@ -1785,7 +1813,7 @@ def _drama_subtype_evidence_blob(
         _text(response.get("visual_summary")),
         _text(response.get("review_reason")),
         " ".join(_text(item) for item in evidence if _text(item)),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
 
@@ -1794,7 +1822,9 @@ def _has_same_gender_romance_support(blob: str, subtype: str) -> bool:
     """Require explicit BL/GL relationship evidence before keeping the subtype."""
     if subtype == "BL":
         pattern = (
-            r"(?:#(?:thai)?bl(?:series|drama|edit|cp)?\b|\bboys?[ '\u2019-]*love\b|"
+            r"(?:#(?:thai[_-]?)?bl(?:[_-]?(?:series|drama|edit|cp|romance|couple|"
+            r"fanedit|ship))?\b|"
+            r"\bboys?[ '\u2019-]*love\b|"
             r"\bbl (?:drama|series|couple|cp|romance)\b|\bmale[- ]male\b|"
             r"\btwo (?:male(?: actors?| idols?| celebrities?)?|men|boys)\b|"
             r"\bboth (?:male|men)\b|"
@@ -1802,8 +1832,10 @@ def _has_same_gender_romance_support(blob: str, subtype: str) -> bool:
         )
     else:
         pattern = (
-            r"(?:#(?:thai)?gl(?:series|drama|edit|cp)?\b|#girlslove\b|#yuri\b|"
-            r"#girllovegirl\b|#girlxgirl\b|"
+            r"(?:#(?:thai[_-]?)?gl(?:[_-]?(?:series|drama|edit|cp|romance|couple|"
+            r"fanedit|ship))?\b|"
+            r"#girls?[_-]?love\b|#yuri\b|"
+            r"#girl[_-]?love[_-]?girl\b|#girl[_-]?x[_-]?girl\b|"
             r"\bgirls?[ '\u2019-]*love(?:[ '\u2019-]*girls?)?\b|"
             r"\bgl (?:drama|series|couple|cp|romance)\b|\bfemale[- ]female\b|"
             r"\btwo (?:female(?: actresses?| idols?| celebrities?)?|women|girls|"
@@ -2008,6 +2040,14 @@ def _anime_visual_evidence(
         " ",
         observed_blob,
     )
+    live_action_blob = re.sub(
+        r"\b(?:not|no|without|isn['\u2019]?t|is not|doesn['\u2019]?t show|does not show)\s+"
+        r"(?:any\s+)?(?:live[- ]action(?:\s+(?:people|actors?|characters?|footage))?|"
+        r"real[- ]life\s+(?:actors?|people)|real\s+(?:human\s+)?(?:actors?|people)|"
+        r"human\s+actors?)\b",
+        " ",
+        positive_blob,
+    )
     anime_support = bool(re.search(
         r"\b(?:anime(?:\s+(?:series|scene|character|characters|edit|style|footage))?|"
         r"manga(?:\s+(?:panel|panels|character|characters))?|animated\s+(?:scene|character|"
@@ -2020,7 +2060,7 @@ def _anime_visual_evidence(
         r"soap opera|sinetron|television drama|tv drama|web drama|filmed\s+(?:actor|actress|"
         r"performer)|male and female lead|man and woman\s+in\s+(?:various|real|domestic|"
         r"outdoor|indoor)\s+(?:settings|locations|scenes))\b",
-        positive_blob,
+        live_action_blob,
     ))
     return anime_support, live_action_support
 
@@ -2038,7 +2078,7 @@ def _readable_hashtag_title(value: str) -> str:
 
 def _explicit_title_from_metadata(response: Mapping, row, evidence: Iterable[str]) -> str:
     """Recover a title only from an explicit title statement or corroboration."""
-    caption = _text(_row_get(row, "text"))
+    caption = _row_caption(row)
     evidence_text = " ".join(filter(None, [
         _text(response.get("visual_summary")),
         *(_text(item) for item in evidence if _text(item)),
@@ -2104,7 +2144,7 @@ def _explicit_fictional_same_gender_drama_subtype(
     the detailed category is a drama edit rather than entertainment news.
     """
     metadata_blob = " ".join(filter(None, [
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
     ])).casefold()
     observed_blob = " ".join(filter(None, [
@@ -2155,6 +2195,50 @@ def _explicit_fictional_same_gender_drama_subtype(
     return ""
 
 
+def _explicit_same_gender_hashtag_subtype(row) -> str:
+    """Return BL or GL for an unambiguous, exact hashtag family.
+
+    This helper is deliberately stricter than a substring search so unrelated
+    tags such as ``#global`` or ``#blog`` cannot be interpreted as GL or BL.
+    The caller applies this only after the post has been resolved as a drama
+    edit; BL/GL promotional tags therefore do not turn interviews or press
+    clips into fictional drama edits.  Conflicting BL and GL tags are left for
+    the other evidence/review path instead of guessing.
+    """
+    hashtag_tokens = set()
+    for raw_token in re.findall(r"#([\w-]+)", _hashtags(row), flags=re.UNICODE):
+        # Do not strip an unsupported Unicode suffix into a different valid
+        # token (for example, ``#BL日本`` must not collapse to ``bl``).
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", raw_token):
+            continue
+        token = re.sub(r"[_-]+", "", raw_token.casefold())
+        if token:
+            hashtag_tokens.add(token)
+
+    bl_marker = any(
+        re.fullmatch(
+            r"(?:thai)?bl(?:series|drama|edit|romance|cp|couple|fanedit|ship)?|"
+            r"boys?love",
+            token,
+        )
+        for token in hashtag_tokens
+    )
+    gl_marker = any(
+        re.fullmatch(
+            r"(?:thai)?gl(?:series|drama|edit|romance|cp|couple|fanedit|ship)?|"
+            r"girls?love|"
+            r"girllovegirl|girlxgirl",
+            token,
+        )
+        for token in hashtag_tokens
+    )
+    if bl_marker and gl_marker:
+        return "CONFLICT"
+    if not bl_marker and not gl_marker:
+        return ""
+    return "BL" if bl_marker else "GL"
+
+
 def _content_kinds(response: Mapping, result: Mapping, row, evidence: List[str]) -> List[str]:
     explicit = _content_categories(
         response.get("content_categories") or response.get("content_kind")
@@ -2164,7 +2248,7 @@ def _content_kinds(response: Mapping, result: Mapping, row, evidence: List[str])
         _text(result.get("narrative")),
         _text(result.get("content_details")),
         _text(response.get("visual_summary")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
         *evidence,
     ]).casefold()
@@ -2212,6 +2296,9 @@ def _content_kinds(response: Mapping, result: Mapping, row, evidence: List[str])
         ]
         if "Drama Carousel" not in explicit:
             explicit.insert(0, "Drama Carousel")
+    anime_support, live_action_support = _anime_visual_evidence(result, response, evidence)
+    if anime_support and not live_action_support:
+        return ["Anime Edit"]
     fictional_same_gender_subtype = _explicit_fictional_same_gender_drama_subtype(
         result,
         response,
@@ -2227,9 +2314,6 @@ def _content_kinds(response: Mapping, result: Mapping, row, evidence: List[str])
         # entertainment coverage.  Agreement between explicit series metadata
         # and observed fictional scenes is strong enough to correct it.
         return ["Drama Edit"]
-    anime_support, live_action_support = _anime_visual_evidence(result, response, evidence)
-    if anime_support and not live_action_support:
-        return ["Anime Edit"]
     if "Anime Edit" in explicit and live_action_support and not anime_support:
         # A weak Anime suggestion cannot overrule explicit live-action people,
         # soap-opera or filmed-actor evidence.  Removing it lets the confirmed
@@ -2637,7 +2721,7 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
         _text(output.get("content_details")),
         _text(response.get("visual_summary")),
         _text(response.get("review_reason")),
-        _text(_row_get(row, "text")),
+        _row_caption(row),
         _hashtags(row),
         title,
         *evidence,
@@ -2671,16 +2755,49 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
         review_reasons.append("CP suggestion lacked real-actor or off-screen evidence")
 
     subtype_blob = _drama_subtype_evidence_blob(output, response, row, evidence)
+    hashtag_same_gender_subtype = _explicit_same_gender_hashtag_subtype(row)
     fictional_same_gender_subtype = _explicit_fictional_same_gender_drama_subtype(
         output,
         response,
         row,
         evidence,
     )
-    if "Drama Edit" in content_categories and fictional_same_gender_subtype:
+    conflicting_hashtag_subtypes = hashtag_same_gender_subtype == "CONFLICT"
+    exact_hashtag_can_resolve = bool(
+        "Drama Edit" in content_categories
+        and not set(content_categories) & {
+            "Anime Edit",
+            "Behind-the-Scenes Edit",
+            "CP Edit",
+            "Entertainment News",
+            "Actor/Actress Carousel",
+            "Actor/Actress Daily Vlog",
+            "K-pop Show Cut",
+        }
+    )
+    if conflicting_hashtag_subtypes:
+        if exact_hashtag_can_resolve:
+            drama_type = "General Drama"
+            edit_focus = "Fictional Story"
+        elif drama_type in {"BL Drama", "GL Drama"}:
+            # A conflicting pair of exact tags cannot safely preserve whichever
+            # subtype the model happened to choose. Keep the content purpose,
+            # but neutralise the unresolved relationship subtype for review.
+            drama_type = "Unknown"
+            edit_focus = "Cast/Actor Edit" if "CP Edit" in content_categories else "Unknown"
+        conflict_reason = "Both BL and GL hashtags were present; subtype needs review"
+        guardrail_review_reasons.append(conflict_reason)
+        review_reasons.append(conflict_reason)
+    resolved_same_gender_subtype = (
+        hashtag_same_gender_subtype
+        if exact_hashtag_can_resolve
+        and hashtag_same_gender_subtype in {"BL", "GL"}
+        else fictional_same_gender_subtype
+    )
+    if "Drama Edit" in content_categories and resolved_same_gender_subtype:
         drama_type = (
             "BL Drama"
-            if fictional_same_gender_subtype == "BL"
+            if resolved_same_gender_subtype == "BL"
             else "GL Drama"
         )
         edit_focus = "Fictional Story"
