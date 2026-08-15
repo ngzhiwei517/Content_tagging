@@ -7,11 +7,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pandas as pd
 import requests
 
 from ugc_tagger.direct_post_scraper import scrape_tiktok_posts_direct
 from ugc_tagger.final_update2_backend import SOURCE_PATH
-from ugc_tagger.final_update2_adapter import _resolved_creator_handle, scrape_links
+from ugc_tagger.final_update2_adapter import (
+    _resolved_creator_handle,
+    metrics_candidates,
+    scrape_links,
+)
 
 
 class _Backend:
@@ -183,7 +188,7 @@ class DirectPostScraperTests(unittest.TestCase):
         self.assertEqual(backend.links, [fallback])
         self.assertEqual(len(records), 2)
 
-    def test_adapter_rejects_incomplete_apify_metrics(self):
+    def test_adapter_keeps_available_metrics_from_partial_apify_result(self):
         link = "https://www.tiktok.com/@creator/video/456"
         backend = _Backend()
         backend.run_apify_tiktok_scraper_api = lambda _links, _token: [{
@@ -201,7 +206,16 @@ class DirectPostScraperTests(unittest.TestCase):
         ):
             records = scrape_links([link], "token")
 
-        self.assertEqual(records, [])
+        self.assertEqual(len(records), 1)
+        refreshed = metrics_candidates(
+            pd.DataFrame([{"Platform": "TikTok", "Link": link}]),
+            records,
+        ).iloc[0]
+        self.assertEqual(refreshed["Views"], 100)
+        self.assertEqual(refreshed["Likes"], 10)
+        self.assertTrue(pd.isna(refreshed["Comments"]))
+        self.assertEqual(refreshed["Metrics Status"], "Partial")
+        self.assertIn("Comments", refreshed["Metrics Unavailable"])
 
 
 class DirectMediaReuseTests(unittest.TestCase):

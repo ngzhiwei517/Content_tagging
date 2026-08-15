@@ -63,6 +63,37 @@ def _first(record: Dict, keys: Iterable[str], default=""):
     return default
 
 
+_INSTAGRAM_FOLLOWER_KEYS = (
+    "ownerFollowersCount",
+    "owner_follower_count",
+    "followersCount",
+    "followerCount",
+    "followers_count",
+    "follower_count",
+    "edge_followed_by_count",
+)
+
+
+def _recursive_positive_number(value, keys: Iterable[str]) -> int:
+    """Return the first positive numeric value for ``keys`` in nested actor data."""
+    if isinstance(value, dict):
+        for key in keys:
+            if key in value:
+                number = _number(value.get(key))
+                if number > 0:
+                    return number
+        for nested in value.values():
+            number = _recursive_positive_number(nested, keys)
+            if number > 0:
+                return number
+    elif isinstance(value, list):
+        for nested in value:
+            number = _recursive_positive_number(nested, keys)
+            if number > 0:
+                return number
+    return 0
+
+
 def _host(url: str) -> str:
     try:
         return urlsplit(_text(url)).hostname.casefold()
@@ -308,11 +339,9 @@ def normalize_instagram_record(record: Dict, requested_url: str = "") -> Dict:
         _first(raw, ("ownerFullName", "owner_full_name", "fullName"))
         or _first(user, ("full_name", "fullName", "name"))
     )
-    followers = _number(
-        _first(raw, ("ownerFollowersCount", "owner_follower_count", "followersCount", "followerCount"))
-        or _nested(raw, "owner", "followersCount", default=0)
-        or _first(user, ("follower_count", "followers_count", "followers"), default=0)
-        or _nested(raw, "metrics", "user_follower_count", default=0)
+    followers = _recursive_positive_number(
+        raw,
+        (*_INSTAGRAM_FOLLOWER_KEYS, "followers", "user_follower_count"),
     )
     hashtags = raw.get("hashtags") if isinstance(raw.get("hashtags"), list) else []
     caption = raw.get("caption") if isinstance(raw.get("caption"), dict) else {}
@@ -541,7 +570,11 @@ def scrape_instagram_posts_direct(
         # Direct retrieval refreshes public metadata first, but Instagram often
         # omits one or more reporting metrics. Ask Apify only for incomplete
         # records instead of trusting older uploaded values.
-        if unavailable.intersection(
+        author = record.get("authorMeta") if isinstance(record.get("authorMeta"), dict) else {}
+        followers = _number(
+            author.get("fans") or author.get("followers") or author.get("followerCount")
+        )
+        if followers <= 0 or unavailable.intersection(
             {"views", "likes", "comments", "shares", "saves"}
         ):
             fallback_links.append(link)
@@ -565,6 +598,81 @@ def _run_actor_items(client, actor_id: str, run_input: Dict) -> List[Dict]:
     if not dataset_id:
         raise RuntimeError("Instagram Apify run finished but no default dataset was returned.")
     return [item for item in client.dataset(dataset_id).iterate_items() if isinstance(item, dict)]
+
+
+def _instagram_profile_follower_counts(items: Iterable[Dict]) -> Dict[str, int]:
+    """Map lowercase Instagram handles to follower counts from profile details."""
+    followers_by_handle: Dict[str, int] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        user = item.get("user") if isinstance(item.get("user"), dict) else {}
+        handle = _text(
+            _first(item, ("username", "ownerUsername", "owner_username", "profileName", "userName"))
+            or _first(user, ("username", "user_name"))
+        ).lstrip("@").casefold()
+        followers = _recursive_positive_number(
+            item,
+            (*_INSTAGRAM_FOLLOWER_KEYS, "followers"),
+        )
+        if handle and followers > 0:
+            followers_by_handle[handle] = max(
+                followers_by_handle.get(handle, 0),
+                followers,
+            )
+    return followers_by_handle
+
+
+def _backfill_instagram_follower_counts(records: List[Dict], client) -> List[Dict]:
+    """Fetch one profile-detail row per missing creator and update post records.
+
+    Post/Reel actors do not consistently include the owner's follower count.
+    This fallback runs only when a normalized record still has a public creator
+    handle but no follower count, and it batches unique profiles into one actor
+    request rather than requesting the same profile for every post.
+    """
+    missing_handles: List[str] = []
+    seen = set()
+    for record in records:
+        author = record.get("authorMeta") if isinstance(record.get("authorMeta"), dict) else {}
+        handle = _text(author.get("name")).lstrip("@").casefold()
+        followers = _number(
+            author.get("fans") or author.get("followers") or author.get("followerCount")
+        )
+        if handle and followers <= 0 and handle not in seen:
+            seen.add(handle)
+            missing_handles.append(handle)
+    if not missing_handles:
+        return records
+
+    try:
+        details = _run_actor_items(
+            client,
+            INSTAGRAM_POST_ACTOR_ID,
+            {
+                "directUrls": [
+                    f"https://www.instagram.com/{handle}/" for handle in missing_handles
+                ],
+                "resultsType": "details",
+                "resultsLimit": 1,
+                "addProfileStatistics": True,
+            },
+        )
+    except Exception:
+        return records
+
+    followers_by_handle = _instagram_profile_follower_counts(details)
+    for record in records:
+        author = record.get("authorMeta") if isinstance(record.get("authorMeta"), dict) else {}
+        handle = _text(author.get("name")).lstrip("@").casefold()
+        followers = followers_by_handle.get(handle, 0)
+        if followers <= 0:
+            continue
+        updated_author = dict(author)
+        updated_author["fans"] = followers
+        updated_author["followers"] = followers
+        record["authorMeta"] = updated_author
+    return records
 
 
 def scrape_instagram_posts(
@@ -677,7 +785,7 @@ def scrape_instagram_posts(
                 "error": "POST_NOT_FOUND",
                 "errorCode": "POST_NOT_FOUND",
             })
-    return records
+    return _backfill_instagram_follower_counts(records, client)
 
 
 def platform_for_record(record: Optional[Dict], fallback_url: str = "") -> str:
