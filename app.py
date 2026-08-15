@@ -44,6 +44,7 @@ _DASHBOARD_ASSISTANT_API = (
     "dashboard_context_signature",
     "generate_page_assistant_answer",
     "page_help_answer",
+    "taggy_knowledge_answer",
 )
 if any(
     not hasattr(_dashboard_assistant, name)
@@ -60,6 +61,7 @@ dashboard_context_json = _dashboard_assistant.dashboard_context_json
 dashboard_context_signature = _dashboard_assistant.dashboard_context_signature
 generate_page_assistant_answer = _dashboard_assistant.generate_page_assistant_answer
 page_help_answer = _dashboard_assistant.page_help_answer
+taggy_knowledge_answer = _dashboard_assistant.taggy_knowledge_answer
 from ugc_tagger.batch_checkpoint import (
     DEFAULT_CHUNK_SIZE,
     BatchCheckpointStore,
@@ -5600,6 +5602,11 @@ def _render_taggy_chat_content_v68_87(
         messages.append({"role": "user", "content": question})
 
         answer = page_help_answer(int(step), question)
+        trusted_fallback = taggy_knowledge_answer(
+            int(step),
+            question,
+            minimum_score=3.5,
+        )
         # Prefer the current managed key so a replacement Secret is available
         # to the independent companion session immediately.
         gemini_key = clean_api_secret(
@@ -5607,7 +5614,7 @@ def _render_taggy_chat_content_v68_87(
             or st.session_state.get("gemini_key")
         )
         if not answer and not gemini_key:
-            answer = (
+            answer = trusted_fallback or (
                 "I can guide you through this page, but an open-ended answer needs "
                 "the Gemini API key configured in Streamlit Secrets. No scraping was started."
             )
@@ -5629,7 +5636,9 @@ def _render_taggy_chat_content_v68_87(
             except Exception as exc:
                 LOGGER.warning("Taggy assistant request failed (%s)", type(exc).__name__)
                 error_text = safe_str(exc).lower()
-                if any(
+                if trusted_fallback:
+                    answer = trusted_fallback
+                elif any(
                     marker in error_text
                     for marker in ["quota", "429", "resource_exhausted"]
                 ):

@@ -31,6 +31,7 @@ outputs/
 *.json
 !package.json
 !tsconfig.json
+!ugc_tagger/taggy_knowledge.json
 !creative_knowledge/hashtag_rules.json
 !creative_knowledge/keyword_rules.json
 !creative_knowledge/market_rules.json

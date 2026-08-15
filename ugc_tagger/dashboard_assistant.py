@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlencode
 
@@ -135,6 +138,161 @@ PAGE_HELP_ANSWERS = {
         "- Download the final CSV/XLSX or internal QA report when ready."
     ),
 }
+
+TAGGY_KNOWLEDGE_PATH = Path(__file__).with_name("taggy_knowledge.json")
+_TAGGY_STOP_WORDS = {
+    "a",
+    "about",
+    "again",
+    "all",
+    "am",
+    "an",
+    "and",
+    "are",
+    "be",
+    "can",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "please",
+    "should",
+    "the",
+    "this",
+    "to",
+    "use",
+    "what",
+    "when",
+    "where",
+    "why",
+    "will",
+    "with",
+}
+
+
+def _normalized_query(value: object) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _query_tokens(value: object) -> set[str]:
+    return {
+        token
+        for token in _normalized_query(value).split()
+        if len(token) > 1 and token not in _TAGGY_STOP_WORDS
+    }
+
+
+@lru_cache(maxsize=1)
+def load_taggy_knowledge() -> tuple[Dict[str, object], ...]:
+    """Load approved, secret-free help entries without persisting user content."""
+    try:
+        raw_entries = json.loads(TAGGY_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+
+    cleaned: List[Dict[str, object]] = []
+    if not isinstance(raw_entries, list):
+        return ()
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        answer = str(raw_entry.get("answer") or "").strip()
+        entry_id = str(raw_entry.get("id") or "").strip()
+        if not entry_id or not answer:
+            continue
+        cleaned.append(
+            {
+                "id": entry_id,
+                "title": str(raw_entry.get("title") or entry_id).strip(),
+                "steps": tuple(
+                    int(step)
+                    for step in raw_entry.get("steps", [])
+                    if str(step).isdigit()
+                ),
+                "keywords": tuple(
+                    str(keyword).strip()
+                    for keyword in raw_entry.get("keywords", [])
+                    if str(keyword).strip()
+                ),
+                "answer": answer,
+            }
+        )
+    return tuple(cleaned)
+
+
+def _knowledge_score(entry: Mapping[str, object], question: str, step: int) -> float:
+    normalized_question = _normalized_query(question)
+    question_tokens = _query_tokens(question)
+    if not normalized_question or not question_tokens:
+        return 0.0
+
+    keywords = [
+        _normalized_query(keyword)
+        for keyword in entry.get("keywords", ())
+        if _normalized_query(keyword)
+    ]
+    entry_text = " ".join(
+        [str(entry.get("title") or ""), *keywords, str(entry.get("answer") or "")]
+    )
+    entry_tokens = _query_tokens(entry_text)
+    overlap = question_tokens.intersection(entry_tokens)
+    score = float(len(overlap)) * 1.6
+
+    for keyword in keywords:
+        if keyword and keyword in normalized_question:
+            score += 6.0 + min(4.0, len(keyword.split()) * 0.8)
+
+    title = _normalized_query(entry.get("title"))
+    if title and title in normalized_question:
+        score += 4.0
+    if int(step) in entry.get("steps", ()):
+        score += 1.25
+    return score
+
+
+def retrieve_taggy_knowledge(
+    question: str,
+    *,
+    step: int,
+    limit: int = 3,
+    minimum_score: float = 3.5,
+) -> List[Dict[str, object]]:
+    """Return the most relevant approved help entries using local text matching."""
+    ranked: List[Dict[str, object]] = []
+    for entry in load_taggy_knowledge():
+        score = _knowledge_score(entry, question, int(step))
+        if score < float(minimum_score):
+            continue
+        ranked.append({**entry, "score": round(score, 3)})
+    ranked.sort(key=lambda entry: float(entry["score"]), reverse=True)
+    return ranked[: max(1, int(limit))]
+
+
+def taggy_knowledge_answer(
+    step: int,
+    question: str,
+    *,
+    minimum_score: float = 6.0,
+) -> str:
+    """Return one trusted local answer when the question matches approved help."""
+    matches = retrieve_taggy_knowledge(
+        question,
+        step=int(step),
+        limit=1,
+        minimum_score=minimum_score,
+    )
+    return str(matches[0]["answer"]) if matches else ""
 
 MAX_GROUP_ROWS = 12
 MAX_POST_ROWS = 10
@@ -440,6 +598,13 @@ USER_QUESTION:
 def page_help_answer(step: int, question: str) -> str:
     """Answer common page-usage questions locally without an API call."""
     normalized = _text(question, limit=1200).casefold()
+    trusted_answer = taggy_knowledge_answer(
+        int(step),
+        normalized,
+        minimum_score=6.0,
+    )
+    if trusted_answer:
+        return trusted_answer
     help_markers = [
         "how do i use",
         "how to use",
@@ -466,6 +631,16 @@ def build_page_assistant_prompt(
     """Ground Taggy in the current workflow page and available batch data."""
     page_title = PAGE_TITLES.get(int(step), "UGC tagging tool")
     dashboard_prompt = build_dashboard_prompt(question, context_json, history)
+    trusted_matches = retrieve_taggy_knowledge(
+        question,
+        step=int(step),
+        limit=3,
+        minimum_score=3.5,
+    )
+    trusted_help = [
+        {"title": match["title"], "answer": match["answer"]}
+        for match in trusted_matches
+    ]
     return f"""You are Taggy, a friendly guide inside a UGC post tagging tool.
 
 CURRENT_PAGE: {page_title}
@@ -473,8 +648,13 @@ CURRENT_PAGE: {page_title}
 Page guidance:
 {PAGE_HELP_ANSWERS.get(int(step), "Help the user understand the current workflow page.")}
 
+TRUSTED_HELP_KNOWLEDGE:
+{json.dumps(trusted_help, ensure_ascii=False)}
+
 Additional rules:
 - First answer questions about how to use CURRENT_PAGE directly and step by step.
+- Use TRUSTED_HELP_KNOWLEDGE as the source of truth for app behavior, recovery, setup, metric definitions, and scraping limitations.
+- If trusted help and dashboard data cover different topics, keep their claims separate.
 - Never claim that you clicked, uploaded, scraped, tagged, saved, or changed anything.
 - Never ask for, repeat, or expose API keys or tokens.
 - For data questions, follow all grounding rules in the dashboard prompt below.
@@ -536,25 +716,42 @@ def generate_page_assistant_answer(
         context_json=context_json,
         history=history,
     )
-    if request_fn is not None:
-        answer = _answer_text(request_fn(model, prompt))
-    else:
-        from google import genai
-        from google.genai import types
+    try:
+        if request_fn is not None:
+            answer = _answer_text(request_fn(model, prompt))
+        else:
+            from google import genai
+            from google.genai import types
 
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(timeout=45_000),
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=45_000),
+            )
+            response = client.models.generate_content(
+                model=model,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=700,
+                ),
+            )
+            answer = _answer_text(getattr(response, "text", ""))
+    except Exception:
+        trusted_fallback = taggy_knowledge_answer(
+            int(step),
+            question,
+            minimum_score=3.5,
         )
-        response = client.models.generate_content(
-            model=model,
-            contents=[prompt],
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=700,
-            ),
-        )
-        answer = _answer_text(getattr(response, "text", ""))
+        if trusted_fallback:
+            return trusted_fallback
+        raise
     if not answer:
+        trusted_fallback = taggy_knowledge_answer(
+            int(step),
+            question,
+            minimum_score=3.5,
+        )
+        if trusted_fallback:
+            return trusted_fallback
         raise RuntimeError("Taggy returned an empty answer")
     return answer

@@ -1,0 +1,201 @@
+[
+  {
+    "id": "resume_after_closing",
+    "title": "Close the app and continue later",
+    "steps": [4],
+    "keywords": [
+      "close the website",
+      "close the browser",
+      "close the app",
+      "reopen",
+      "continue tomorrow",
+      "continue later",
+      "turn off computer",
+      "restart the app",
+      "resume tagging"
+    ],
+    "answer": "Yes. Wait until the current chunk is saved, then bookmark the recovery link. Reopen that same link later to continue from the saved progress. If no recovery link is shown, use **Save & resume** first; a local-only checkpoint may not survive a cloud app restart."
+  },
+  {
+    "id": "recovery_link",
+    "title": "Save and resume a batch",
+    "steps": [2, 3, 4, 5, 6],
+    "keywords": [
+      "recovery link",
+      "recovery id",
+      "save and resume",
+      "save this batch",
+      "bookmark",
+      "saved batch",
+      "continue batch",
+      "lost progress"
+    ],
+    "answer": "Choose **Save & resume**, then bookmark the page containing the recovery link. The Recovery ID is already carried in that link, so normal users do not need to copy or type it. Use the manual Recovery ID option only when opening a saved batch without its bookmark."
+  },
+  {
+    "id": "tagging_progress",
+    "title": "What happens during tagging",
+    "steps": [4],
+    "keywords": [
+      "what happens during tagging",
+      "tagging progress",
+      "batch protection",
+      "current chunk",
+      "already completed",
+      "rerun posts",
+      "tagging restarted"
+    ],
+    "answer": "Tagging processes the selected posts in protected chunks. Each completed result is checkpointed before the next chunk starts, so a resumed job should continue from unfinished posts instead of repeating completed Gemini work. Keep the page open until the current chunk has finished saving."
+  },
+  {
+    "id": "api_key_limit",
+    "title": "API key or token reaches its limit",
+    "steps": [1, 4],
+    "keywords": [
+      "api key limit",
+      "key reaches its limit",
+      "out of limit",
+      "quota reached",
+      "gemini limit",
+      "apify limit",
+      "replace the key",
+      "change api key"
+    ],
+    "answer": "Wait for the current chunk to save, replace the expired Gemini key or Apify token in Streamlit Secrets, and resume the saved job. Completed posts remain checkpointed. API keys and tokens are not stored in the recovery payload."
+  },
+  {
+    "id": "api_key_setup",
+    "title": "Configure API keys safely",
+    "steps": [1],
+    "keywords": [
+      "set up api key",
+      "add api keys",
+      "streamlit secrets",
+      "gemini api key",
+      "apify token",
+      "where put key",
+      "configure keys"
+    ],
+    "answer": "Add `GEMINI_API_KEY` and `APIFY_TOKEN` in the deployed app's **Settings → Secrets**, then save. Never paste keys into uploaded CSV/XLSX files, recovery links, chat messages, or the GitHub repository."
+  },
+  {
+    "id": "add_posts",
+    "title": "Add posts and files",
+    "steps": [2],
+    "keywords": [
+      "how do i add posts",
+      "upload file",
+      "paste links",
+      "csv xlsx",
+      "current batch",
+      "track artist market",
+      "add uploaded rows"
+    ],
+    "answer": "Upload one or more CSV/XLSX files or paste one TikTok or Instagram post link per line. Confirm the track name, change artist or market only when needed, then add the rows to **Current batch**. Uploaded rows and pasted links are combined, and duplicate links are removed."
+  },
+  {
+    "id": "select_posts",
+    "title": "Choose posts for analysis",
+    "steps": [3],
+    "keywords": [
+      "choose posts",
+      "top posts",
+      "tag every link",
+      "ranking metric",
+      "date range",
+      "select posts"
+    ],
+    "answer": "Choose **Top posts** for a focused sample or **Tag every link** for the complete batch. For Top posts, rank by the metric that matches the objective: Views for reach, Total Engagement for response volume, or Engagement Rate for response relative to views. Apply filters or a date range only when needed."
+  },
+  {
+    "id": "review_posts",
+    "title": "Review tagged posts",
+    "steps": [5],
+    "keywords": [
+      "review a post",
+      "keep edit remove",
+      "check suggested tag",
+      "edit drama details",
+      "human review"
+    ],
+    "answer": "Check the post preview, creator, market, Creative Type, Narrative, and any drama details. Choose **Keep** when the result is correct, edit incorrect labels or details, and choose **Remove** only for an unusable post."
+  },
+  {
+    "id": "export_results",
+    "title": "Review and export results",
+    "steps": [6],
+    "keywords": [
+      "download results",
+      "export csv",
+      "export xlsx",
+      "qa report",
+      "summary dashboard",
+      "export history"
+    ],
+    "answer": "Review the filtered KPIs, creative, market, track, sound, post, and creator sections before exporting. Download CSV/XLSX for the marketing handoff; use the QA report for internal confidence, validation, and review details."
+  },
+  {
+    "id": "metric_definitions",
+    "title": "Batch and three-month creator metrics",
+    "steps": [6],
+    "keywords": [
+      "batch average engagement",
+      "profile average engagement",
+      "posts 3m",
+      "avg views 3m",
+      "avg er 3m",
+      "total views",
+      "total engagement",
+      "engagement rate",
+      "metric definition"
+    ],
+    "answer": "**Posts (3m), Avg. Views (3m), and Avg. ER (3m)** use reachable public posts from the creator's latest three-month profile window. **Posts, Total Views, Total Engagement, and Avg. ER** use only that creator's posts in the current filtered batch. Total Views is therefore not a three-month profile total."
+  },
+  {
+    "id": "metrics_only",
+    "title": "Metrics only versus AI tagging",
+    "steps": [2, 3, 4, 6],
+    "keywords": [
+      "metrics only",
+      "fetch metrics",
+      "without tagging",
+      "no gemini tagging",
+      "likes comments shares saves",
+      "scrape metrics only"
+    ],
+    "answer": "Choose **Metrics only** when you only need available public metrics and calculated engagement fields. It skips Gemini classification and proceeds to the downloadable results after scraping. Choose **AI tagging** when you also need Creative Type, Narrative, and drama analysis."
+  },
+  {
+    "id": "scraping_sources",
+    "title": "Scraping coverage and fallback",
+    "steps": [2, 4, 6],
+    "keywords": [
+      "free scraper",
+      "apify fallback",
+      "scraping limitation",
+      "missing metrics",
+      "views unavailable",
+      "shares unavailable",
+      "saves unavailable",
+      "private deleted post",
+      "instagram scraper",
+      "tiktok scraper"
+    ],
+    "answer": "The app first tries its direct public-data method. When required public fields are missing or the platform blocks that method, it can use Apify as a fallback. Private, deleted, region-restricted, renamed, or rate-limited posts may still be unavailable. A metric should remain unavailable when neither source returns it rather than being presented as a confirmed zero."
+  },
+  {
+    "id": "data_safety",
+    "title": "What recovery stores",
+    "steps": [1, 2, 3, 4, 5, 6],
+    "keywords": [
+      "what is saved",
+      "store api keys",
+      "downloaded videos",
+      "downloaded media",
+      "data privacy",
+      "recovery payload",
+      "supabase data"
+    ],
+    "answer": "Recovery stores only the batch state needed to continue. It must not store Gemini keys, Apify tokens, database credentials, downloaded media, binary files, or local media paths. Downloaded media is temporary and should be deleted after analysis."
+  }
+]
