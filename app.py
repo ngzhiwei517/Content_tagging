@@ -4471,6 +4471,10 @@ METRICS_ONLY_EXPORT_COLUMNS_V68_86 = (
     "Shares Rate", "Saves Rate", "Metrics Status", "Metrics Unavailable",
 )
 
+# ``input_fingerprint`` also separates work by analysis pipeline. Metrics-only
+# runs do not use a Gemini model, so use a stable workflow identifier instead.
+METRICS_ONLY_FINGERPRINT_MODEL_V68_94 = "metrics-only"
+
 
 def _metrics_only_export_frame_v68_86(frame: pd.DataFrame) -> pd.DataFrame:
     """Return the concise, user-facing metrics-only download frame."""
@@ -4497,7 +4501,10 @@ def _start_metrics_only_run_v68_86(
     supported = selected[
         selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
     ].copy().reset_index(drop=True)
-    fingerprint = input_fingerprint(supported)
+    fingerprint = input_fingerprint(
+        supported,
+        METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
+    )
     saved_fingerprint = safe_str(
         st.session_state.get("metrics_only_fingerprint_v68_86")
     )
@@ -4520,7 +4527,10 @@ def _run_metrics_only_chunk_v68_86(
         st.session_state.metrics_only_active_v68_86 = False
         return pd.DataFrame()
 
-    fingerprint = input_fingerprint(supported)
+    fingerprint = input_fingerprint(
+        supported,
+        METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
+    )
     if safe_str(st.session_state.get("metrics_only_fingerprint_v68_86")) != fingerprint:
         st.warning("The selected posts changed. Start the metrics run again.")
         st.session_state.metrics_only_active_v68_86 = False
@@ -9376,7 +9386,8 @@ elif st.session_state.step == 4:
             selected.get("Link", pd.Series(dtype=str)).map(is_supported_link)
         ].copy().reset_index(drop=True)
         selected_fingerprint_v68_86 = input_fingerprint(
-            supported_metrics_selection_v68_86
+            supported_metrics_selection_v68_86,
+            METRICS_ONLY_FINGERPRINT_MODEL_V68_94,
         )
         saved_fingerprint_v68_86 = safe_str(
             st.session_state.get("metrics_only_fingerprint_v68_86")
