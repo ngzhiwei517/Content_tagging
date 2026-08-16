@@ -58,14 +58,15 @@ class AutoTrackDetectionTests(unittest.TestCase):
         )
         self.assertIn('"Campaign Artist": resolved_paste_artist', app_source)
 
-    def test_track_information_note_precedes_pasted_track_input_and_explains_artist_disambiguation(self):
+    def test_pasted_track_input_keeps_artist_disambiguation_without_drama_audio_banner(self):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
             encoding="utf-8"
         )
         paste_section = app_source[app_source.index("with paste_tab:"):]
-        self.assertLess(
-            paste_section.index('st.info(drama_audio_note'),
-            paste_section.index('paste_track = st.text_input(\n                "Track name"'),
+        self.assertNotIn("drama_audio_note", app_source)
+        self.assertIn(
+            'paste_track = st.text_input(\n                "Track name"',
+            paste_section,
         )
         self.assertIn("fill in the optional Artist field", paste_section)
         self.assertIn("campaign_track_lookup", paste_section)

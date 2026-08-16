@@ -9028,11 +9028,6 @@ if st.session_state.step == 2:
     # The demo keeps the established General UGC pipeline. Drama detail remains
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
-    drama_audio_note = (
-        "**For drama audio detection:** include the campaign **Track / Track Name**. "
-        "This lets the app compare **Original, Sped Up, Slowed, or Remix**. "
-        "Without a track name, Audio Version may remain **Unknown**."
-    )
 
     # Track the selected input tab so ordinary widget reruns do not send users
     # back to the upload view while they are completing pasted-link details.
@@ -9044,7 +9039,6 @@ if st.session_state.step == 2:
 
     with add_tab:
         st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok or Instagram post links. You can select multiple files or mix both platforms in one file.</p>", unsafe_allow_html=True)
-        st.info(drama_audio_note, icon=":material/info:")
         files = st.file_uploader(
             "Post data files",
             type=["csv", "xlsx", "xls"],
@@ -9245,7 +9239,6 @@ if st.session_state.step == 2:
 
     with paste_tab:
         st.markdown("<div class='card'><h3>Paste post links</h3><p class='sub'>Paste TikTok or Instagram post links together. The platform is detected automatically for each link.</p>", unsafe_allow_html=True)
-        st.info(drama_audio_note, icon=":material/info:")
         link_text = st.text_area(
             "Post links",
             placeholder="Paste one TikTok or Instagram post link per line",
