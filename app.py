@@ -13,13 +13,14 @@ import html
 import hashlib
 import inspect
 import logging
+import math
 import os
 import json
 import tempfile
 import time
 import uuid
 import requests
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as datetime_time, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
@@ -70,6 +71,7 @@ from ugc_tagger.batch_checkpoint import (
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
     RecoveryCheckpointObjects,
+    checkpoint_error_code,
     create_persistent_checkpoint_backend,
 )
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
@@ -1505,6 +1507,44 @@ def _checkpoint_dataframe_from_payload_v68_15(payload) -> pd.DataFrame:
     return restored
 
 
+def _checkpoint_json_safe_value_v68_96(value):
+    """Return a strictly JSON-safe checkpoint value without binary data."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return None
+    if isinstance(value, (datetime, date, datetime_time)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _checkpoint_json_safe_value_v68_96(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_checkpoint_json_safe_value_v68_96(item) for item in value]
+    # NumPy and pandas scalar values expose ``item``. Convert those before the
+    # final string fallback so numbers remain numbers in restored state.
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            converted = item_method()
+        except (TypeError, ValueError):
+            converted = value
+        if converted is not value:
+            return _checkpoint_json_safe_value_v68_96(converted)
+    isoformat_method = getattr(value, "isoformat", None)
+    if callable(isoformat_method):
+        try:
+            return isoformat_method()
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
 def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
     """Return whether workflow state contains at least one meaningful post."""
     if not hasattr(state, "get"):
@@ -1811,7 +1851,27 @@ def _show_runtime_save_dialog_v68_44() -> None:
     )
     if remote_status == "verified":
         st.success("Saved to the recovery database. This link will work after an app restart.")
-    elif remote_status in {"save_failed", "verify_failed", "read_failed"}:
+    elif remote_status == "auth_failed":
+        st.error(
+            "Supabase rejected the checkpoint key. In Streamlit Secrets, use a current server-side "
+            "secret key (sb_secret_...) and reboot the app."
+        )
+    elif remote_status == "table_missing":
+        st.error(
+            "The Supabase checkpoint table was not found. Run checkpoint_schema.sql once in the "
+            "project's SQL Editor, then try again."
+        )
+    elif remote_status == "permission_denied":
+        st.error(
+            "Supabase denied access to the checkpoint table. Use a server-side secret key rather "
+            "than a publishable or anon key."
+        )
+    elif remote_status in {"timeout", "network_failed", "rate_limited", "service_unavailable"}:
+        st.error(
+            "Supabase was temporarily unavailable or the save took too long. Wait a moment and "
+            "click Continue later again."
+        )
+    elif remote_status in {"save_failed", "http_failed", "verify_failed", "read_failed"}:
         st.error(
             "The database save could not be verified. This link may stop working after an app restart. "
             "Ask the app owner to check the Supabase checkpoint settings."
@@ -1842,12 +1902,15 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
         if key in RUNTIME_DATAFRAME_KEYS_V68_15:
             state_payload[key] = _checkpoint_dataframe_to_payload_v68_15(value)
         else:
-            state_payload[key] = value
+            state_payload[key] = _checkpoint_json_safe_value_v68_96(value)
     payload = {
         "version": APP_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "state": state_payload,
     }
+    # Fail locally before the network request if a future state key introduces
+    # a non-JSON value. Supabase stores this object in a jsonb column.
+    json.dumps(payload, ensure_ascii=False, allow_nan=False)
     has_posts = _runtime_checkpoint_has_posts_v68_44(state_payload)
     try:
         RUNTIME_CHECKPOINT_DIR_V68_15.mkdir(parents=True, exist_ok=True)
@@ -1898,12 +1961,14 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
         st.session_state.runtime_checkpoint_remote_status_v68_96 = status
         return status
     except Exception as exc:
-        st.session_state.runtime_checkpoint_remote_status_v68_96 = "save_failed"
+        failure_status = checkpoint_error_code(exc)
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = failure_status
         LOGGER.warning(
-            "Persistent recovery checkpoint save failed (%s).",
+            "Persistent recovery checkpoint save failed (%s; %s).",
             type(exc).__name__,
+            failure_status,
         )
-        return "save_failed"
+        return failure_status
 
 
 def _render_continue_later_v68_85() -> None:

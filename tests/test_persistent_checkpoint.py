@@ -4,13 +4,14 @@ import json
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict
 from urllib.parse import urlencode
 from unittest.mock import Mock
 
 import pandas as pd
+import requests
 
 from ugc_tagger.batch_checkpoint import BatchCheckpointStore
 from ugc_tagger.persistent_checkpoint import (
@@ -18,6 +19,7 @@ from ugc_tagger.persistent_checkpoint import (
     PostgresCheckpointBackend,
     RecoveryCheckpointObjects,
     SupabaseCheckpointBackend,
+    checkpoint_error_code,
     create_persistent_checkpoint_backend,
 )
 
@@ -403,6 +405,29 @@ class SupabaseBackendTests(unittest.TestCase):
         self.assertNotIn("server-secret", json.dumps(sent))
         self.assertEqual(sent["object_key"], "runtime.json")
 
+    def test_transient_timeout_is_retried_once(self):
+        session = Mock()
+        response = Mock(status_code=201)
+        response.raise_for_status.return_value = None
+        session.post.side_effect = [requests.Timeout("slow"), response]
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            session=session,
+        )
+
+        backend.save("e" * 32, "runtime.json", {"state": {"step": 3}})
+
+        self.assertEqual(session.post.call_count, 2)
+
+    def test_http_failures_map_to_safe_diagnostic_codes(self):
+        response = Mock(status_code=401)
+        error = requests.HTTPError(response=response)
+        self.assertEqual(checkpoint_error_code(error), "auth_failed")
+        response.status_code = 404
+        self.assertEqual(checkpoint_error_code(error), "table_missing")
+        self.assertEqual(checkpoint_error_code(requests.Timeout("slow")), "timeout")
+
     def test_empty_configuration_keeps_local_only_mode(self):
         self.assertIsNone(create_persistent_checkpoint_backend(PersistentCheckpointConfig()))
 
@@ -630,6 +655,89 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             "verified",
         )
         self.assertTrue(remote.objects["runtime.json"]["state"]["batch_df"]["data"])
+
+    def test_runtime_checkpoint_converts_non_dataframe_state_to_strict_json(self):
+        recovery_id = "8" * 32
+        remote = MemoryObjectStore()
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState({
+                "runtime_run_id_v68_15": recovery_id,
+                "batch_df": pd.DataFrame([{
+                    "Link": "https://www.tiktok.com/@creator/video/1"
+                }]),
+                "date_start_v68": date(2026, 8, 1),
+                "track_date_settings_v68": {
+                    "Track A": {
+                        "start": pd.Timestamp("2026-08-01", tz="UTC"),
+                        "window": float("nan"),
+                    }
+                },
+                "rank_metrics": ("Views", "Total Engagement"),
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "math": __import__("math"),
+                "date": date,
+                "datetime_time": __import__("datetime").time,
+                "datetime": datetime,
+                "timezone": timezone,
+                "Path": Path,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "LOGGER": Mock(),
+                "safe_str": lambda value: str(value or "").strip(),
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": (
+                    "batch_df",
+                    "date_start_v68",
+                    "track_date_settings_v68",
+                    "rank_metrics",
+                ),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df"},
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_checkpoint_dataframe_to_payload_v68_15": self.to_payload,
+                "_runtime_checkpoint_path_v68_15": lambda run_id: checkpoint_dir / f"{run_id}.json",
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: None,
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: remote,
+            }
+            namespace["_checkpoint_json_safe_value_v68_96"] = load_function(
+                "_checkpoint_json_safe_value_v68_96",
+                namespace,
+            )
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            status = persist(verify_remote=True)
+
+        saved = remote.objects["runtime.json"]
+        json.dumps(saved, allow_nan=False)
+        self.assertEqual(status, "verified")
+        self.assertEqual(saved["state"]["date_start_v68"], "2026-08-01")
+        self.assertEqual(
+            saved["state"]["track_date_settings_v68"]["Track A"]["start"],
+            "2026-08-01T00:00:00+00:00",
+        )
+        self.assertIsNone(
+            saved["state"]["track_date_settings_v68"]["Track A"]["window"]
+        )
+        self.assertEqual(
+            saved["state"]["rank_metrics"],
+            ["Views", "Total Engagement"],
+        )
 
     def test_managed_secrets_and_private_continue_later_recovery_remain_available(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)

@@ -21,7 +21,36 @@ class PersistentCheckpointConfig:
     supabase_url: str = ""
     supabase_key: str = ""
     table: str = "batch_checkpoint_objects"
-    timeout_seconds: float = 5.0
+    # Recovery payloads can contain a few hundred sanitized post rows. Five
+    # seconds was too aggressive for a cold Supabase project or a larger
+    # batch, so allow enough time for one server-side upsert and readback.
+    timeout_seconds: float = 20.0
+
+
+_TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def checkpoint_error_code(exc: Exception) -> str:
+    """Return a safe diagnostic code without exposing request data or keys."""
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.ConnectionError):
+        return "network_failed"
+    if isinstance(exc, requests.HTTPError):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code == 401:
+            return "auth_failed"
+        if status_code == 403:
+            return "permission_denied"
+        if status_code == 404:
+            return "table_missing"
+        if status_code == 429:
+            return "rate_limited"
+        if isinstance(status_code, int) and status_code >= 500:
+            return "service_unavailable"
+        return "http_failed"
+    return "save_failed"
 
 
 def _validate_identifier(value: str, default: str) -> str:
@@ -48,7 +77,7 @@ class SupabaseCheckpointBackend:
         key: str,
         *,
         table: str = "batch_checkpoint_objects",
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 20.0,
         session: Optional[requests.Session] = None,
     ) -> None:
         raw_url = str(url or "").strip().rstrip("/")
@@ -82,9 +111,31 @@ class SupabaseCheckpointBackend:
             headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
         return headers
 
+    def _request(self, method: str, *args, **kwargs):
+        """Send an idempotent checkpoint request with one transient retry."""
+        operation = getattr(self.session, method)
+        last_error = None
+        for attempt in range(2):
+            try:
+                response = operation(*args, timeout=self.timeout_seconds, **kwargs)
+                status_code = getattr(response, "status_code", None)
+                if attempt == 0 and status_code in _TRANSIENT_HTTP_STATUS:
+                    continue
+                response.raise_for_status()
+                return response
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    continue
+                raise
+        if last_error is not None:  # pragma: no cover - defensive fallback
+            raise last_error
+        raise RuntimeError("Checkpoint request did not return a response.")
+
     def save(self, recovery_id: str, object_key: str, payload: Any) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
-        response = self.session.post(
+        self._request(
+            "post",
             self.endpoint,
             params={"on_conflict": "recovery_id,object_key"},
             headers=self._headers(upsert=True),
@@ -93,13 +144,12 @@ class SupabaseCheckpointBackend:
                 "object_key": object_key,
                 "payload": payload,
             },
-            timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
 
     def load(self, recovery_id: str, object_key: str) -> Any:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
-        response = self.session.get(
+        response = self._request(
+            "get",
             self.endpoint,
             params={
                 "recovery_id": f"eq.{recovery_id}",
@@ -108,16 +158,15 @@ class SupabaseCheckpointBackend:
                 "limit": "1",
             },
             headers=self._headers(),
-            timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
         rows = response.json()
         payload = rows[0].get("payload") if isinstance(rows, list) and rows else None
         return payload if isinstance(payload, (dict, list)) else None
 
     def list_prefix(self, recovery_id: str, prefix: str) -> Dict[str, Any]:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
-        response = self.session.get(
+        response = self._request(
+            "get",
             self.endpoint,
             params={
                 "recovery_id": f"eq.{recovery_id}",
@@ -125,9 +174,7 @@ class SupabaseCheckpointBackend:
                 "select": "object_key,payload",
             },
             headers=self._headers(),
-            timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
         rows = response.json()
         if not isinstance(rows, list):
             return {}
@@ -141,29 +188,27 @@ class SupabaseCheckpointBackend:
 
     def delete(self, recovery_id: str, object_key: str) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
-        response = self.session.delete(
+        self._request(
+            "delete",
             self.endpoint,
             params={
                 "recovery_id": f"eq.{recovery_id}",
                 "object_key": f"eq.{object_key}",
             },
             headers=self._headers(),
-            timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
 
     def delete_prefix(self, recovery_id: str, prefix: str) -> None:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
-        response = self.session.delete(
+        self._request(
+            "delete",
             self.endpoint,
             params={
                 "recovery_id": f"eq.{recovery_id}",
                 "object_key": f"like.{prefix}%",
             },
             headers=self._headers(),
-            timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
 
 
 class PostgresCheckpointBackend:
