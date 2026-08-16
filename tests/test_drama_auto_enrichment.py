@@ -1434,6 +1434,53 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched["drama_format"], "Long-form Drama")
         self.assertIn("Format: Long-form Drama", enriched["content_details"])
 
+    def test_model_short_form_cannot_validate_itself_in_hidden_evidence(self):
+        for title in ("Never Ending Summer", "Love Has Fireworks"):
+            with self.subTest(title=title):
+                enriched = apply_drama_enrichment(
+                    {
+                        "creative_type": ["Movie/Tv/Drama Edits"],
+                        "content_details": "A montage from a television drama.",
+                    },
+                    {
+                        "content_categories": ["Drama Edit"],
+                        "drama_type": "General Drama",
+                        "edit_focus": "Fictional Story",
+                        "drama_format": "Short-form Drama",
+                        "country_region": "China",
+                        "drama_title": title,
+                        "visual_summary": f"A romantic montage from {title}.",
+                        "evidence": [
+                            "This is a short-form drama edit.",
+                            "The post itself is a short TikTok clip.",
+                        ],
+                        "review_reason": "The model inferred short-form from the clip.",
+                    },
+                    {"Caption": f"{title} romantic scene edit"},
+                )
+                self.assertEqual(enriched["drama_format"], "Long-form Drama")
+                self.assertIn("Format: Long-form Drama", enriched["content_details"])
+
+    def test_uploaded_source_short_drama_tag_remains_valid_evidence(self):
+        enriched = apply_drama_enrichment(
+            {
+                "creative_type": ["Movie/Tv/Drama Edits"],
+                "content_details": "A fictional drama montage.",
+            },
+            {
+                "content_categories": ["Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "drama_format": "Short-form Drama",
+                "country_region": "China",
+                "drama_title": "Example Story",
+                "visual_summary": "A montage from Example Story.",
+            },
+            {"Tag": "micro-drama edits"},
+        )
+        self.assertEqual(enriched["drama_format"], "Short-form Drama")
+        self.assertIn("Format: Short-form Drama", enriched["content_details"])
+
     def test_explicit_short_drama_evidence_keeps_model_short_form(self):
         enriched = apply_drama_enrichment(
             {
@@ -2478,7 +2525,11 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
             "visual_summary": "A montage from a Chinese short-form drama.",
             "evidence": ["The title is associated with the Chinese short-drama format."],
         }
-        enriched = apply_drama_enrichment(result, response, {})
+        enriched = apply_drama_enrichment(
+            result,
+            response,
+            {"Caption": "Victory in Love and War #shortdrama #verticaldrama"},
+        )
         self.assertEqual(enriched["drama_format"], "Short-form Drama")
         self.assertIn("Format: Short-form Drama", enriched["content_details"])
 

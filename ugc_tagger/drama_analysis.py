@@ -687,6 +687,30 @@ def _hashtags(row) -> str:
     return " ".join(names)
 
 
+def _source_drama_format_evidence(row) -> str:
+    """Return format evidence that came from the post or uploaded source.
+
+    Model-written summaries, evidence, and review reasons are deliberately not
+    included here.  Otherwise a model can select ``Short-form Drama`` and then
+    repeat the same phrase in its explanation, accidentally satisfying its own
+    guardrail.  Uploaded source tags remain useful because they are independent
+    input supplied before the drama model runs.
+    """
+    values = [_row_caption(row), _hashtags(row)]
+    for key in (
+        "Tag",
+        "Tags",
+        "Source Tag",
+        "Source Tags",
+        "Source Reference Tag",
+        "Reference Tag",
+    ):
+        value = _text(_row_get(row, key))
+        if value:
+            values.append(value)
+    return " ".join(value for value in values if value).casefold()
+
+
 # -----------------------------------------------------------------------------
 # Drama-detail prompt construction
 # -----------------------------------------------------------------------------
@@ -741,6 +765,7 @@ Important evidence rules:
 - A close-up of one actor or cast montage is Cast/Actor Edit unless the evidence is clearly a fictional story scene.
 - Drama Format is production format only: Long-form Drama or Short-form Drama. Never use Fan Edit or Scene Compilation as a format.
 - Short-form Drama requires explicit short/micro/vertical/platform-format evidence. The length of this TikTok clip is not the drama format.
+- Do not justify Short-form Drama merely by repeating that label in your evidence. Cite independent caption, hashtag, title, episode, platform-format or production evidence; otherwise return Long-form Drama.
 - For a Drama Edit with no short-form evidence, use Long-form Drama as the operational default rather than Unknown.
 - Any explicitly identified short-form, short web, vertical or micro drama is Short-form Drama.
 - Only Drama Edit uses drama_format. Short-form Drama is a format, not a separate Content Category. For every other Content Category return Not applicable for drama_format.
@@ -2719,7 +2744,7 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
             f"Region suggestion {region} contradicted explicit {explicit_region} visual evidence"
         )
         region = explicit_region
-    format_evidence = " ".join([
+    model_format_context = " ".join([
         _text(output.get("narrative")),
         _text(output.get("content_details")),
         _text(response.get("visual_summary")),
@@ -2729,10 +2754,20 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
         title,
         *evidence,
     ]).casefold()
+    source_format_evidence = _source_drama_format_evidence(row)
     drama_format = _resolve_drama_format(
         proposed_drama_format,
         content_categories,
-        evidence_blob=format_evidence,
+        # Automated Short-form decisions must be supported by independent
+        # source metadata.  Do not let the model's own summary or evidence
+        # repeat its proposed label and thereby validate itself.  Long-form is
+        # still retained when explicitly selected, and reviewed short-form
+        # titles remain authoritative inside _resolve_drama_format().
+        evidence_blob=(
+            source_format_evidence
+            if proposed_drama_format == "Short-form Drama"
+            else model_format_context
+        ),
         region=region,
         drama_title=title,
         # Gemini occasionally interprets the duration of the TikTok edit as
