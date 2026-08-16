@@ -687,16 +687,57 @@ def _hashtags(row) -> str:
     return " ".join(names)
 
 
+_SHORT_DRAMA_FORMAT_RE = re.compile(
+    r"\b(?:micro[- ]?drama|mini[- ]?drama|vertical[- ]?drama|vertical[- ]?series|"
+    r"short[- ]?drama|short[- ]?form drama|short web drama)\b"
+)
+_LONG_DRAMA_FORMAT_RE = re.compile(
+    r"\b(?:long[- ]?form drama|long[- ]?drama|television drama|tv drama|"
+    r"full[- ]?length (?:drama|series)|drama series)\b"
+)
+
+
+def _strong_post_short_format_evidence(value: str) -> bool:
+    """Require more than a generic ``#shortdrama`` caption hashtag.
+
+    Post captions commonly describe the uploaded edit as a short drama even
+    when the source production is a full television series. Treat caption
+    metadata as production-level evidence only when it contains either two
+    independent format cues, or a specific micro/mini/vertical cue together
+    with episode/series context.
+    """
+    blob = _text(value).casefold()
+    cue_groups = (
+        bool(re.search(r"\b(?:micro|mini)[- ]?drama\b", blob)),
+        bool(re.search(r"\bvertical[- ]?(?:drama|series)\b", blob)),
+        bool(
+            re.search(
+                r"\b(?:short[- ]?form drama|short web drama|short[- ]?drama)\b",
+                blob,
+            )
+        ),
+    )
+    distinct_cues = sum(cue_groups)
+    production_context = bool(
+        re.search(r"\b(?:episode|episodes|series|production|format)\b", blob)
+    )
+    specific_cue = cue_groups[0] or cue_groups[1]
+    return distinct_cues >= 2 or (specific_cue and production_context)
+
+
 def _source_drama_format_evidence(row) -> str:
-    """Return format evidence that came from the post or uploaded source.
+    """Return qualified format evidence from the post or uploaded source.
 
     Model-written summaries, evidence, and review reasons are deliberately not
     included here.  Otherwise a model can select ``Short-form Drama`` and then
     repeat the same phrase in its explanation, accidentally satisfying its own
-    guardrail.  Uploaded source tags remain useful because they are independent
-    input supplied before the drama model runs.
+    guardrail. Uploaded source tags remain useful because they are independent
+    input supplied before the drama model runs. A lone generic short-drama
+    hashtag is deliberately excluded because it often describes the edit, not
+    the source production.
     """
-    values = [_row_caption(row), _hashtags(row)]
+    post_values = [_row_caption(row), _hashtags(row)]
+    trusted_values = []
     for key in (
         "Tag",
         "Tags",
@@ -707,8 +748,19 @@ def _source_drama_format_evidence(row) -> str:
     ):
         value = _text(_row_get(row, key))
         if value:
-            values.append(value)
-    return " ".join(value for value in values if value).casefold()
+            trusted_values.append(value)
+
+    post_blob = " ".join(value for value in post_values if value).casefold()
+    trusted_blob = " ".join(trusted_values).casefold()
+    combined = " ".join(value for value in (trusted_blob, post_blob) if value)
+
+    if _LONG_DRAMA_FORMAT_RE.search(combined):
+        return combined
+    if _SHORT_DRAMA_FORMAT_RE.search(trusted_blob):
+        return trusted_blob
+    if _strong_post_short_format_evidence(post_blob):
+        return post_blob
+    return ""
 
 
 # -----------------------------------------------------------------------------
@@ -2485,12 +2537,13 @@ def _resolve_drama_format(
 
     selected = _choice(value, FORMATS, DRAMA_FORMAT_ALIASES)
     blob = _text(evidence_blob).casefold()
-    micro_cue = bool(re.search(
-        r"\b(?:micro[- ]?drama|mini[- ]?drama|vertical drama|vertical series|"
-        r"short[- ]?drama|short[- ]?form drama|short web drama)\b",
-        blob,
-    ))
+    long_cue = bool(_LONG_DRAMA_FORMAT_RE.search(blob))
+    micro_cue = bool(_SHORT_DRAMA_FORMAT_RE.search(blob))
     reviewed_short_title = _clean_title(drama_title) in KNOWN_SHORT_FORM_DRAMA_TITLES
+    # Independent long-form evidence takes priority over an automated
+    # Short-form guess or a generic short-drama hashtag attached to the post.
+    if long_cue:
+        return "Long-form Drama"
     # Strong reviewed title/format evidence outranks a model-selected Long-form
     # value. This avoids repeating an incorrect model guess across every post
     # from a known short-form production.
