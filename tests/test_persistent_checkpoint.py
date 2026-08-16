@@ -359,6 +359,17 @@ class PersistentLargeBatchTests(unittest.TestCase):
 
 
 class SupabaseBackendTests(unittest.TestCase):
+    def test_data_api_url_is_normalized_to_project_url(self):
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co/rest/v1/",
+            "sb_secret_example",
+        )
+        self.assertEqual(backend.url, "https://project.supabase.co")
+        self.assertEqual(
+            backend.endpoint,
+            "https://project.supabase.co/rest/v1/batch_checkpoint_objects",
+        )
+
     def test_new_secret_key_uses_apikey_header_without_bearer_auth(self):
         backend = SupabaseCheckpointBackend(
             "https://project.supabase.co",
@@ -567,6 +578,59 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             after = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             self.assertEqual(after, populated)
 
+    def test_continue_later_verifies_remote_runtime_checkpoint(self):
+        recovery_id = "7" * 32
+        remote = MemoryObjectStore()
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState({
+                "runtime_run_id_v68_15": recovery_id,
+                "batch_df": pd.DataFrame([
+                    {"Link": "https://www.tiktok.com/@creator/video/1"}
+                ]),
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "datetime": datetime,
+                "timezone": timezone,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "LOGGER": Mock(),
+                "safe_str": lambda value: str(value or "").strip(),
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": ("batch_df",),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df"},
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_checkpoint_dataframe_to_payload_v68_15": self.to_payload,
+                "_runtime_checkpoint_path_v68_15": lambda run_id: checkpoint_dir / f"{run_id}.json",
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: None,
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: remote,
+            }
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            status = persist(verify_remote=True)
+
+        self.assertEqual(status, "verified")
+        self.assertEqual(
+            FakeStreamlit.session_state.runtime_checkpoint_remote_status_v68_96,
+            "verified",
+        )
+        self.assertTrue(remote.objects["runtime.json"]["state"]["batch_df"]["data"])
+
     def test_managed_secrets_and_private_continue_later_recovery_remain_available(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', APP_SOURCE)
@@ -612,7 +676,9 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             "_runtime_checkpoint_has_posts_v68_44": lambda state: isinstance(
                 state.get("batch_df"), pd.DataFrame
             ) and not state["batch_df"].empty,
-            "_persist_runtime_checkpoint_v68_15": lambda: events.append("persist"),
+            "_persist_runtime_checkpoint_v68_15": lambda **kwargs: events.append(
+                ("persist", kwargs)
+            ),
             "_show_runtime_save_dialog_v68_44": lambda: events.append("dialog"),
         }
         render = load_function("_render_continue_later_v68_85", namespace)
@@ -628,7 +694,10 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertEqual(events[0], ("columns", [5, 1]))
         self.assertEqual(events[1][0:2], ("button", "Continue later"))
         self.assertEqual(events[1][2]["key"], "runtime_continue_later_v68_85")
-        self.assertEqual(events[-2:], ["persist", "dialog"])
+        self.assertEqual(
+            events[-2:],
+            [("persist", {"verify_remote": True}), "dialog"],
+        )
 
     def test_save_link_hides_recovery_id_inside_the_url(self):
         recovery_id = "e" * 32

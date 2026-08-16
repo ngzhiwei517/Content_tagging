@@ -1711,8 +1711,15 @@ def _load_remote_runtime_checkpoint_v68_44(run_id: str):
         return None
     try:
         payload = store.load("runtime.json")
+        if isinstance(payload, dict):
+            st.session_state.runtime_checkpoint_remote_status_v68_96 = "loaded"
         return payload if isinstance(payload, dict) else None
-    except Exception:
+    except Exception as exc:
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = "read_failed"
+        LOGGER.warning(
+            "Persistent recovery checkpoint read failed (%s).",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -1799,8 +1806,22 @@ def _taggy_companion_url_v68_87(step: int) -> str:
 @st.dialog("Continue later")
 def _show_runtime_save_dialog_v68_44() -> None:
     recovery_url = _runtime_recovery_url_v68_44()
-    st.markdown("**Your progress is already saved automatically.**")
-    st.caption("Copy the private link below to continue later.")
+    remote_status = safe_str(
+        st.session_state.get("runtime_checkpoint_remote_status_v68_96")
+    )
+    if remote_status == "verified":
+        st.success("Saved to the recovery database. This link will work after an app restart.")
+    elif remote_status in {"save_failed", "verify_failed", "read_failed"}:
+        st.error(
+            "The database save could not be verified. This link may stop working after an app restart. "
+            "Ask the app owner to check the Supabase checkpoint settings."
+        )
+    else:
+        st.warning(
+            "This batch is saved only on the current app server. Configure Supabase/Postgres before "
+            "relying on this link after an app restart."
+        )
+    st.caption("Copy and keep this private recovery link.")
     if recovery_url:
         st.code(recovery_url, language=None)
         st.caption("Use the copy button on the link. Keep it private because it can reopen this batch.")
@@ -1808,11 +1829,11 @@ def _show_runtime_save_dialog_v68_44() -> None:
         st.warning("The save link is not ready yet. Close this window and try again.")
 
 
-def _persist_runtime_checkpoint_v68_15() -> None:
+def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
     """Autosave non-secret workflow data so a reconnect can resume safely."""
     run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
     if not run_id:
-        return
+        return "not_ready"
     state_payload = {}
     for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
         if key not in st.session_state:
@@ -1851,13 +1872,38 @@ def _persist_runtime_checkpoint_v68_15() -> None:
     # Do not create remote rows for anonymous visits or empty test sessions.
     # Local checkpointing remains available from the first render.
     if not has_posts:
-        return
+        return "not_ready"
     remote_store = _checkpoint_objects_v68_44(run_id)
-    if remote_store is not None:
-        try:
-            remote_store.save("runtime.json", payload)
-        except Exception:
-            pass
+    if remote_store is None:
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = "local_only"
+        return "local_only"
+    try:
+        remote_store.save("runtime.json", payload)
+        status = "saved"
+        if verify_remote:
+            saved_payload = remote_store.load("runtime.json")
+            saved_state = (
+                saved_payload.get("state", {})
+                if isinstance(saved_payload, dict)
+                else {}
+            )
+            if (
+                not isinstance(saved_payload, dict)
+                or safe_str(saved_payload.get("saved_at")) != payload["saved_at"]
+                or not _runtime_checkpoint_has_posts_v68_44(saved_state)
+            ):
+                status = "verify_failed"
+            else:
+                status = "verified"
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = status
+        return status
+    except Exception as exc:
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = "save_failed"
+        LOGGER.warning(
+            "Persistent recovery checkpoint save failed (%s).",
+            type(exc).__name__,
+        )
+        return "save_failed"
 
 
 def _render_continue_later_v68_85() -> None:
@@ -1872,7 +1918,7 @@ def _render_continue_later_v68_85() -> None:
             help="Copy a private link that reopens this batch.",
             width="stretch",
         ):
-            _persist_runtime_checkpoint_v68_15()
+            _persist_runtime_checkpoint_v68_15(verify_remote=True)
             _show_runtime_save_dialog_v68_44()
 
 
@@ -1973,6 +2019,10 @@ def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
             pass
     else:
         st.session_state.runtime_resume_notice_v68_15 = True
+        st.session_state.runtime_checkpoint_restore_failed_v68_96 = False
+
+    if requested_id and not restored:
+        st.session_state.runtime_checkpoint_restore_failed_v68_96 = True
 
     # A bookmarked run with no restored rows may have hit a transient remote
     # read failure. Keep retrying on later reruns instead of permanently
@@ -10051,7 +10101,13 @@ elif st.session_state.step == 5:
         st.caption(f"Analysis model: {gemini_model_label(comparison_model_display)}")
 
     if tagged.empty:
-        st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)
+        if st.session_state.get("runtime_checkpoint_restore_failed_v68_96"):
+            st.error(
+                "This recovery link was recognised, but its saved batch could not be loaded from the "
+                "recovery database. Ask the app owner to check the Supabase checkpoint settings before rerunning."
+            )
+        else:
+            st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)
         if st.button("Go to Run Tagging", type="primary"):
             go(4)
         st.stop()
