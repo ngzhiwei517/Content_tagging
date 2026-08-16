@@ -2443,6 +2443,7 @@ def _resolve_drama_format(
     evidence_blob: str = "",
     region: str = "Unknown",
     drama_title: str = "",
+    require_short_evidence: bool = False,
 ) -> str:
     """Return a usable production format without leaking Unknown as N/A.
 
@@ -2450,6 +2451,8 @@ def _resolve_drama_format(
     needs positive evidence; otherwise the product uses Long-form as
     its explicit operational default.  This avoids presenting a failed
     detection for Entertainment News, K-pop Show Cut, Daily Vlog, Anime, etc.
+    Automated model output can require that positive evidence before accepting
+    a Short-form value; human-reviewed selections remain authoritative.
     """
     category_set = set(_content_categories(categories))
     if "Drama Edit" not in category_set:
@@ -2468,7 +2471,7 @@ def _resolve_drama_format(
     # from a known short-form production.
     if micro_cue or reviewed_short_title:
         return "Short-form Drama"
-    if selected == "Short-form Drama":
+    if selected == "Short-form Drama" and not require_short_evidence:
         return selected
     if selected == "Long-form Drama":
         return selected
@@ -2732,6 +2735,11 @@ def apply_drama_enrichment(result: Dict, response: Mapping, row=None, http_get=N
         evidence_blob=format_evidence,
         region=region,
         drama_title=title,
+        # Gemini occasionally interprets the duration of the TikTok edit as
+        # the source production format. Automated tagging must therefore keep
+        # Short-form only when the post evidence explicitly says short, micro,
+        # mini, vertical, or names a reviewed short-form production.
+        require_short_evidence=True,
     )
 
     if "Drama Edit" not in content_categories and "CP Edit" not in content_categories:
