@@ -1501,6 +1501,53 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched["drama_format"], "Short-form Drama")
         self.assertIn("Format: Short-form Drama", enriched["content_details"])
 
+    def test_lone_shortdrama_hashtag_does_not_define_source_production_format(self):
+        enriched = apply_drama_enrichment(
+            {
+                "creative_type": ["Movie/Tv/Drama Edits"],
+                "content_details": "A historical television-drama montage.",
+            },
+            {
+                "content_categories": ["Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "drama_format": "Short-form Drama",
+                "country_region": "China",
+                "drama_title": "The Legend of Rosy Clouds",
+                "visual_summary": (
+                    "Historical-costume scenes from The Legend of Rosy Clouds."
+                ),
+            },
+            {"Caption": "The Legend of Rosy Clouds edit #shortdrama"},
+        )
+        self.assertEqual(enriched["drama_format"], "Long-form Drama")
+        self.assertIn("Format: Long-form Drama", enriched["content_details"])
+
+    def test_uploaded_longform_tag_overrides_model_short_form_guess(self):
+        enriched = apply_drama_enrichment(
+            {
+                "creative_type": ["Movie/Tv/Drama Edits"],
+                "content_details": "A historical television-drama montage.",
+            },
+            {
+                "content_categories": ["Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "drama_format": "Short-form Drama",
+                "country_region": "China",
+                "drama_title": "The Legend of Rosy Clouds",
+                "visual_summary": (
+                    "Historical-costume scenes from The Legend of Rosy Clouds."
+                ),
+            },
+            {
+                "Caption": "The Legend of Rosy Clouds edit #shortdrama",
+                "Tags": "chinese longform drama edits, thelegendofrosyclouds",
+            },
+        )
+        self.assertEqual(enriched["drama_format"], "Long-form Drama")
+        self.assertIn("Format: Long-form Drama", enriched["content_details"])
+
     def test_non_drama_detail_category_omits_format_instead_of_unknown(self):
         enriched = apply_drama_enrichment(
             {
