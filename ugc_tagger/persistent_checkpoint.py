@@ -51,7 +51,12 @@ class SupabaseCheckpointBackend:
         timeout_seconds: float = 5.0,
         session: Optional[requests.Session] = None,
     ) -> None:
-        self.url = str(url or "").strip().rstrip("/")
+        raw_url = str(url or "").strip().rstrip("/")
+        # Supabase displays both the project URL and a Data API URL ending in
+        # ``/rest/v1/``.  Accept either form.  Without this normalization the
+        # endpoint became ``.../rest/v1/rest/v1/<table>`` and remote writes
+        # failed while the same-process local fallback appeared to work.
+        self.url = re.sub(r"/rest/v1$", "", raw_url, flags=re.IGNORECASE)
         self.key = str(key or "").strip()
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
         self.timeout_seconds = float(timeout_seconds)
