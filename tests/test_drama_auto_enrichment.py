@@ -1410,6 +1410,50 @@ class DramaAutoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched["drama_format"], "Long-form Drama")
         self.assertIn("Format: Long-form Drama", enriched["content_details"])
 
+    def test_model_short_form_without_source_format_evidence_defaults_to_long_form(self):
+        enriched = apply_drama_enrichment(
+            {
+                "creative_type": ["Movie/Tv/Drama Edits"],
+                "content_details": "An emotional montage from a Chinese television drama.",
+            },
+            {
+                "content_categories": ["Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "drama_format": "Short-form Drama",
+                "country_region": "China",
+                "drama_title": "Unknown",
+                "visual_summary": (
+                    "A montage of emotional scenes featuring a Chinese actress "
+                    "alongside other cast members in a dramatic setting."
+                ),
+                "evidence": ["The post shows fictional scenes and cast members."],
+            },
+            {"Caption": "Emotional drama edit", "Track": "Marilag"},
+        )
+        self.assertEqual(enriched["drama_format"], "Long-form Drama")
+        self.assertIn("Format: Long-form Drama", enriched["content_details"])
+
+    def test_explicit_short_drama_evidence_keeps_model_short_form(self):
+        enriched = apply_drama_enrichment(
+            {
+                "creative_type": ["Movie/Tv/Drama Edits"],
+                "content_details": "A fictional vertical-series montage.",
+            },
+            {
+                "content_categories": ["Drama Edit"],
+                "drama_type": "General Drama",
+                "edit_focus": "Fictional Story",
+                "drama_format": "Short-form Drama",
+                "country_region": "China",
+                "drama_title": "Unknown",
+                "visual_summary": "A montage from a vertical micro-drama series.",
+            },
+            {"Caption": "New episode #microdrama"},
+        )
+        self.assertEqual(enriched["drama_format"], "Short-form Drama")
+        self.assertIn("Format: Short-form Drama", enriched["content_details"])
+
     def test_non_drama_detail_category_omits_format_instead_of_unknown(self):
         enriched = apply_drama_enrichment(
             {
