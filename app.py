@@ -6034,17 +6034,17 @@ def _render_taggy_chat_content_v68_87(
             st.markdown(safe_str(message.get("content")))
 
     suggested_question = None
-    if not messages:
-        suggestions = PAGE_CHAT_SUGGESTIONS.get(int(step), DASHBOARD_CHAT_SUGGESTIONS)
-        suggested_label = st.pills(
-            "Try asking",
-            list(suggestions),
-            key=suggestions_key,
-            label_visibility="collapsed",
-            width="stretch",
-        )
-        if suggested_label:
-            suggested_question = suggestions.get(suggested_label)
+    suggestions = PAGE_CHAT_SUGGESTIONS.get(int(step), DASHBOARD_CHAT_SUGGESTIONS)
+    with st.container(horizontal=True, gap="small"):
+        for suggestion_index, (suggestion_label, suggestion_text) in enumerate(
+            suggestions.items()
+        ):
+            if st.button(
+                suggestion_label,
+                key=f"{suggestions_key}_{suggestion_index}",
+                width="content",
+            ):
+                suggested_question = suggestion_text
 
     typed_question = st.chat_input(
         "Ask Taggy a question",
