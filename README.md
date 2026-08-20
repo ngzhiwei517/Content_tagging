@@ -7,6 +7,7 @@ A Streamlit application for tagging, reviewing, and reporting TikTok and Instagr
 ## Key capabilities
 
 - Upload multiple CSV/XLSX files or paste TikTok and Instagram post links.
+- Optionally search TikTok sounds and import MelodyIQ report rows directly by track.
 - Combine both platforms in one batch with duplicate-link detection.
 - Collect public metadata through direct retrieval first, with selective Apify fallback.
 - Classify creative types with Gemini multimodal analysis and reusable guardrails.
@@ -64,7 +65,14 @@ Store deployment credentials in Streamlit Secrets:
 ```toml
 GEMINI_API_KEY = "replace-with-the-deployment-key"
 APIFY_TOKEN = "replace-with-the-deployment-token"
+MELODYIQ_API_KEY = "replace-with-the-optional-MelodyIQ-key"
 ```
+
+`MELODYIQ_API_KEY` is optional. When configured, Add Posts can search for a
+track, create a temporary MelodyIQ report, and import either a ranked subset or
+up to 100,000 rows from its TikTok report export. The default import limit is
+20,000 rows to protect Streamlit memory. The temporary report can be deleted
+after import so it no longer counts toward the shared MelodyIQ report limit.
 
 Never commit real credentials. For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the values there.
 
