@@ -36,9 +36,18 @@ class MelodyIQImportUiTests(unittest.TestCase):
         source = _function_source("render_melodyiq_import_v68_97")
 
         self.assertIn('st.markdown("### Find posts by track")', source)
-        self.assertIn('"Find TikTok posts"', source)
-        self.assertIn('"Prepare posts from selected sounds"', source)
-        self.assertIn('st.markdown(f"#### Prepared reports ({len(queue)})")', source)
+        self.assertIn('"Find track"', source)
+        self.assertIn('"Create report"', source)
+        self.assertIn('st.markdown(f"#### Reports ({len(queue)})")', source)
+
+    def test_report_creation_copy_is_concise_and_supports_multiple_reports(self):
+        source = _function_source("render_melodyiq_import_v68_97")
+
+        self.assertIn('"Review matched TikTok sounds"', source)
+        self.assertIn("You can create multiple reports at the same time", source)
+        self.assertIn("after import to free a report slot.", source)
+        self.assertNotIn("Prepare another standard report?", source)
+        self.assertNotIn("Prepare posts from selected sounds", source)
 
     def test_report_creation_appends_without_replacing_existing_reports(self):
         source = _function_source("render_melodyiq_import_v68_97")
@@ -54,16 +63,46 @@ class MelodyIQImportUiTests(unittest.TestCase):
     def test_each_report_uses_independent_widget_keys_and_cleanup(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")
 
-        self.assertIn('key=f"melodyiq_import_mode_{report_key}"', source)
+        self.assertIn('f"melodyiq_report_scope_{report_key}"', source)
         self.assertIn('key=f"melodyiq_import_posts_{report_key}"', source)
         self.assertIn('key=f"melodyiq_delete_report_{report_key}"', source)
         self.assertIn("client.delete_report(report_id)", source)
         self.assertIn("_melodyiq_remove_report_v68_100(report_id)", source)
 
+    def test_report_creation_saves_the_requested_import_scope(self):
+        source = _function_source("render_melodyiq_import_v68_97")
+
+        self.assertIn("_render_melodyiq_import_plan_controls_v68_101(", source)
+        self.assertIn('"import_scope": import_plan', source)
+
+    def test_import_scope_offers_top_latest_and_all(self):
+        source = _function_source(
+            "_render_melodyiq_import_plan_controls_v68_101"
+        )
+        constants = APP_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('"top": "Top posts"', constants)
+        self.assertIn('"latest": "Latest posts"', constants)
+        self.assertIn('"all": "All posts"', constants)
+        self.assertIn("st.segmented_control(", source)
+        self.assertIn('"Number of posts"', source)
+        self.assertIn('"Number of recent posts"', source)
+        self.assertIn('"Maximum rows to import"', source)
+
+    def test_ready_report_applies_its_saved_import_scope(self):
+        source = _function_source("_render_melodyiq_report_card_v68_100")
+
+        self.assertIn('if import_plan["mode"] == "all":', source)
+        self.assertIn('"postCreatedAt"', source)
+        self.assertIn('limit=int(import_plan["limit"])', source)
+        self.assertIn('sort_field=sort_field', source)
+        self.assertIn('max_rows=int(import_plan["limit"])', source)
+
     def test_report_queue_migrates_legacy_single_report(self):
         source = _function_source("_melodyiq_report_queue_v68_100")
 
         self.assertIn('st.session_state.pop("melodyiq_report_v68_97", None)', source)
+        self.assertIn('value["import_scope"] = _melodyiq_import_plan_v68_101(', source)
         self.assertIn("st.session_state.melodyiq_reports_v68_100 = queue", source)
 
     def test_pending_report_refreshes_automatically(self):

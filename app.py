@@ -3073,6 +3073,10 @@ def _melodyiq_report_queue_v68_100() -> List[Dict]:
     """Return the session's report queue and migrate the former single report."""
     raw_queue = st.session_state.get("melodyiq_reports_v68_100", [])
     queue = [dict(value) for value in raw_queue if isinstance(value, dict)]
+    for value in queue:
+        value["import_scope"] = _melodyiq_import_plan_v68_101(
+            value.get("import_scope")
+        )
 
     legacy_report = st.session_state.pop("melodyiq_report_v68_97", None)
     legacy_id = (
@@ -3090,6 +3094,7 @@ def _melodyiq_report_queue_v68_100() -> List[Dict]:
                 "track": safe_str(st.session_state.get("melodyiq_track_v68_97")),
                 "artist": safe_str(st.session_state.get("melodyiq_artist_v68_97")),
                 "sound_ids": [],
+                "import_scope": _melodyiq_import_plan_v68_101(),
             }
         )
 
@@ -3117,6 +3122,147 @@ def _melodyiq_report_key_v68_100(report_id: str) -> str:
     """Return a stable Streamlit-safe suffix for widgets in one report card."""
     clean = re.sub(r"[^A-Za-z0-9_-]", "", safe_str(report_id))
     return clean or hashlib.sha256(safe_str(report_id).encode("utf-8")).hexdigest()[:16]
+
+
+MELODYIQ_IMPORT_MODE_LABELS_V68_101 = {
+    "top": "Top posts",
+    "latest": "Latest posts",
+    "all": "All posts",
+}
+MELODYIQ_IMPORT_SORT_FIELDS_V68_101 = {
+    "Views": "viewCount",
+    "Likes": "likeCount",
+    "Comments": "commentCount",
+    "Shares": "shareCount",
+    "Followers": "creatorFollowerCount",
+    "Impact rank": "rank",
+}
+
+
+def _melodyiq_import_plan_v68_101(value: Optional[Dict] = None) -> Dict:
+    """Return a safe per-report import plan, including for older queue entries."""
+    raw = value if isinstance(value, dict) else {}
+    mode = safe_str(raw.get("mode")).lower()
+    if mode not in MELODYIQ_IMPORT_MODE_LABELS_V68_101:
+        mode = "top"
+    sort_field = safe_str(raw.get("sort_field")) or "viewCount"
+    if sort_field not in MELODYIQ_IMPORT_SORT_FIELDS_V68_101.values():
+        sort_field = "viewCount"
+    default_limit = 20000 if mode == "all" else 100
+    limit = clean_num(raw.get("limit")) or default_limit
+    return {
+        "mode": mode,
+        "limit": max(int(limit), 1),
+        "sort_field": sort_field,
+    }
+
+
+def _melodyiq_import_plan_caption_v68_101(plan: Dict) -> str:
+    """Describe one report's import scope in concise user-facing language."""
+    normalized = _melodyiq_import_plan_v68_101(plan)
+    mode = normalized["mode"]
+    limit = normalized["limit"]
+    if mode == "latest":
+        return f"Latest {limit:,} posts"
+    if mode == "all":
+        return f"All available posts, up to a {limit:,}-row safety limit"
+    sort_label = next(
+        (
+            label
+            for label, field in MELODYIQ_IMPORT_SORT_FIELDS_V68_101.items()
+            if field == normalized["sort_field"]
+        ),
+        "Views",
+    )
+    return f"Top {limit:,} posts by {sort_label.lower()}"
+
+
+def _render_melodyiq_import_plan_controls_v68_101(
+    key_prefix: str,
+    *,
+    initial: Optional[Dict] = None,
+    show_report_note: bool = True,
+) -> Dict:
+    """Render one concise Top/Latest/All import choice."""
+    plan = _melodyiq_import_plan_v68_101(initial)
+    mode_labels = list(MELODYIQ_IMPORT_MODE_LABELS_V68_101.values())
+    selected_label = st.segmented_control(
+        "Posts to import",
+        mode_labels,
+        default=MELODYIQ_IMPORT_MODE_LABELS_V68_101[plan["mode"]],
+        key=f"{key_prefix}_mode",
+        width="stretch",
+    )
+    selected_mode = next(
+        (
+            mode
+            for mode, label in MELODYIQ_IMPORT_MODE_LABELS_V68_101.items()
+            if label == selected_label
+        ),
+        plan["mode"],
+    )
+
+    limit = plan["limit"]
+    sort_field = plan["sort_field"]
+    if selected_mode == "top":
+        limit_col, sort_col = st.columns(2)
+        with limit_col:
+            limit = st.number_input(
+                "Number of posts",
+                min_value=1,
+                max_value=10000,
+                value=min(max(int(limit), 1), 10000),
+                step=50,
+                key=f"{key_prefix}_limit_top",
+            )
+        with sort_col:
+            current_sort_label = next(
+                (
+                    label
+                    for label, field in MELODYIQ_IMPORT_SORT_FIELDS_V68_101.items()
+                    if field == sort_field
+                ),
+                "Views",
+            )
+            sort_label = st.selectbox(
+                "Rank by",
+                list(MELODYIQ_IMPORT_SORT_FIELDS_V68_101),
+                index=list(MELODYIQ_IMPORT_SORT_FIELDS_V68_101).index(
+                    current_sort_label
+                ),
+                key=f"{key_prefix}_sort",
+            )
+            sort_field = MELODYIQ_IMPORT_SORT_FIELDS_V68_101[sort_label]
+    elif selected_mode == "latest":
+        limit = st.number_input(
+            "Number of recent posts",
+            min_value=1,
+            max_value=10000,
+            value=min(max(int(limit), 1), 10000),
+            step=50,
+            key=f"{key_prefix}_limit_latest",
+        )
+    else:
+        limit = st.number_input(
+            "Maximum rows to import",
+            min_value=100,
+            max_value=100000,
+            value=min(max(int(limit), 100), 100000),
+            step=1000,
+            help="A safety limit protects Streamlit from very large report exports.",
+            key=f"{key_prefix}_limit_all",
+        )
+
+    if show_report_note:
+        st.caption(
+            "MelodyIQ prepares the complete report first. This choice controls "
+            "which posts are added to Current batch after it is ready."
+        )
+    return {
+        "mode": selected_mode,
+        "limit": int(limit),
+        "sort_field": sort_field,
+    }
 
 
 @st.fragment(run_every=10)
@@ -3223,52 +3369,23 @@ def _render_melodyiq_report_card_v68_100(
         if not ready:
             st.info("MelodyIQ is preparing this report. Its status refreshes automatically.")
         else:
-            import_mode = st.radio(
-                "What would you like to add?",
-                ["Report export", "Top impactful posts"],
-                horizontal=True,
-                key=f"melodyiq_import_mode_{report_key}",
-            )
-            sort_field = "viewCount"
-            top_count = 100
-            report_row_limit = 20000
-            if import_mode == "Report export":
-                report_row_limit = st.number_input(
-                    "Maximum rows to import",
-                    min_value=100,
-                    max_value=100000,
-                    value=20000,
-                    step=1000,
-                    help=(
-                        "The importer supports more than 10,000 rows. Start with "
-                        "20,000; larger batches need more Streamlit memory and time."
-                    ),
-                    key=f"melodyiq_report_row_limit_{report_key}",
+            import_plan = _melodyiq_import_plan_v68_101(entry.get("import_scope"))
+            st.caption(f"Import selection: {_melodyiq_import_plan_caption_v68_101(import_plan)}")
+            with st.expander("Change import selection"):
+                updated_plan = _render_melodyiq_import_plan_controls_v68_101(
+                    f"melodyiq_report_scope_{report_key}",
+                    initial=import_plan,
+                    show_report_note=False,
                 )
-            else:
-                top_col, sort_col = st.columns(2)
-                with top_col:
-                    top_count = st.number_input(
-                        "Number of posts",
-                        min_value=1,
-                        max_value=10000,
-                        value=100,
-                        step=50,
-                        key=f"melodyiq_top_count_{report_key}",
-                    )
-                with sort_col:
-                    sort_label = st.selectbox(
-                        "Rank by",
-                        ["Views", "Likes", "Comments", "Shares", "Impact rank"],
-                        key=f"melodyiq_sort_label_{report_key}",
-                    )
-                    sort_field = {
-                        "Views": "viewCount",
-                        "Likes": "likeCount",
-                        "Comments": "commentCount",
-                        "Shares": "shareCount",
-                        "Impact rank": "rank",
-                    }[sort_label]
+            if updated_plan != import_plan:
+                queue = _melodyiq_report_queue_v68_100()
+                for queue_entry in queue:
+                    if safe_str(queue_entry.get("report_id")) == report_id:
+                        queue_entry["import_scope"] = updated_plan
+                        break
+                _melodyiq_save_report_queue_v68_100(queue)
+                entry["import_scope"] = updated_plan
+                import_plan = updated_plan
 
             delete_after = st.checkbox(
                 "Delete this temporary report after a successful import",
@@ -3286,11 +3403,11 @@ def _render_melodyiq_report_card_v68_100(
                 key=f"melodyiq_import_posts_{report_key}",
             ):
                 try:
-                    if import_mode == "Report export":
+                    if import_plan["mode"] == "all":
                         export_url = safe_str(tiktok_report.get("postsExportUrl"))
                         raw = client.download_csv(
                             export_url,
-                            max_rows=int(report_row_limit),
+                            max_rows=int(import_plan["limit"]),
                         )
                         imported = _melodyiq_import_rows_v68_97(
                             raw,
@@ -3299,9 +3416,14 @@ def _render_melodyiq_report_card_v68_100(
                             artist=artist_value,
                         )
                     else:
+                        sort_field = (
+                            "postCreatedAt"
+                            if import_plan["mode"] == "latest"
+                            else import_plan["sort_field"]
+                        )
                         posts = client.get_all_impactful_posts(
                             report_id,
-                            limit=int(top_count),
+                            limit=int(import_plan["limit"]),
                             sort_field=sort_field,
                             sort_direction="asc" if sort_field == "rank" else "desc",
                         )
@@ -3359,8 +3481,7 @@ def render_melodyiq_import_v68_97() -> None:
     with st.container(border=True):
         st.markdown("### Find posts by track")
         st.caption(
-            "Enter a track and press Enter. MelodyIQ will find its TikTok sounds, "
-            "then you can choose which posts to add."
+            "Enter a track to find its TikTok sounds and create a report."
         )
         api_key = _managed_api_secret_v68_43("MELODYIQ_API_KEY")
         if not api_key:
@@ -3387,7 +3508,7 @@ def render_melodyiq_import_v68_97() -> None:
                     placeholder="e.g. NIKI",
                 )
             search_submitted = st.form_submit_button(
-                "Find TikTok posts",
+                "Find track",
                 type="primary",
                 width="stretch",
                 icon=":material/search:",
@@ -3439,27 +3560,38 @@ def render_melodyiq_import_v68_97() -> None:
                 for sound in sounds
                 if isinstance(sound, dict) and safe_str(sound.get("tktkSoundId"))
             }
-            selected_sound_ids = st.multiselect(
-                "Sounds to include",
-                options=list(sound_by_id),
-                format_func=lambda value: _melodyiq_sound_label_v68_97(sound_by_id[value]),
-                key="melodyiq_selected_sounds_v68_97",
-                help="Select every official or UGC-linked sound that belongs to this track.",
+            with st.expander(
+                "Review matched TikTok sounds",
+                icon=":material/music_note:",
+            ):
+                selected_sound_ids = st.multiselect(
+                    "Sounds to include",
+                    options=list(sound_by_id),
+                    format_func=lambda value: _melodyiq_sound_label_v68_97(
+                        sound_by_id[value]
+                    ),
+                    key="melodyiq_selected_sounds_v68_97",
+                    help="Select every official or UGC-linked sound that belongs to this track.",
+                )
+                selected_posts = sum(
+                    clean_num(sound_by_id[sound_id].get("postCount"))
+                    for sound_id in selected_sound_ids
+                    if sound_id in sound_by_id
+                )
+                st.caption(
+                    f"{len(selected_sound_ids)} TikTok sound(s) selected · "
+                    f"about {selected_posts:,} tracked posts"
+                )
+
+            import_plan = _render_melodyiq_import_plan_controls_v68_101(
+                "melodyiq_new_report_scope_v68_101",
+                initial=st.session_state.get(
+                    "melodyiq_new_report_scope_value_v68_101"
+                ),
             )
-            selected_posts = sum(
-                clean_num(sound_by_id[sound_id].get("postCount"))
-                for sound_id in selected_sound_ids
-                if sound_id in sound_by_id
-            )
-            st.caption(
-                f"{len(selected_sound_ids)} sound(s) selected · about {selected_posts:,} tracked posts"
-            )
-            st.info(
-                "Prepare another standard report? Nothing is added to Current batch "
-                "until you confirm an import after it is ready."
-            )
+            st.session_state.melodyiq_new_report_scope_value_v68_101 = import_plan
             if st.button(
-                "Prepare posts from selected sounds",
+                "Create report",
                 disabled=not bool(selected_sound_ids),
                 type="primary",
                 width="stretch",
@@ -3493,21 +3625,22 @@ def render_melodyiq_import_v68_97() -> None:
                                 st.session_state.get("melodyiq_artist_v68_97")
                             ),
                             "sound_ids": list(selected_sound_ids),
+                            "import_scope": import_plan,
                         }
                     )
                     _melodyiq_save_report_queue_v68_100(queue)
                     st.rerun()
                 except MelodyIQError as exc:
                     st.error(str(exc))
+            st.caption(
+                "You can create multiple reports at the same time. Delete each one "
+                "after import to free a report slot."
+            )
 
         queue = _melodyiq_report_queue_v68_100()
         if queue:
             st.divider()
-            st.markdown(f"#### Prepared reports ({len(queue)})")
-            st.caption(
-                "These are temporary standard reports. They do not use priority-report "
-                "slots or automatic daily refreshes. Delete each report after import."
-            )
+            st.markdown(f"#### Reports ({len(queue)})")
             _render_melodyiq_report_progress_v68_99(api_key)
             for queued_report in list(_melodyiq_report_queue_v68_100()):
                 _render_melodyiq_report_card_v68_100(client, queued_report)
