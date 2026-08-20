@@ -286,7 +286,10 @@ class CsvCompatibilityTests(unittest.TestCase):
     def test_add_posts_ui_uses_one_mixed_platform_input(self):
         self.assertNotIn('"Platform to add"', APP_SOURCE)
         self.assertNotIn("Paste extra {platform_short} links", APP_SOURCE)
-        self.assertIn('["Upload post files", "Paste post links"]', APP_SOURCE)
+        self.assertIn(
+            '["MelodyIQ", "Upload post files", "Paste post links"]',
+            APP_SOURCE,
+        )
         self.assertIn('key="add_posts_input_tab_v68_95"', APP_SOURCE)
         self.assertIn('on_change="rerun"', APP_SOURCE)
         self.assertIn("fallback_market=fallback_market", APP_SOURCE)

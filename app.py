@@ -9503,17 +9503,14 @@ if st.session_state.step == 2:
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
 
-    # MelodyIQ is the primary input path. File and pasted-link inputs remain
-    # available below and stay additive with anything already in Current batch.
-    render_melodyiq_import_v68_97()
-
-    st.markdown("### Other ways to add posts (optional)")
-    st.caption("Upload an existing export or paste individual post links instead.")
-    add_tab, paste_tab = st.tabs(
-        ["Upload post files", "Paste post links"],
+    melodyiq_tab, add_tab, paste_tab = st.tabs(
+        ["MelodyIQ", "Upload post files", "Paste post links"],
         key="add_posts_input_tab_v68_95",
         on_change="rerun",
     )
+
+    with melodyiq_tab:
+        render_melodyiq_import_v68_97()
 
     with add_tab:
         st.markdown("<div class='card'><h3>Upload post files</h3><p class='sub'>CSV or Excel files with TikTok or Instagram post links. You can select multiple files or mix both platforms in one file.</p>", unsafe_allow_html=True)
