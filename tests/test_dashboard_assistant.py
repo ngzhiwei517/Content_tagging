@@ -82,6 +82,19 @@ class DashboardAssistantTests(unittest.TestCase):
         self.assertIn(session_key, taggy_source)
         self.assertLess(taggy_source.index(managed_key), taggy_source.index(session_key))
 
+    def test_taggy_suggestions_remain_available_after_each_answer(self):
+        taggy_start = APP_SOURCE.index("def _render_taggy_chat_content_v68_87")
+        taggy_end = APP_SOURCE.index("@st.fragment", taggy_start)
+        taggy_source = APP_SOURCE[taggy_start:taggy_end]
+
+        self.assertNotIn("if not messages:", taggy_source)
+        self.assertIn(
+            "for suggestion_index, (suggestion_label, suggestion_text)",
+            taggy_source,
+        )
+        self.assertIn('key=f"{suggestions_key}_{suggestion_index}"', taggy_source)
+        self.assertIn("suggested_question = suggestion_text", taggy_source)
+
     def test_context_is_compact_allowlisted_and_uses_filtered_rows(self):
         context = build_dashboard_context(self.sample_frame().iloc[:1])
         self.assertEqual(1, context["totals"]["posts"])
