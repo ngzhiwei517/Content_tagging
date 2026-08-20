@@ -3069,6 +3069,92 @@ def _melodyiq_report_ready_v68_97(report: Dict) -> bool:
     )
 
 
+def _melodyiq_report_queue_v68_100() -> List[Dict]:
+    """Return the session's report queue and migrate the former single report."""
+    raw_queue = st.session_state.get("melodyiq_reports_v68_100", [])
+    queue = [dict(value) for value in raw_queue if isinstance(value, dict)]
+
+    legacy_report = st.session_state.pop("melodyiq_report_v68_97", None)
+    legacy_id = (
+        safe_str(legacy_report.get("reportId"))
+        if isinstance(legacy_report, dict)
+        else ""
+    )
+    if legacy_id and not any(
+        safe_str(value.get("report_id")) == legacy_id for value in queue
+    ):
+        queue.append(
+            {
+                "report_id": legacy_id,
+                "report": legacy_report,
+                "track": safe_str(st.session_state.get("melodyiq_track_v68_97")),
+                "artist": safe_str(st.session_state.get("melodyiq_artist_v68_97")),
+                "sound_ids": [],
+            }
+        )
+
+    st.session_state.melodyiq_reports_v68_100 = queue
+    return queue
+
+
+def _melodyiq_save_report_queue_v68_100(queue: List[Dict]) -> None:
+    st.session_state.melodyiq_reports_v68_100 = [
+        dict(value) for value in queue if isinstance(value, dict)
+    ]
+
+
+def _melodyiq_remove_report_v68_100(report_id: str) -> None:
+    _melodyiq_save_report_queue_v68_100(
+        [
+            value
+            for value in _melodyiq_report_queue_v68_100()
+            if safe_str(value.get("report_id")) != safe_str(report_id)
+        ]
+    )
+
+
+def _melodyiq_report_key_v68_100(report_id: str) -> str:
+    """Return a stable Streamlit-safe suffix for widgets in one report card."""
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", safe_str(report_id))
+    return clean or hashlib.sha256(safe_str(report_id).encode("utf-8")).hexdigest()[:16]
+
+
+@st.fragment(run_every=10)
+def _render_melodyiq_report_progress_v68_99(api_key: str) -> None:
+    """Refresh one queued report per interval without rerunning the whole app."""
+    queue = _melodyiq_report_queue_v68_100()
+    pending = [
+        (index, value)
+        for index, value in enumerate(queue)
+        if not _melodyiq_report_ready_v68_97(value.get("report", {}))
+        and safe_str(value.get("report_id"))
+    ]
+    if not pending:
+        return
+
+    cursor = int(st.session_state.get("melodyiq_poll_cursor_v68_100", 0))
+    queue_index, entry = pending[cursor % len(pending)]
+    report_id = safe_str(entry.get("report_id"))
+    try:
+        report = MelodyIQClient(api_key).get_report(report_id)
+        queue[queue_index] = {**entry, "report": report}
+        _melodyiq_save_report_queue_v68_100(queue)
+        st.session_state.melodyiq_poll_cursor_v68_100 = (cursor + 1) % max(
+            len(pending), 1
+        )
+    except MelodyIQError as exc:
+        st.warning(f"The report status could not be refreshed yet: {exc}")
+        return
+
+    if _melodyiq_report_ready_v68_97(report):
+        st.rerun()
+
+    st.info(
+        f"{len(pending)} report(s) are preparing. Status refreshes automatically, "
+        "one report at a time."
+    )
+
+
 def _melodyiq_import_rows_v68_97(
     raw: pd.DataFrame,
     *,
@@ -3108,16 +3194,173 @@ def _melodyiq_import_rows_v68_97(
     return standardized
 
 
+def _render_melodyiq_report_card_v68_100(
+    client: MelodyIQClient,
+    entry: Dict,
+) -> None:
+    """Render actions for one independently managed standard report."""
+    report_id = safe_str(entry.get("report_id"))
+    report = entry.get("report") if isinstance(entry.get("report"), dict) else {}
+    report_key = _melodyiq_report_key_v68_100(report_id)
+    track_value = safe_str(entry.get("track")) or "Untitled track"
+    artist_value = safe_str(entry.get("artist"))
+    if not artist_value:
+        report_artists = report.get("artists") or []
+        artist_value = safe_str(report_artists[0]) if report_artists else ""
+    ready = _melodyiq_report_ready_v68_97(report)
+    tiktok_report = report.get("tktk") if isinstance(report.get("tktk"), dict) else {}
+
+    label = f"{track_value} · {'Ready' if ready else 'Preparing'}"
+    with st.expander(label, expanded=ready):
+        if artist_value:
+            st.caption(f"Artist: {artist_value}")
+        status_col, count_col = st.columns(2)
+        with status_col:
+            st.metric("Report status", "Ready" if ready else "Preparing")
+        with count_col:
+            st.metric("Tracked posts", f"{clean_num(tiktok_report.get('postCount')):,}")
+
+        if not ready:
+            st.info("MelodyIQ is preparing this report. Its status refreshes automatically.")
+        else:
+            import_mode = st.radio(
+                "What would you like to add?",
+                ["Report export", "Top impactful posts"],
+                horizontal=True,
+                key=f"melodyiq_import_mode_{report_key}",
+            )
+            sort_field = "viewCount"
+            top_count = 100
+            report_row_limit = 20000
+            if import_mode == "Report export":
+                report_row_limit = st.number_input(
+                    "Maximum rows to import",
+                    min_value=100,
+                    max_value=100000,
+                    value=20000,
+                    step=1000,
+                    help=(
+                        "The importer supports more than 10,000 rows. Start with "
+                        "20,000; larger batches need more Streamlit memory and time."
+                    ),
+                    key=f"melodyiq_report_row_limit_{report_key}",
+                )
+            else:
+                top_col, sort_col = st.columns(2)
+                with top_col:
+                    top_count = st.number_input(
+                        "Number of posts",
+                        min_value=1,
+                        max_value=10000,
+                        value=100,
+                        step=50,
+                        key=f"melodyiq_top_count_{report_key}",
+                    )
+                with sort_col:
+                    sort_label = st.selectbox(
+                        "Rank by",
+                        ["Views", "Likes", "Comments", "Shares", "Impact rank"],
+                        key=f"melodyiq_sort_label_{report_key}",
+                    )
+                    sort_field = {
+                        "Views": "viewCount",
+                        "Likes": "likeCount",
+                        "Comments": "commentCount",
+                        "Shares": "shareCount",
+                        "Impact rank": "rank",
+                    }[sort_label]
+
+            delete_after = st.checkbox(
+                "Delete this temporary report after a successful import",
+                value=True,
+                help=(
+                    "Recommended because deleted reports no longer count toward "
+                    "the shared standard-report limit."
+                ),
+                key=f"melodyiq_delete_after_{report_key}",
+            )
+            if st.button(
+                "Add posts to Current batch",
+                type="primary",
+                width="stretch",
+                key=f"melodyiq_import_posts_{report_key}",
+            ):
+                try:
+                    if import_mode == "Report export":
+                        export_url = safe_str(tiktok_report.get("postsExportUrl"))
+                        raw = client.download_csv(
+                            export_url,
+                            max_rows=int(report_row_limit),
+                        )
+                        imported = _melodyiq_import_rows_v68_97(
+                            raw,
+                            source_name=f"MelodyIQ API - {track_value}",
+                            track=track_value,
+                            artist=artist_value,
+                        )
+                    else:
+                        posts = client.get_all_impactful_posts(
+                            report_id,
+                            limit=int(top_count),
+                            sort_field=sort_field,
+                            sort_direction="asc" if sort_field == "rank" else "desc",
+                        )
+                        raw = impactful_posts_frame(posts)
+                        imported = _melodyiq_import_rows_v68_97(
+                            raw,
+                            source_name=f"MelodyIQ API - {track_value}",
+                            track=track_value,
+                            artist=artist_value,
+                            impactful=True,
+                        )
+                    if imported.empty:
+                        raise MelodyIQError(
+                            "The report did not contain supported TikTok post URLs."
+                        )
+                    added, skipped = append_to_batch(imported)
+                    cleanup_warning = ""
+                    if delete_after:
+                        try:
+                            client.delete_report(report_id)
+                            _melodyiq_remove_report_v68_100(report_id)
+                        except MelodyIQError:
+                            cleanup_warning = (
+                                " The posts were imported, but the temporary report "
+                                "could not be deleted."
+                            )
+                    st.session_state.last_message = (
+                        f"Added {added:,} MelodyIQ rows. Skipped {skipped:,} duplicate rows."
+                        f"{cleanup_warning}"
+                    )
+                    st.rerun()
+                except MelodyIQError as exc:
+                    st.error(str(exc))
+
+        if st.button(
+            "Delete report",
+            width="stretch",
+            key=f"melodyiq_delete_report_{report_key}",
+            help="Delete this report from MelodyIQ without changing Current batch.",
+        ):
+            try:
+                client.delete_report(report_id)
+                _melodyiq_remove_report_v68_100(report_id)
+                st.rerun()
+            except MelodyIQError as exc:
+                st.error(str(exc))
+
+
 def render_melodyiq_import_v68_97() -> None:
-    """Render the optional MelodyIQ track-to-batch importer.
+    """Render the primary MelodyIQ track-to-batch importer.
 
     Requests occur only behind explicit form submissions/buttons so ordinary
     Streamlit reruns never consume MelodyIQ quota.
     """
-    with st.expander("Import directly from MelodyIQ (optional)", expanded=False):
+    with st.container(border=True):
+        st.markdown("### Find posts by track")
         st.caption(
-            "Search a track, select the correct TikTok sounds, then import the complete "
-            "report or a smaller ranked set. Existing upload and paste options remain available."
+            "Enter a track and press Enter. MelodyIQ will find its TikTok sounds, "
+            "then you can choose which posts to add."
         )
         api_key = _managed_api_secret_v68_43("MELODYIQ_API_KEY")
         if not api_key:
@@ -3144,9 +3387,10 @@ def render_melodyiq_import_v68_97() -> None:
                     placeholder="e.g. NIKI",
                 )
             search_submitted = st.form_submit_button(
-                "Search MelodyIQ sounds",
+                "Find TikTok posts",
                 type="primary",
                 width="stretch",
+                icon=":material/search:",
             )
 
         resolved_artist = safe_str(artist)
@@ -3179,43 +3423,45 @@ def render_melodyiq_import_v68_97() -> None:
                     st.session_state.melodyiq_selected_sounds_v68_97 = (
                         [safe_str(sounds[0].get("tktkSoundId"))] if sounds else []
                     )
-                    st.session_state.pop("melodyiq_report_v68_97", None)
                 except MelodyIQError as exc:
                     search_failed = True
                     st.error(str(exc))
 
         sounds = st.session_state.get("melodyiq_sounds_v68_97", [])
-        if not isinstance(sounds, list) or not sounds:
+        if not isinstance(sounds, list):
+            sounds = []
+        if not sounds:
             if search_submitted and not search_failed:
                 st.warning("No matching TikTok sounds were returned. Check the track or artist spelling.")
-            return
-
-        sound_by_id = {
-            safe_str(sound.get("tktkSoundId")): sound
-            for sound in sounds
-            if isinstance(sound, dict) and safe_str(sound.get("tktkSoundId"))
-        }
-        selected_sound_ids = st.multiselect(
-            "Sounds to include",
-            options=list(sound_by_id),
-            format_func=lambda value: _melodyiq_sound_label_v68_97(sound_by_id[value]),
-            key="melodyiq_selected_sounds_v68_97",
-            help="Select every official or UGC-linked sound that belongs to this track.",
-        )
-        selected_posts = sum(
-            clean_num(sound_by_id[sound_id].get("postCount"))
-            for sound_id in selected_sound_ids
-            if sound_id in sound_by_id
-        )
-        st.caption(
-            f"{len(selected_sound_ids)} sound(s) selected · about {selected_posts:,} tracked posts"
-        )
-
-        report = st.session_state.get("melodyiq_report_v68_97", {})
-        if not isinstance(report, dict) or not safe_str(report.get("reportId")):
+        else:
+            sound_by_id = {
+                safe_str(sound.get("tktkSoundId")): sound
+                for sound in sounds
+                if isinstance(sound, dict) and safe_str(sound.get("tktkSoundId"))
+            }
+            selected_sound_ids = st.multiselect(
+                "Sounds to include",
+                options=list(sound_by_id),
+                format_func=lambda value: _melodyiq_sound_label_v68_97(sound_by_id[value]),
+                key="melodyiq_selected_sounds_v68_97",
+                help="Select every official or UGC-linked sound that belongs to this track.",
+            )
+            selected_posts = sum(
+                clean_num(sound_by_id[sound_id].get("postCount"))
+                for sound_id in selected_sound_ids
+                if sound_id in sound_by_id
+            )
+            st.caption(
+                f"{len(selected_sound_ids)} sound(s) selected · about {selected_posts:,} tracked posts"
+            )
+            st.info(
+                "Prepare another standard report? Nothing is added to Current batch "
+                "until you confirm an import after it is ready."
+            )
             if st.button(
-                "Create temporary report",
+                "Prepare posts from selected sounds",
                 disabled=not bool(selected_sound_ids),
+                type="primary",
                 width="stretch",
                 key="melodyiq_create_report_v68_97",
             ):
@@ -3235,148 +3481,36 @@ def render_melodyiq_import_v68_97() -> None:
                         raise MelodyIQError("MelodyIQ did not return a report ID.")
                     client.refresh_report(report_id)
                     report = client.get_report(report_id)
-                    st.session_state.melodyiq_report_v68_97 = report
+                    queue = _melodyiq_report_queue_v68_100()
+                    queue.append(
+                        {
+                            "report_id": report_id,
+                            "report": report,
+                            "track": safe_str(
+                                st.session_state.get("melodyiq_track_v68_97")
+                            ),
+                            "artist": safe_str(
+                                st.session_state.get("melodyiq_artist_v68_97")
+                            ),
+                            "sound_ids": list(selected_sound_ids),
+                        }
+                    )
+                    _melodyiq_save_report_queue_v68_100(queue)
                     st.rerun()
                 except MelodyIQError as exc:
                     st.error(str(exc))
-            return
 
-        report_id = safe_str(report.get("reportId"))
-        tiktok_report = report.get("tktk") if isinstance(report.get("tktk"), dict) else {}
-        status_col, count_col = st.columns(2)
-        with status_col:
-            st.metric(
-                "Report status",
-                "Ready" if _melodyiq_report_ready_v68_97(report) else "Preparing",
+        queue = _melodyiq_report_queue_v68_100()
+        if queue:
+            st.divider()
+            st.markdown(f"#### Prepared reports ({len(queue)})")
+            st.caption(
+                "These are temporary standard reports. They do not use priority-report "
+                "slots or automatic daily refreshes. Delete each report after import."
             )
-        with count_col:
-            st.metric("Tracked posts", f"{clean_num(tiktok_report.get('postCount')):,}")
-
-        if st.button(
-            "Check report status",
-            width="stretch",
-            key="melodyiq_check_status_v68_97",
-        ):
-            try:
-                st.session_state.melodyiq_report_v68_97 = client.get_report(report_id)
-                st.rerun()
-            except MelodyIQError as exc:
-                st.error(str(exc))
-
-        if not _melodyiq_report_ready_v68_97(report):
-            st.info("MelodyIQ is preparing the report. Wait briefly, then check its status again.")
-            return
-
-        import_mode = st.radio(
-            "Posts to import",
-            ["Report export", "Top impactful posts"],
-            horizontal=True,
-            key="melodyiq_import_mode_v68_97",
-        )
-        sort_field = "viewCount"
-        top_count = 100
-        report_row_limit = 20000
-        if import_mode == "Report export":
-            report_row_limit = st.number_input(
-                "Maximum rows to import",
-                min_value=100,
-                max_value=100000,
-                value=20000,
-                step=1000,
-                help=(
-                    "The importer supports more than 10,000 rows. Start with 20,000; "
-                    "larger batches need more Streamlit memory and processing time."
-                ),
-                key="melodyiq_report_row_limit_v68_97",
-            )
-        else:
-            top_col, sort_col = st.columns(2)
-            with top_col:
-                top_count = st.number_input(
-                    "Number of posts",
-                    min_value=1,
-                    max_value=10000,
-                    value=100,
-                    step=50,
-                    key="melodyiq_top_count_v68_97",
-                )
-            with sort_col:
-                sort_label = st.selectbox(
-                    "Rank by",
-                    ["Views", "Likes", "Comments", "Shares", "Impact rank"],
-                    key="melodyiq_sort_label_v68_97",
-                )
-                sort_field = {
-                    "Views": "viewCount",
-                    "Likes": "likeCount",
-                    "Comments": "commentCount",
-                    "Shares": "shareCount",
-                    "Impact rank": "rank",
-                }[sort_label]
-        delete_after = st.checkbox(
-            "Delete the temporary MelodyIQ report after a successful import",
-            value=True,
-            help="Recommended because deleted reports do not count toward the shared report limit.",
-            key="melodyiq_delete_after_v68_97",
-        )
-        if st.button(
-            "Import posts into current batch",
-            type="primary",
-            width="stretch",
-            key="melodyiq_import_posts_v68_97",
-        ):
-            track_value = safe_str(st.session_state.get("melodyiq_track_v68_97"))
-            artist_value = safe_str(st.session_state.get("melodyiq_artist_v68_97"))
-            if not artist_value:
-                report_artists = report.get("artists") or []
-                artist_value = safe_str(report_artists[0]) if report_artists else ""
-            try:
-                if import_mode == "Report export":
-                    export_url = safe_str(tiktok_report.get("postsExportUrl"))
-                    raw = client.download_csv(
-                        export_url,
-                        max_rows=int(report_row_limit),
-                    )
-                    imported = _melodyiq_import_rows_v68_97(
-                        raw,
-                        source_name=f"MelodyIQ API - {track_value}",
-                        track=track_value,
-                        artist=artist_value,
-                    )
-                else:
-                    posts = client.get_all_impactful_posts(
-                        report_id,
-                        limit=int(top_count),
-                        sort_field=sort_field,
-                        sort_direction="asc" if sort_field == "rank" else "desc",
-                    )
-                    raw = impactful_posts_frame(posts)
-                    imported = _melodyiq_import_rows_v68_97(
-                        raw,
-                        source_name=f"MelodyIQ API - {track_value}",
-                        track=track_value,
-                        artist=artist_value,
-                        impactful=True,
-                    )
-                if imported.empty:
-                    raise MelodyIQError(
-                        "The report did not contain supported TikTok post URLs."
-                    )
-                added, skipped = append_to_batch(imported)
-                cleanup_warning = ""
-                if delete_after:
-                    try:
-                        client.delete_report(report_id)
-                        st.session_state.pop("melodyiq_report_v68_97", None)
-                    except MelodyIQError:
-                        cleanup_warning = " The posts were imported, but the temporary report could not be deleted."
-                st.session_state.last_message = (
-                    f"Added {added:,} MelodyIQ rows. Skipped {skipped:,} duplicate rows."
-                    f"{cleanup_warning}"
-                )
-                st.rerun()
-            except MelodyIQError as exc:
-                st.error(str(exc))
+            _render_melodyiq_report_progress_v68_99(api_key)
+            for queued_report in list(_melodyiq_report_queue_v68_100()):
+                _render_melodyiq_report_card_v68_100(client, queued_report)
 
 
 # Reusable HTML and workflow presentation helpers
@@ -9336,7 +9470,7 @@ if st.session_state.step != 6:
 
 # STEP 2: Add posts
 if st.session_state.step == 2:
-    st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Find posts by track, upload files, or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
     with st.container(border=True):
         durable_analysis_mode_v68_93 = safe_str(
@@ -9369,10 +9503,12 @@ if st.session_state.step == 2:
     # a separate candidate and is intentionally not exposed in this release.
     st.session_state.mode = "General UGC creative types"
 
-    # Track the selected input tab so ordinary widget reruns do not send users
-    # back to the upload view while they are completing pasted-link details.
+    # MelodyIQ is the primary input path. File and pasted-link inputs remain
+    # available below and stay additive with anything already in Current batch.
     render_melodyiq_import_v68_97()
 
+    st.markdown("### Other ways to add posts (optional)")
+    st.caption("Upload an existing export or paste individual post links instead.")
     add_tab, paste_tab = st.tabs(
         ["Upload post files", "Paste post links"],
         key="add_posts_input_tab_v68_95",
