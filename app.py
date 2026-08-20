@@ -3138,7 +3138,9 @@ def render_melodyiq_import_v68_97() -> None:
             with artist_col:
                 artist = st.text_input(
                     "Artist (optional)",
-                    value=safe_str(st.session_state.get("melodyiq_artist_v68_97")),
+                    value=safe_str(
+                        st.session_state.get("melodyiq_artist_input_v68_98")
+                    ),
                     placeholder="e.g. NIKI",
                 )
             search_submitted = st.form_submit_button(
@@ -3147,14 +3149,25 @@ def render_melodyiq_import_v68_97() -> None:
                 width="stretch",
             )
 
+        resolved_artist = safe_str(artist)
+        if safe_str(track):
+            resolved_artist = render_uploaded_track_catalog_feedback_v68_62(
+                track,
+                artist,
+            )
+
+        search_failed = False
         if search_submitted:
             if not safe_str(track):
                 st.error("Enter a track name before searching.")
             else:
+                st.session_state.melodyiq_track_v68_97 = safe_str(track)
+                st.session_state.melodyiq_artist_input_v68_98 = safe_str(artist)
+                st.session_state.melodyiq_artist_v68_97 = resolved_artist
                 try:
                     payload = client.search_sounds(
                         safe_str(track),
-                        artists=[safe_str(artist)] if safe_str(artist) else None,
+                        artists=[resolved_artist] if resolved_artist else None,
                         per_page=20,
                     )
                     sounds = [
@@ -3162,19 +3175,18 @@ def render_melodyiq_import_v68_97() -> None:
                         for value in payload.get("sounds", [])
                         if isinstance(value, dict) and safe_str(value.get("tktkSoundId"))
                     ]
-                    st.session_state.melodyiq_track_v68_97 = safe_str(track)
-                    st.session_state.melodyiq_artist_v68_97 = safe_str(artist)
                     st.session_state.melodyiq_sounds_v68_97 = sounds
                     st.session_state.melodyiq_selected_sounds_v68_97 = (
                         [safe_str(sounds[0].get("tktkSoundId"))] if sounds else []
                     )
                     st.session_state.pop("melodyiq_report_v68_97", None)
                 except MelodyIQError as exc:
+                    search_failed = True
                     st.error(str(exc))
 
         sounds = st.session_state.get("melodyiq_sounds_v68_97", [])
         if not isinstance(sounds, list) or not sounds:
-            if search_submitted:
+            if search_submitted and not search_failed:
                 st.warning("No matching TikTok sounds were returned. Check the track or artist spelling.")
             return
 
