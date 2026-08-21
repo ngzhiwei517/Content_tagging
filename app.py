@@ -130,6 +130,11 @@ from ugc_tagger.melodyiq_client import (
     MelodyIQError,
     impactful_posts_frame,
 )
+from ugc_tagger.melodyiq_status import (
+    elapsed_seconds as melodyiq_elapsed_seconds,
+    format_elapsed as format_melodyiq_elapsed,
+    preparation_estimate as melodyiq_preparation_estimate,
+)
 from ugc_tagger.selection_metrics import (
     merge_refreshed_metrics,
     metric_refresh_was_attempted,
@@ -1609,6 +1614,13 @@ def _checkpoint_melodyiq_reports_to_payload_v68_104(value) -> List[Dict]:
                 "track": safe_str(raw.get("track"))[:500],
                 "artist": safe_str(raw.get("artist"))[:500],
                 "sound_ids": sound_ids,
+                "started_at": safe_str(raw.get("started_at"))[:64],
+                "timer_scope": (
+                    safe_str(raw.get("timer_scope")).lower()
+                    if safe_str(raw.get("timer_scope")).lower()
+                    in {"created", "observed"}
+                    else "observed"
+                ),
                 "import_scope": _checkpoint_melodyiq_import_scope_v68_104(
                     raw.get("import_scope")
                 ),
@@ -3154,14 +3166,48 @@ def _melodyiq_report_ready_v68_97(report: Dict) -> bool:
     )
 
 
+def _melodyiq_report_provider_started_at_v68_105(report: Dict) -> str:
+    """Return a usable provider timestamp when MelodyIQ includes one."""
+    if not isinstance(report, dict):
+        return ""
+    tiktok = report.get("tktk") if isinstance(report.get("tktk"), dict) else {}
+    for value in (
+        report.get("createdAt"),
+        report.get("created_at"),
+        tiktok.get("updateStartedAt"),
+        tiktok.get("lastUpdateStartedAt"),
+    ):
+        if melodyiq_elapsed_seconds(value) is not None:
+            return safe_str(value)
+    return ""
+
+
+def _melodyiq_ensure_report_timing_v68_105(entry: Dict) -> None:
+    """Attach a durable timer without claiming an unknown historical start."""
+    current = safe_str(entry.get("started_at"))
+    provider_started_at = _melodyiq_report_provider_started_at_v68_105(
+        entry.get("report", {})
+    )
+    if provider_started_at and safe_str(entry.get("timer_scope")) != "created":
+        entry["started_at"] = provider_started_at
+        entry["timer_scope"] = "created"
+        return
+    if melodyiq_elapsed_seconds(current) is not None:
+        if safe_str(entry.get("timer_scope")) not in {"created", "observed"}:
+            entry["timer_scope"] = "observed"
+        return
+    if provider_started_at:
+        entry["started_at"] = provider_started_at
+        entry["timer_scope"] = "created"
+    else:
+        entry["started_at"] = datetime.now(timezone.utc).isoformat()
+        entry["timer_scope"] = "observed"
+
+
 def _melodyiq_report_queue_v68_100() -> List[Dict]:
     """Return the session's report queue and migrate the former single report."""
     raw_queue = st.session_state.get("melodyiq_reports_v68_100", [])
     queue = [dict(value) for value in raw_queue if isinstance(value, dict)]
-    for value in queue:
-        value["import_scope"] = _melodyiq_import_plan_v68_101(
-            value.get("import_scope")
-        )
 
     legacy_report = st.session_state.pop("melodyiq_report_v68_97", None)
     legacy_id = (
@@ -3182,6 +3228,12 @@ def _melodyiq_report_queue_v68_100() -> List[Dict]:
                 "import_scope": _melodyiq_import_plan_v68_101(),
             }
         )
+
+    for value in queue:
+        value["import_scope"] = _melodyiq_import_plan_v68_101(
+            value.get("import_scope")
+        )
+        _melodyiq_ensure_report_timing_v68_105(value)
 
     st.session_state.melodyiq_reports_v68_100 = queue
     return queue
@@ -3453,6 +3505,43 @@ def _melodyiq_report_preview_rows_v68_103(
     ).head(20)
 
 
+@st.fragment(run_every=30)
+def _render_melodyiq_preparation_timing_v68_105(
+    started_at: str,
+    timer_scope: str,
+    post_count: int,
+) -> None:
+    """Show a refreshable, explicitly non-provider preparation estimate."""
+    elapsed = melodyiq_elapsed_seconds(started_at)
+    elapsed_label = format_melodyiq_elapsed(elapsed)
+    estimate_label, soft_upper_seconds = melodyiq_preparation_estimate(post_count)
+    if timer_scope == "created":
+        timer_text = f"Elapsed: {elapsed_label}."
+    else:
+        timer_text = (
+            f"Tracked in this app: {elapsed_label}. Actual elapsed time may be longer."
+        )
+    if soft_upper_seconds is None:
+        estimate_text = f"Rough estimate: {estimate_label}."
+    else:
+        estimate_text = (
+            f"Rough planning estimate: {estimate_label} total, based on tracked-post volume."
+        )
+    st.info(
+        f"{timer_text} {estimate_text} MelodyIQ does not provide live progress "
+        "or an official ETA."
+    )
+    if (
+        elapsed is not None
+        and soft_upper_seconds is not None
+        and elapsed > soft_upper_seconds
+    ):
+        st.warning(
+            "This report is taking longer than the rough estimate. MelodyIQ still "
+            "reports it as Preparing; this does not by itself mean the app failed."
+        )
+
+
 def _render_melodyiq_report_card_v68_100(
     client: MelodyIQClient,
     entry: Dict,
@@ -3480,7 +3569,11 @@ def _render_melodyiq_report_card_v68_100(
             st.metric("Tracked posts", f"{clean_num(tiktok_report.get('postCount')):,}")
 
         if not ready:
-            st.info("MelodyIQ is preparing this report. Its status refreshes automatically.")
+            _render_melodyiq_preparation_timing_v68_105(
+                safe_str(entry.get("started_at")),
+                safe_str(entry.get("timer_scope")),
+                clean_num(tiktok_report.get("postCount")),
+            )
         else:
             preview_key = f"melodyiq_preview_frame_{report_key}"
             import_plan = _melodyiq_import_plan_v68_101(entry.get("import_scope"))
@@ -3501,7 +3594,9 @@ def _render_melodyiq_report_card_v68_100(
                 st.session_state.pop(preview_key, None)
 
             st.caption(
-                "This selection controls which posts are added to Current batch."
+                "This selection controls which posts are added to Current batch. "
+                "MelodyIQ's downloadable ranked CSV can contain fewer rows than "
+                "the Tracked posts total."
             )
             delete_after = st.checkbox(
                 "Delete this temporary report after a successful import",
@@ -3512,6 +3607,7 @@ def _render_melodyiq_report_card_v68_100(
                 ),
                 key=f"melodyiq_delete_after_{report_key}",
             )
+            export_url = safe_str(tiktok_report.get("postsExportUrl"))
             with st.container(
                 horizontal=True,
                 horizontal_alignment="distribute",
@@ -3529,7 +3625,19 @@ def _render_melodyiq_report_card_v68_100(
                     width="stretch",
                     key=f"melodyiq_import_posts_{report_key}",
                 )
-            export_url = safe_str(tiktok_report.get("postsExportUrl"))
+                st.link_button(
+                    "Download MelodyIQ CSV",
+                    export_url or "https://api.melodyiq.com",
+                    key=f"melodyiq_download_report_{report_key}",
+                    icon=":material/download:",
+                    disabled=not bool(export_url),
+                    help=(
+                        "Downloads MelodyIQ's available ranked CSV export. It is "
+                        "separate from the Tracked posts total and may contain "
+                        "fewer rows."
+                    ),
+                    width="stretch",
+                )
 
             if preview_clicked:
                 try:
@@ -3776,6 +3884,7 @@ def render_melodyiq_import_v68_97() -> None:
                     f"Content Tagger - {safe_str(st.session_state.get('melodyiq_track_v68_97'))}"
                 )[:120]
                 try:
+                    started_at = datetime.now(timezone.utc).isoformat()
                     created = client.create_report(
                         report_name,
                         selected_sound_ids,
@@ -3800,6 +3909,8 @@ def render_melodyiq_import_v68_97() -> None:
                                 st.session_state.get("melodyiq_artist_v68_97")
                             ),
                             "sound_ids": list(selected_sound_ids),
+                            "started_at": started_at,
+                            "timer_scope": "created",
                             "import_scope": import_plan,
                         }
                     )
@@ -3812,8 +3923,9 @@ def render_melodyiq_import_v68_97() -> None:
                 "MelodyIQ automatically adds related TikTok sounds and prepares the "
                 "complete report first. Large tracks may include thousands of posts "
                 "and take longer to prepare. You can create multiple reports at the same time. "
-                "Choose posts to import after the report is ready. Delete each report "
-                "after import to free a report slot."
+                "Choose posts to import or download MelodyIQ's ranked CSV after the "
+                "report is ready. The CSV may contain fewer rows than Tracked posts. "
+                "Delete each report after import to free a report slot."
             )
 
         queue = _melodyiq_report_queue_v68_100()

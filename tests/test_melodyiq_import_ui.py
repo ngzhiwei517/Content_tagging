@@ -64,6 +64,8 @@ class MelodyIQImportUiTests(unittest.TestCase):
 
         self.assertIn("queue = _melodyiq_report_queue_v68_100()", source)
         self.assertIn("queue.append(", source)
+        self.assertIn('"started_at": started_at', source)
+        self.assertIn('"timer_scope": "created"', source)
         self.assertIn("_melodyiq_save_report_queue_v68_100(queue)", source)
         self.assertIn("_persist_runtime_checkpoint_v68_15()", source)
         self.assertNotIn(
@@ -86,7 +88,10 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertNotIn("_render_melodyiq_import_plan_controls_v68_101(", source)
         self.assertIn("import_plan = _melodyiq_import_plan_v68_101()", source)
         self.assertIn('"import_scope": import_plan', source)
-        self.assertIn("Choose posts to import after the report is ready", source)
+        self.assertIn(
+            "Choose posts to import or download MelodyIQ's ranked CSV",
+            source,
+        )
 
     def test_import_scope_offers_top_latest_and_all(self):
         source = _function_source(
@@ -114,9 +119,12 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('sort_field=sort_field', source)
         self.assertIn('max_rows=int(import_plan["limit"])', source)
         self.assertIn('tiktok_report.get("postsExportUrl")', source)
+        self.assertIn('"Download MelodyIQ CSV"', source)
+        self.assertIn('key=f"melodyiq_download_report_{report_key}"', source)
+        self.assertIn("st.link_button(", source)
+        self.assertIn("separate from the Tracked posts total", source)
+        self.assertIn('"fewer rows."', source)
         self.assertNotIn('"Download full report CSV"', source)
-        self.assertNotIn('key=f"melodyiq_download_report_{report_key}"', source)
-        self.assertNotIn("st.link_button(", source)
         self.assertNotIn("Download always", source)
 
     def test_report_preview_links_open_the_original_post(self):
@@ -151,6 +159,19 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn("pending[cursor % len(pending)]", source)
         self.assertIn("refreshes automatically", source)
         self.assertNotIn("Check report status", app_source)
+
+    def test_preparing_report_shows_elapsed_time_and_rough_eta(self):
+        card_source = _function_source("_render_melodyiq_report_card_v68_100")
+        timing_source = _function_source(
+            "_render_melodyiq_preparation_timing_v68_105"
+        )
+        app_source = APP_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("@st.fragment(run_every=30)", app_source)
+        self.assertIn("_render_melodyiq_preparation_timing_v68_105(", card_source)
+        self.assertIn("Rough planning estimate", timing_source)
+        self.assertIn("does not provide live progress", timing_source)
+        self.assertIn("Actual elapsed time may be longer", timing_source)
 
 
 if __name__ == "__main__":

@@ -502,6 +502,8 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "track": "Treat You Better",
                 "artist": "Shawn Mendes",
                 "sound_ids": ["sound-1", "sound-1", "sound-2"],
+                "started_at": "2026-08-21T01:02:03+00:00",
+                "timer_scope": "created",
                 "import_scope": {
                     "mode": "all",
                     "limit": 20000,
@@ -513,6 +515,8 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         serialized = json.dumps(payload)
         self.assertEqual(payload[0]["report_id"], "report-1")
         self.assertEqual(payload[0]["sound_ids"], ["sound-1", "sound-2"])
+        self.assertEqual(payload[0]["started_at"], "2026-08-21T01:02:03+00:00")
+        self.assertEqual(payload[0]["timer_scope"], "created")
         self.assertNotIn("report", payload[0])
         self.assertNotIn("postsExportUrl", serialized)
         self.assertNotIn("token=secret", serialized)
