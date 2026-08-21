@@ -101,13 +101,19 @@ class MelodyIQImportUiTests(unittest.TestCase):
 
         self.assertIn('"top": "Top posts"', constants)
         self.assertIn('"latest": "Latest posts"', constants)
-        self.assertIn('"all": "All posts"', constants)
+        self.assertIn('"all": "All impactful posts"', constants)
         self.assertIn("st.segmented_control(", source)
         self.assertIn('"Number of posts"', source)
         self.assertIn('"Number of recent posts"', source)
         self.assertNotIn('"Maximum rows to import"', source)
-        self.assertIn("MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102", source)
-        self.assertIn("All posts are selected automatically", source)
+        self.assertIn("MELODYIQ_API_BATCH_ROWS_V68_106", source)
+        self.assertIn('"No app row maximum.', source)
+        self.assertIn('"Creator country (optional)"', source)
+        self.assertIn("accept_new_options=True", source)
+        self.assertIn('"Post date range (optional)"', source)
+        self.assertIn("st.date_input(", source)
+        self.assertIn('"post_created_at_min"', source)
+        self.assertIn('"post_created_at_max"', source)
 
     def test_ready_report_applies_its_saved_import_scope(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")
@@ -117,7 +123,15 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('"postCreatedAt"', source)
         self.assertIn('limit=int(import_plan["limit"])', source)
         self.assertIn('sort_field=sort_field', source)
-        self.assertIn('max_rows=int(import_plan["limit"])', source)
+        self.assertIn("client.iter_impactful_post_pages(", source)
+        self.assertIn('start_page=pagination_state["next_page"]', source)
+        self.assertIn("max_pages=MELODYIQ_API_BATCH_PAGES_V68_106", source)
+        self.assertIn("creator_countries=creator_countries", source)
+        self.assertIn("post_created_at_min=date_min", source)
+        self.assertIn("post_created_at_max=date_max", source)
+        self.assertIn('"api_total"', source)
+        self.assertIn("_melodyiq_save_pagination_state_v68_106(", source)
+        self.assertNotIn("client.download_csv(", source)
         self.assertIn('tiktok_report.get("postsExportUrl")', source)
         self.assertIn('"Download MelodyIQ CSV"', source)
         self.assertIn('key=f"melodyiq_download_report_{report_key}"', source)
@@ -139,9 +153,12 @@ class MelodyIQImportUiTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'limit=min(max(int(import_plan.get("limit", 20)), 1), 20)',
+            'preview_limit = min(max(int(import_plan.get("limit", 20)), 1), 20)',
             preview_source,
         )
+        self.assertIn("creator_countries=creator_countries", preview_source)
+        self.assertIn("post_created_at_min=date_min", preview_source)
+        self.assertIn("post_created_at_max=date_max", preview_source)
 
     def test_report_queue_migrates_legacy_single_report(self):
         source = _function_source("_melodyiq_report_queue_v68_100")

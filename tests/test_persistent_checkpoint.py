@@ -474,12 +474,21 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
 
     def test_melodyiq_checkpoint_excludes_live_response_and_signed_url(self):
         namespace = {
+            "date": date,
             "safe_str": lambda value: str(value or "").strip(),
             "Dict": Dict,
             "List": List,
         }
+        namespace["_melodyiq_iso_date_v68_107"] = load_function(
+            "_melodyiq_iso_date_v68_107",
+            namespace,
+        )
         namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
             "_checkpoint_melodyiq_import_scope_v68_104",
+            namespace,
+        )
+        namespace["_checkpoint_melodyiq_pagination_state_v68_106"] = load_function(
+            "_checkpoint_melodyiq_pagination_state_v68_106",
             namespace,
         )
         to_payload = load_function(
@@ -508,6 +517,22 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                     "mode": "all",
                     "limit": 20000,
                     "sort_field": "viewCount",
+                    "creator_country": "sg",
+                    "post_created_at_min": "2026-08-01",
+                    "post_created_at_max": "2026-08-21",
+                },
+                "pagination_state": {
+                    "creator_country": "sg",
+                    "post_created_at_min": "2026-08-01",
+                    "post_created_at_max": "2026-08-21",
+                    "next_page": 11,
+                    "last_page": 9000,
+                    "pages_scanned": 10,
+                    "source_posts_scanned": 1000,
+                    "matching_posts_found": 37,
+                    "api_total": 2500,
+                    "complete": False,
+                    "posts": [{"url": "https://example.com/private-row"}],
                 },
             }
         ])
@@ -517,7 +542,24 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertEqual(payload[0]["sound_ids"], ["sound-1", "sound-2"])
         self.assertEqual(payload[0]["started_at"], "2026-08-21T01:02:03+00:00")
         self.assertEqual(payload[0]["timer_scope"], "created")
+        self.assertEqual(payload[0]["import_scope"]["limit"], 1000)
+        self.assertEqual(payload[0]["import_scope"]["creator_country"], "SG")
+        self.assertEqual(
+            payload[0]["import_scope"]["post_created_at_min"],
+            "2026-08-01",
+        )
+        self.assertEqual(
+            payload[0]["pagination_state"]["post_created_at_max"],
+            "2026-08-21",
+        )
+        self.assertEqual(payload[0]["pagination_state"]["next_page"], 11)
+        self.assertEqual(payload[0]["pagination_state"]["api_total"], 2500)
+        self.assertEqual(
+            payload[0]["pagination_state"]["source_posts_scanned"],
+            1000,
+        )
         self.assertNotIn("report", payload[0])
+        self.assertNotIn("private-row", serialized)
         self.assertNotIn("postsExportUrl", serialized)
         self.assertNotIn("token=secret", serialized)
         self.assertEqual(from_payload(payload)[0]["report"], {})
@@ -630,6 +672,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             namespace = {
                 "st": FakeStreamlit(),
                 "pd": pd,
+                "date": date,
                 "datetime": datetime,
                 "timezone": timezone,
                 "json": json,
@@ -745,6 +788,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             namespace = {
                 "st": FakeStreamlit(),
                 "pd": pd,
+                "date": date,
                 "datetime": datetime,
                 "timezone": timezone,
                 "json": json,
@@ -767,8 +811,16 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_sync_runtime_query_v68_15": lambda: None,
                 "_checkpoint_objects_v68_44": lambda run_id: remote,
             }
+            namespace["_melodyiq_iso_date_v68_107"] = load_function(
+                "_melodyiq_iso_date_v68_107",
+                namespace,
+            )
             namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
                 "_checkpoint_melodyiq_import_scope_v68_104",
+                namespace,
+            )
+            namespace["_checkpoint_melodyiq_pagination_state_v68_106"] = load_function(
+                "_checkpoint_melodyiq_pagination_state_v68_106",
                 namespace,
             )
             namespace["_checkpoint_melodyiq_reports_to_payload_v68_104"] = load_function(
@@ -842,8 +894,16 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             "_sync_runtime_query_v68_15": lambda: None,
             "_persist_runtime_checkpoint_v68_15": lambda: None,
         }
+        namespace["_melodyiq_iso_date_v68_107"] = load_function(
+            "_melodyiq_iso_date_v68_107",
+            namespace,
+        )
         namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
             "_checkpoint_melodyiq_import_scope_v68_104",
+            namespace,
+        )
+        namespace["_checkpoint_melodyiq_pagination_state_v68_106"] = load_function(
+            "_checkpoint_melodyiq_pagination_state_v68_106",
             namespace,
         )
         namespace["_checkpoint_melodyiq_reports_to_payload_v68_104"] = load_function(

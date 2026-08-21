@@ -7,7 +7,7 @@ by the caller and are never included in errors or persisted in checkpoints.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 import pandas as pd
 import requests
@@ -199,15 +199,29 @@ class MelodyIQClient:
         per_page: int = 100,
         sort_field: str = "viewCount",
         sort_direction: str = "desc",
+        creator_countries: Optional[Sequence[str]] = None,
+        post_created_at_min: str = "",
+        post_created_at_max: str = "",
     ) -> Dict[str, Any]:
-        # Omit unused bounds completely. Sending Swagger's example {min: 0,
-        # max: 0} values would filter out ordinary non-zero posts.
         params = {
             "page": max(int(page), 1),
             "perPage": min(max(int(per_page), 1), 100),
             "sortField": sort_field,
             "sortDirection": sort_direction,
         }
+        countries = list(
+            dict.fromkeys(
+                str(value).strip().upper()
+                for value in (creator_countries or [])
+                if str(value).strip()
+            )
+        )[:100]
+        if countries:
+            params["creatorCountries"] = ",".join(countries)
+        if str(post_created_at_min or "").strip():
+            params["postCreatedAt[min]"] = str(post_created_at_min).strip()
+        if str(post_created_at_max or "").strip():
+            params["postCreatedAt[max]"] = str(post_created_at_max).strip()
         return self._json(
             self._request(
                 "GET",
@@ -223,28 +237,80 @@ class MelodyIQClient:
         limit: int,
         sort_field: str = "viewCount",
         sort_direction: str = "desc",
+        creator_countries: Optional[Sequence[str]] = None,
+        post_created_at_min: str = "",
+        post_created_at_max: str = "",
     ) -> List[Dict[str, Any]]:
         requested = max(int(limit), 1)
         posts: List[Dict[str, Any]] = []
-        page = 1
-        while len(posts) < requested:
+        for result in self.iter_impactful_post_pages(
+            report_id,
+            sort_field=sort_field,
+            sort_direction=sort_direction,
+            creator_countries=creator_countries,
+            post_created_at_min=post_created_at_min,
+            post_created_at_max=post_created_at_max,
+        ):
+            posts.extend(result["posts"])
+            if len(posts) >= requested:
+                break
+        return posts[:requested]
+
+    def iter_impactful_post_pages(
+        self,
+        report_id: str,
+        *,
+        start_page: int = 1,
+        max_pages: Optional[int] = None,
+        sort_field: str = "rank",
+        sort_direction: str = "asc",
+        creator_countries: Optional[Sequence[str]] = None,
+        post_created_at_min: str = "",
+        post_created_at_max: str = "",
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield resumable, server-filtered impactful-post API pages."""
+        page = max(int(start_page), 1)
+        page_limit = None if max_pages is None else max(int(max_pages), 1)
+        yielded = 0
+
+        while page_limit is None or yielded < page_limit:
             payload = self.get_impactful_posts(
                 report_id,
                 page=page,
-                per_page=min(100, requested - len(posts)),
+                per_page=100,
                 sort_field=sort_field,
                 sort_direction=sort_direction,
+                creator_countries=creator_countries,
+                post_created_at_min=post_created_at_min,
+                post_created_at_max=post_created_at_max,
             )
-            batch = payload.get("posts") or []
-            if not isinstance(batch, list) or not batch:
-                break
-            posts.extend(item for item in batch if isinstance(item, dict))
+            raw_posts = payload.get("posts") or []
+            if not isinstance(raw_posts, list):
+                raw_posts = []
+            source_posts = [item for item in raw_posts if isinstance(item, dict)]
+
             pagination = payload.get("pagination") or {}
-            last_page = int(pagination.get("lastPage") or page)
-            if page >= last_page:
+            if not isinstance(pagination, Mapping):
+                pagination = {}
+            current_page = max(int(pagination.get("currentPage") or page), 1)
+            last_page = max(int(pagination.get("lastPage") or current_page), current_page)
+            next_page = current_page + 1 if current_page < last_page else None
+            total = pagination.get("total")
+            if total is None:
+                total = pagination.get("totalCount")
+
+            yield {
+                "posts": source_posts,
+                "source_post_count": len(source_posts),
+                "current_page": current_page,
+                "last_page": last_page,
+                "next_page": next_page,
+                "total": total,
+            }
+            yielded += 1
+            if next_page is None:
                 break
-            page += 1
-        return posts[:requested]
+            page = next_page
 
     def download_csv(self, url: str, *, max_rows: Optional[int] = None) -> pd.DataFrame:
         clean_url = str(url or "").strip()

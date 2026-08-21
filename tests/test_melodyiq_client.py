@@ -112,8 +112,113 @@ class MelodyIQClientTests(unittest.TestCase):
 
         self.assertEqual(len(posts), 125)
         self.assertEqual(session.calls[0][2]["params"]["perPage"], 100)
-        self.assertEqual(session.calls[1][2]["params"]["perPage"], 25)
+        self.assertEqual(session.calls[1][2]["params"]["perPage"], 100)
         self.assertNotIn("rank[min]", session.calls[0][2]["params"])
+
+    def test_official_country_and_date_filters_are_sent_to_each_api_page(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    payload={
+                        "posts": [
+                            {"postId": "1", "creatorCountry": "SG"},
+                        ],
+                        "pagination": {"currentPage": 1, "lastPage": 2},
+                    }
+                ),
+                FakeResponse(
+                    payload={
+                        "posts": [
+                            {"postId": "2", "creatorCountry": "MY"},
+                        ],
+                        "pagination": {"currentPage": 2, "lastPage": 2},
+                    }
+                ),
+            ]
+        )
+        client = MelodyIQClient("test-key", session=session)
+
+        posts = client.get_all_impactful_posts(
+            "r1",
+            limit=2,
+            creator_countries=["SG", "MY", "SG"],
+            post_created_at_min="2026-08-01T00:00:00.000Z",
+            post_created_at_max="2026-08-21T23:59:59.999Z",
+        )
+
+        self.assertEqual([post["postId"] for post in posts], ["1", "2"])
+        self.assertEqual(len(session.calls), 2)
+        for _method, _url, kwargs in session.calls:
+            self.assertEqual(kwargs["params"]["creatorCountries"], "SG,MY")
+            self.assertEqual(
+                kwargs["params"]["postCreatedAt[min]"],
+                "2026-08-01T00:00:00.000Z",
+            )
+            self.assertEqual(
+                kwargs["params"]["postCreatedAt[max]"],
+                "2026-08-21T23:59:59.999Z",
+            )
+
+    def test_empty_impactful_post_filters_are_omitted(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    payload={
+                        "posts": [],
+                        "pagination": {"currentPage": 1, "lastPage": 1},
+                    }
+                )
+            ]
+        )
+        client = MelodyIQClient("test-key", session=session)
+
+        client.get_impactful_posts("r1")
+
+        params = session.calls[0][2]["params"]
+        self.assertNotIn("creatorCountries", params)
+        self.assertNotIn("postCreatedAt[min]", params)
+        self.assertNotIn("postCreatedAt[max]", params)
+
+    def test_page_iterator_resumes_and_stops_after_batch_size(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    payload={
+                        "posts": [{"postId": "201"}],
+                        "pagination": {
+                            "currentPage": 3,
+                            "lastPage": 5,
+                            "total": 500,
+                        },
+                    }
+                ),
+                FakeResponse(
+                    payload={
+                        "posts": [{"postId": "301"}],
+                        "pagination": {
+                            "currentPage": 4,
+                            "lastPage": 5,
+                            "total": 500,
+                        },
+                    }
+                ),
+            ]
+        )
+        client = MelodyIQClient("test-key", session=session)
+
+        pages = list(
+            client.iter_impactful_post_pages(
+                "r1",
+                start_page=3,
+                max_pages=2,
+            )
+        )
+
+        self.assertEqual([page["current_page"] for page in pages], [3, 4])
+        self.assertEqual(pages[-1]["next_page"], 5)
+        self.assertEqual(pages[-1]["total"], 500)
+        self.assertEqual(session.calls[0][2]["params"]["page"], 3)
+        self.assertEqual(session.calls[1][2]["params"]["page"], 4)
 
     def test_download_csv_honours_row_limit_without_api_key_header(self):
         csv_bytes = b"Link,Views\nhttps://www.tiktok.com/@a/video/1,10\nhttps://www.tiktok.com/@b/video/2,20\n"

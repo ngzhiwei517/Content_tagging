@@ -1556,6 +1556,15 @@ def _checkpoint_json_safe_value_v68_96(value):
     return str(value)
 
 
+def _melodyiq_iso_date_v68_107(value) -> str:
+    """Return a validated YYYY-MM-DD value or an empty string."""
+    clean = safe_str(value)[:10]
+    try:
+        return date.fromisoformat(clean).isoformat() if clean else ""
+    except ValueError:
+        return ""
+
+
 def _checkpoint_melodyiq_import_scope_v68_104(value) -> Dict:
     """Return the small, durable part of one MelodyIQ import choice."""
     raw = value if isinstance(value, dict) else {}
@@ -1572,16 +1581,56 @@ def _checkpoint_melodyiq_import_scope_v68_104(value) -> Dict:
         "rank",
     }:
         sort_field = "viewCount"
-    default_limit = 20000 if mode == "all" else 100
+    default_limit = 1000 if mode == "all" else 100
     try:
         limit = int(raw.get("limit", default_limit) or default_limit)
     except (TypeError, ValueError):
         limit = default_limit
-    max_limit = 20000 if mode == "all" else 10000
+    max_limit = 1000 if mode == "all" else 10000
     return {
         "mode": mode,
         "limit": min(max(limit, 1), max_limit),
         "sort_field": sort_field,
+        "creator_country": safe_str(raw.get("creator_country"))[:100].upper(),
+        "post_created_at_min": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_min")
+        ),
+        "post_created_at_max": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_max")
+        ),
+    }
+
+
+def _checkpoint_melodyiq_pagination_state_v68_106(value) -> Dict:
+    """Return a cursor-only MelodyIQ state without storing provider rows."""
+    raw = value if isinstance(value, dict) else {}
+
+    def bounded_int(name: str, default: int, maximum: int) -> int:
+        try:
+            parsed = int(raw.get(name, default) or default)
+        except (TypeError, ValueError):
+            parsed = default
+        return min(max(parsed, 0), maximum)
+
+    return {
+        "creator_country": safe_str(raw.get("creator_country"))[:100].upper(),
+        "post_created_at_min": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_min")
+        ),
+        "post_created_at_max": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_max")
+        ),
+        "next_page": max(bounded_int("next_page", 1, 100000000), 1),
+        "last_page": bounded_int("last_page", 0, 100000000),
+        "pages_scanned": bounded_int("pages_scanned", 0, 100000000),
+        "source_posts_scanned": bounded_int(
+            "source_posts_scanned", 0, 1000000000
+        ),
+        "matching_posts_found": bounded_int(
+            "matching_posts_found", 0, 1000000000
+        ),
+        "api_total": bounded_int("api_total", 0, 1000000000),
+        "complete": bool(raw.get("complete")),
     }
 
 
@@ -1623,6 +1672,9 @@ def _checkpoint_melodyiq_reports_to_payload_v68_104(value) -> List[Dict]:
                 ),
                 "import_scope": _checkpoint_melodyiq_import_scope_v68_104(
                     raw.get("import_scope")
+                ),
+                "pagination_state": _checkpoint_melodyiq_pagination_state_v68_106(
+                    raw.get("pagination_state")
                 ),
             }
         )
@@ -3233,6 +3285,18 @@ def _melodyiq_report_queue_v68_100() -> List[Dict]:
         value["import_scope"] = _melodyiq_import_plan_v68_101(
             value.get("import_scope")
         )
+        value["pagination_state"] = _melodyiq_pagination_state_v68_106(
+            value.get("pagination_state"),
+            creator_country=safe_str(
+                value["import_scope"].get("creator_country")
+            ),
+            post_created_at_min=safe_str(
+                value["import_scope"].get("post_created_at_min")
+            ),
+            post_created_at_max=safe_str(
+                value["import_scope"].get("post_created_at_max")
+            ),
+        )
         _melodyiq_ensure_report_timing_v68_105(value)
 
     st.session_state.melodyiq_reports_v68_100 = queue
@@ -3264,9 +3328,13 @@ def _melodyiq_report_key_v68_100(report_id: str) -> str:
 MELODYIQ_IMPORT_MODE_LABELS_V68_101 = {
     "top": "Top posts",
     "latest": "Latest posts",
-    "all": "All posts",
+    "all": "All impactful posts",
 }
-MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102 = 20000
+MELODYIQ_API_PAGE_SIZE_V68_106 = 100
+MELODYIQ_API_BATCH_PAGES_V68_106 = 10
+MELODYIQ_API_BATCH_ROWS_V68_106 = (
+    MELODYIQ_API_PAGE_SIZE_V68_106 * MELODYIQ_API_BATCH_PAGES_V68_106
+)
 MELODYIQ_IMPORT_SORT_FIELDS_V68_101 = {
     "Views": "viewCount",
     "Likes": "likeCount",
@@ -3286,15 +3354,34 @@ def _melodyiq_import_plan_v68_101(value: Optional[Dict] = None) -> Dict:
     sort_field = safe_str(raw.get("sort_field")) or "viewCount"
     if sort_field not in MELODYIQ_IMPORT_SORT_FIELDS_V68_101.values():
         sort_field = "viewCount"
-    default_limit = (
-        MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102 if mode == "all" else 100
-    )
+    default_limit = MELODYIQ_API_BATCH_ROWS_V68_106 if mode == "all" else 100
     limit = clean_num(raw.get("limit")) or default_limit
     return {
         "mode": mode,
-        "limit": max(int(limit), 1),
+        "limit": (
+            MELODYIQ_API_BATCH_ROWS_V68_106
+            if mode == "all"
+            else min(max(int(limit), 1), 10000)
+        ),
         "sort_field": sort_field,
+        "creator_country": safe_str(raw.get("creator_country")).upper(),
+        "post_created_at_min": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_min")
+        ),
+        "post_created_at_max": _melodyiq_iso_date_v68_107(
+            raw.get("post_created_at_max")
+        ),
     }
+
+
+def _melodyiq_post_date_filters_v68_107(plan: Dict) -> Tuple[str, str]:
+    """Return inclusive UTC bounds in MelodyIQ's documented query format."""
+    date_min = _melodyiq_iso_date_v68_107(plan.get("post_created_at_min"))
+    date_max = _melodyiq_iso_date_v68_107(plan.get("post_created_at_max"))
+    return (
+        f"{date_min}T00:00:00.000Z" if date_min else "",
+        f"{date_max}T23:59:59.999Z" if date_max else "",
+    )
 
 
 def _melodyiq_import_plan_caption_v68_101(plan: Dict) -> str:
@@ -3302,10 +3389,25 @@ def _melodyiq_import_plan_caption_v68_101(plan: Dict) -> str:
     normalized = _melodyiq_import_plan_v68_101(plan)
     mode = normalized["mode"]
     limit = normalized["limit"]
+    country = safe_str(normalized.get("creator_country"))
+    country_suffix = f" in {country}" if country else ""
+    date_min = safe_str(normalized.get("post_created_at_min"))
+    date_max = safe_str(normalized.get("post_created_at_max"))
+    if date_min and date_max:
+        date_suffix = f" from {date_min} to {date_max}"
+    elif date_min:
+        date_suffix = f" from {date_min}"
+    elif date_max:
+        date_suffix = f" through {date_max}"
+    else:
+        date_suffix = ""
     if mode == "latest":
-        return f"Latest {limit:,} posts"
+        return f"Latest {limit:,} impactful posts{country_suffix}{date_suffix}"
     if mode == "all":
-        return f"All available posts, up to a {limit:,}-row safety limit"
+        return (
+            f"All impactful posts{country_suffix}{date_suffix}, loaded "
+            f"{limit:,} API rows at a time"
+        )
     sort_label = next(
         (
             label
@@ -3314,7 +3416,91 @@ def _melodyiq_import_plan_caption_v68_101(plan: Dict) -> str:
         ),
         "Views",
     )
-    return f"Top {limit:,} posts by {sort_label.lower()}"
+    return (
+        f"Top {limit:,} impactful posts by {sort_label.lower()}"
+        f"{country_suffix}{date_suffix}"
+    )
+
+
+def _melodyiq_pagination_state_v68_106(
+    value: Optional[Dict] = None,
+    *,
+    creator_country: str = "",
+    post_created_at_min: str = "",
+    post_created_at_max: str = "",
+) -> Dict:
+    """Return a safe resumable cursor for one report and filter selection."""
+    country = safe_str(creator_country).upper()
+    date_min = _melodyiq_iso_date_v68_107(post_created_at_min)
+    date_max = _melodyiq_iso_date_v68_107(post_created_at_max)
+    raw = value if isinstance(value, dict) else {}
+    if (
+        safe_str(raw.get("creator_country")).upper() != country
+        or _melodyiq_iso_date_v68_107(raw.get("post_created_at_min")) != date_min
+        or _melodyiq_iso_date_v68_107(raw.get("post_created_at_max")) != date_max
+    ):
+        raw = {}
+
+    def nonnegative_int(name: str, default: int = 0) -> int:
+        try:
+            return max(int(raw.get(name, default) or default), 0)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "creator_country": country,
+        "post_created_at_min": date_min,
+        "post_created_at_max": date_max,
+        "next_page": max(nonnegative_int("next_page", 1), 1),
+        "last_page": nonnegative_int("last_page"),
+        "pages_scanned": nonnegative_int("pages_scanned"),
+        "source_posts_scanned": nonnegative_int("source_posts_scanned"),
+        "matching_posts_found": nonnegative_int("matching_posts_found"),
+        "api_total": nonnegative_int("api_total"),
+        "complete": bool(raw.get("complete")),
+    }
+
+
+def _melodyiq_save_pagination_state_v68_106(
+    report_id: str,
+    state: Dict,
+) -> None:
+    """Update one report cursor in session state without storing post payloads."""
+    queue = _melodyiq_report_queue_v68_100()
+    for queue_entry in queue:
+        if safe_str(queue_entry.get("report_id")) == safe_str(report_id):
+            queue_entry["pagination_state"] = dict(state)
+            break
+    _melodyiq_save_report_queue_v68_100(queue)
+
+
+def _render_melodyiq_api_progress_v68_106(state: Dict) -> None:
+    """Show source-page progress for an all-impactful-posts API import."""
+    normalized = _melodyiq_pagination_state_v68_106(
+        state,
+        creator_country=safe_str(state.get("creator_country")),
+        post_created_at_min=safe_str(state.get("post_created_at_min")),
+        post_created_at_max=safe_str(state.get("post_created_at_max")),
+    )
+    if normalized["pages_scanned"] <= 0:
+        return
+    current_page = (
+        normalized["last_page"]
+        if normalized["complete"] and normalized["last_page"]
+        else max(normalized["next_page"] - 1, 0)
+    )
+    page_total = (
+        f" of {normalized['last_page']:,}" if normalized["last_page"] else ""
+    )
+    completion_text = " Complete." if normalized["complete"] else ""
+    total_text = (
+        f" of {normalized['api_total']:,}" if normalized["api_total"] else ""
+    )
+    st.caption(
+        f"API progress: loaded {normalized['source_posts_scanned']:,}{total_text} "
+        f"filtered impactful posts through page {current_page:,}{page_total}."
+        f"{completion_text}"
+    )
 
 
 def _render_melodyiq_import_plan_controls_v68_101(
@@ -3383,21 +3569,84 @@ def _render_melodyiq_import_plan_controls_v68_101(
             key=f"{key_prefix}_limit_latest",
         )
     else:
-        limit = MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102
+        limit = MELODYIQ_API_BATCH_ROWS_V68_106
         st.caption(
-            "All posts are selected automatically. Very large exports use the "
-            "app's safety limit."
+            f"No app row maximum. Each click loads the next {limit:,} filtered "
+            "impactful posts and saves the next-page position."
         )
+
+    current_country = safe_str(plan.get("creator_country")).upper()
+    country_options = ["All countries", *MARKETS]
+    if current_country and current_country not in country_options:
+        country_options.append(current_country)
+    selected_country = st.selectbox(
+        "Creator country (optional)",
+        country_options,
+        index=(
+            country_options.index(current_country)
+            if current_country in country_options
+            else 0
+        ),
+        accept_new_options=True,
+        placeholder="Select or enter a country code",
+        help=(
+            "Sent to MelodyIQ as creatorCountries before pagination, for example "
+            "SG or MY."
+        ),
+        key=f"{key_prefix}_creator_country",
+    )
+    creator_country = (
+        ""
+        if safe_str(selected_country) == "All countries"
+        else safe_str(selected_country).upper()
+    )
+
+    initial_dates = [
+        date.fromisoformat(value)
+        for value in (
+            safe_str(plan.get("post_created_at_min")),
+            safe_str(plan.get("post_created_at_max")),
+        )
+        if _melodyiq_iso_date_v68_107(value)
+    ]
+    selected_dates = st.date_input(
+        "Post date range (optional)",
+        value=initial_dates,
+        max_value=date.today(),
+        format="YYYY-MM-DD",
+        help=(
+            "Sent to MelodyIQ as postCreatedAt bounds before pagination. Leave "
+            "empty to include every post date."
+        ),
+        key=f"{key_prefix}_post_date_range",
+    )
+    if isinstance(selected_dates, (list, tuple)):
+        selected_date_values = list(selected_dates)
+    elif isinstance(selected_dates, date):
+        selected_date_values = [selected_dates]
+    else:
+        selected_date_values = []
+    post_created_at_min = (
+        selected_date_values[0].isoformat() if selected_date_values else ""
+    )
+    post_created_at_max = (
+        selected_date_values[1].isoformat()
+        if len(selected_date_values) > 1
+        else ""
+    )
 
     if show_report_note:
         st.caption(
-            "MelodyIQ prepares the complete report first. This choice controls "
-            "which posts are added to Current batch after it is ready."
+            "MelodyIQ prepares the report first. These filters apply to the "
+            "impactful-post API after the report is ready."
         )
     return {
         "mode": selected_mode,
         "limit": int(limit),
         "sort_field": sort_field,
+        "creator_country": creator_country,
+        "post_created_at_min": post_created_at_min,
+        "post_created_at_max": post_created_at_max,
     }
 
 
@@ -3490,12 +3739,35 @@ def _melodyiq_report_preview_rows_v68_103(
         if import_plan.get("mode") == "latest"
         else safe_str(import_plan.get("sort_field")) or "viewCount"
     )
-    posts = client.get_all_impactful_posts(
-        report_id,
-        limit=min(max(int(import_plan.get("limit", 20)), 1), 20),
-        sort_field=sort_field,
-        sort_direction="asc" if sort_field == "rank" else "desc",
-    )
+    preview_limit = min(max(int(import_plan.get("limit", 20)), 1), 20)
+    creator_country = safe_str(import_plan.get("creator_country"))
+    creator_countries = [creator_country] if creator_country else None
+    date_min, date_max = _melodyiq_post_date_filters_v68_107(import_plan)
+    if import_plan.get("mode") == "all":
+        posts = []
+        for result in client.iter_impactful_post_pages(
+            report_id,
+            max_pages=MELODYIQ_API_BATCH_PAGES_V68_106,
+            sort_field="rank",
+            sort_direction="asc",
+            creator_countries=creator_countries,
+            post_created_at_min=date_min,
+            post_created_at_max=date_max,
+        ):
+            posts.extend(result["posts"])
+            if len(posts) >= preview_limit:
+                break
+        posts = posts[:preview_limit]
+    else:
+        posts = client.get_all_impactful_posts(
+            report_id,
+            limit=preview_limit,
+            sort_field=sort_field,
+            sort_direction="asc" if sort_field == "rank" else "desc",
+            creator_countries=creator_countries,
+            post_created_at_min=date_min,
+            post_created_at_max=date_max,
+        )
     return _melodyiq_import_rows_v68_97(
         impactful_posts_frame(posts),
         source_name=f"MelodyIQ API - {track}",
@@ -3583,23 +3855,56 @@ def _render_melodyiq_report_card_v68_100(
                 show_report_note=False,
             )
             if updated_plan != import_plan:
+                reset_pagination = _melodyiq_pagination_state_v68_106(
+                    creator_country=safe_str(
+                        updated_plan.get("creator_country")
+                    ),
+                    post_created_at_min=safe_str(
+                        updated_plan.get("post_created_at_min")
+                    ),
+                    post_created_at_max=safe_str(
+                        updated_plan.get("post_created_at_max")
+                    ),
+                )
                 queue = _melodyiq_report_queue_v68_100()
                 for queue_entry in queue:
                     if safe_str(queue_entry.get("report_id")) == report_id:
                         queue_entry["import_scope"] = updated_plan
+                        queue_entry["pagination_state"] = reset_pagination
                         break
                 _melodyiq_save_report_queue_v68_100(queue)
                 entry["import_scope"] = updated_plan
+                entry["pagination_state"] = reset_pagination
                 import_plan = updated_plan
                 st.session_state.pop(preview_key, None)
 
             st.caption(
-                "This selection controls which posts are added to Current batch. "
-                "MelodyIQ's downloadable ranked CSV can contain fewer rows than "
-                "the Tracked posts total."
+                "The API returns filtered impactful posts. Its pagination total "
+                "can differ from both Tracked posts and MelodyIQ's ranked CSV."
             )
+            pagination_state = _melodyiq_pagination_state_v68_106(
+                entry.get("pagination_state"),
+                creator_country=safe_str(import_plan.get("creator_country")),
+                post_created_at_min=safe_str(
+                    import_plan.get("post_created_at_min")
+                ),
+                post_created_at_max=safe_str(
+                    import_plan.get("post_created_at_max")
+                ),
+            )
+            if import_plan["mode"] == "all":
+                _render_melodyiq_api_progress_v68_106(pagination_state)
+                st.caption(
+                    f"Each batch uses up to {MELODYIQ_API_BATCH_PAGES_V68_106} "
+                    "MelodyIQ API requests. Very large reports may exceed the "
+                    "license's API request allowance."
+                )
             delete_after = st.checkbox(
-                "Delete this temporary report after a successful import",
+                (
+                    "Delete this temporary report after the final API page"
+                    if import_plan["mode"] == "all"
+                    else "Delete this temporary report after a successful import"
+                ),
                 value=True,
                 help=(
                     "Recommended because deleted reports no longer count toward "
@@ -3620,10 +3925,23 @@ def _render_melodyiq_report_card_v68_100(
                     help="Shows up to 20 posts from the current import selection.",
                 )
                 import_clicked = st.button(
-                    "Add posts to Current batch",
+                    (
+                        "All impactful posts imported"
+                        if import_plan["mode"] == "all"
+                        and pagination_state["complete"]
+                        else (
+                            "Add next API batch"
+                            if import_plan["mode"] == "all"
+                            else "Add posts to Current batch"
+                        )
+                    ),
                     type="primary",
                     width="stretch",
                     key=f"melodyiq_import_posts_{report_key}",
+                    disabled=(
+                        import_plan["mode"] == "all"
+                        and pagination_state["complete"]
+                    ),
                 )
                 st.link_button(
                     "Download MelodyIQ CSV",
@@ -3687,17 +4005,122 @@ def _render_melodyiq_report_card_v68_100(
                 )
 
             if import_clicked:
+                progress_changed = False
                 try:
                     if import_plan["mode"] == "all":
-                        raw = client.download_csv(
-                            export_url,
-                            max_rows=int(import_plan["limit"]),
+                        added = 0
+                        skipped = 0
+                        batch_source_posts = 0
+                        creator_country = safe_str(
+                            import_plan.get("creator_country")
                         )
-                        imported = _melodyiq_import_rows_v68_97(
-                            raw,
-                            source_name=f"MelodyIQ API - {track_value}",
-                            track=track_value,
-                            artist=artist_value,
+                        creator_countries = (
+                            [creator_country] if creator_country else None
+                        )
+                        date_min, date_max = _melodyiq_post_date_filters_v68_107(
+                            import_plan
+                        )
+                        pagination_state = _melodyiq_pagination_state_v68_106(
+                            entry.get("pagination_state"),
+                            creator_country=creator_country,
+                            post_created_at_min=safe_str(
+                                import_plan.get("post_created_at_min")
+                            ),
+                            post_created_at_max=safe_str(
+                                import_plan.get("post_created_at_max")
+                            ),
+                        )
+                        for page_result in client.iter_impactful_post_pages(
+                            report_id,
+                            start_page=pagination_state["next_page"],
+                            max_pages=MELODYIQ_API_BATCH_PAGES_V68_106,
+                            sort_field="rank",
+                            sort_direction="asc",
+                            creator_countries=creator_countries,
+                            post_created_at_min=date_min,
+                            post_created_at_max=date_max,
+                        ):
+                            page_posts = page_result["posts"]
+                            batch_source_posts += int(
+                                page_result["source_post_count"]
+                            )
+                            if page_posts:
+                                imported_page = _melodyiq_import_rows_v68_97(
+                                    impactful_posts_frame(page_posts),
+                                    source_name=f"MelodyIQ API - {track_value}",
+                                    track=track_value,
+                                    artist=artist_value,
+                                    impactful=True,
+                                )
+                                page_added, page_skipped = append_to_batch(
+                                    imported_page
+                                )
+                                added += page_added
+                                skipped += page_skipped
+
+                            pagination_state = {
+                                "creator_country": creator_country.upper(),
+                                "post_created_at_min": safe_str(
+                                    import_plan.get("post_created_at_min")
+                                ),
+                                "post_created_at_max": safe_str(
+                                    import_plan.get("post_created_at_max")
+                                ),
+                                "next_page": int(
+                                    page_result["next_page"]
+                                    or (int(page_result["current_page"]) + 1)
+                                ),
+                                "last_page": int(page_result["last_page"]),
+                                "pages_scanned": (
+                                    pagination_state["pages_scanned"] + 1
+                                ),
+                                "source_posts_scanned": (
+                                    pagination_state["source_posts_scanned"]
+                                    + int(page_result["source_post_count"])
+                                ),
+                                "matching_posts_found": (
+                                    pagination_state["matching_posts_found"]
+                                    + len(page_posts)
+                                ),
+                                "api_total": int(
+                                    page_result.get("total")
+                                    or pagination_state.get("api_total")
+                                    or 0
+                                ),
+                                "complete": page_result["next_page"] is None,
+                            }
+                            entry["pagination_state"] = pagination_state
+                            _melodyiq_save_pagination_state_v68_106(
+                                report_id,
+                                pagination_state,
+                            )
+                            progress_changed = True
+
+                        cleanup_warning = ""
+                        if pagination_state["complete"] and delete_after:
+                            try:
+                                client.delete_report(report_id)
+                                _melodyiq_remove_report_v68_100(report_id)
+                                st.session_state.pop(preview_key, None)
+                            except MelodyIQError:
+                                cleanup_warning = (
+                                    " The API pages were imported, but the temporary "
+                                    "report could not be deleted."
+                                )
+                        _persist_runtime_checkpoint_v68_15()
+                        if pagination_state["complete"]:
+                            progress_text = (
+                                "All filtered impactful-post API pages have been loaded."
+                            )
+                        else:
+                            progress_text = (
+                                f"Continue with API page "
+                                f"{pagination_state['next_page']:,}."
+                            )
+                        st.session_state.last_message = (
+                            f"Loaded {batch_source_posts:,} impactful API rows. Added "
+                            f"{added:,}; skipped {skipped:,} duplicates. "
+                            f"{progress_text}{cleanup_warning}"
                         )
                     else:
                         sort_field = (
@@ -3705,11 +4128,22 @@ def _render_melodyiq_report_card_v68_100(
                             if import_plan["mode"] == "latest"
                             else import_plan["sort_field"]
                         )
+                        creator_country = safe_str(
+                            import_plan.get("creator_country")
+                        )
+                        date_min, date_max = _melodyiq_post_date_filters_v68_107(
+                            import_plan
+                        )
                         posts = client.get_all_impactful_posts(
                             report_id,
                             limit=int(import_plan["limit"]),
                             sort_field=sort_field,
                             sort_direction="asc" if sort_field == "rank" else "desc",
+                            creator_countries=(
+                                [creator_country] if creator_country else None
+                            ),
+                            post_created_at_min=date_min,
+                            post_created_at_max=date_max,
                         )
                         raw = impactful_posts_frame(posts)
                         imported = _melodyiq_import_rows_v68_97(
@@ -3719,28 +4153,31 @@ def _render_melodyiq_report_card_v68_100(
                             artist=artist_value,
                             impactful=True,
                         )
-                    if imported.empty:
-                        raise MelodyIQError(
-                            "The report did not contain supported TikTok post URLs."
-                        )
-                    added, skipped = append_to_batch(imported)
-                    cleanup_warning = ""
-                    if delete_after:
-                        try:
-                            client.delete_report(report_id)
-                            _melodyiq_remove_report_v68_100(report_id)
-                            st.session_state.pop(preview_key, None)
-                        except MelodyIQError:
-                            cleanup_warning = (
-                                " The posts were imported, but the temporary report "
-                                "could not be deleted."
+                        if imported.empty:
+                            raise MelodyIQError(
+                                "The report did not contain supported TikTok post URLs."
                             )
-                    st.session_state.last_message = (
-                        f"Added {added:,} MelodyIQ rows. Skipped {skipped:,} duplicate rows."
-                        f"{cleanup_warning}"
-                    )
+                        added, skipped = append_to_batch(imported)
+                        cleanup_warning = ""
+                        if delete_after:
+                            try:
+                                client.delete_report(report_id)
+                                _melodyiq_remove_report_v68_100(report_id)
+                                st.session_state.pop(preview_key, None)
+                            except MelodyIQError:
+                                cleanup_warning = (
+                                    " The posts were imported, but the temporary report "
+                                    "could not be deleted."
+                                )
+                        _persist_runtime_checkpoint_v68_15()
+                        st.session_state.last_message = (
+                            f"Added {added:,} MelodyIQ rows. Skipped {skipped:,} "
+                            f"duplicate rows.{cleanup_warning}"
+                        )
                     st.rerun()
                 except MelodyIQError as exc:
+                    if progress_changed:
+                        _persist_runtime_checkpoint_v68_15()
                     st.error(str(exc))
 
         if st.button(
