@@ -38,6 +38,10 @@ Keep these settings server-side. The app persists only allowlisted workflow
 state and sanitized tagging objects. Gemini/Apify/database credentials,
 downloaded media, binary media fields and local media paths are excluded.
 Recovery IDs are private bearer identifiers and should not be shared publicly.
+For queued MelodyIQ reports, checkpoints keep only the report ID, track and
+artist labels, selected sound IDs and import choice. Live report responses and
+temporary signed CSV export URLs are fetched again after recovery and are never
+stored in the checkpoint.
 
 Progress is saved automatically. Click **Continue later** to verify the current
 batch was written to the recovery database before closing the app. A green

@@ -1444,6 +1444,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "creator_profile_metrics_v68_51",
     "creator_profile_updated_at_v68_51",
     "creator_profile_aliases_v68_67",
+    "melodyiq_reports_v68_100",
 )
 TAGGY_COMPANION_QUERY_V68_87 = "taggy"
 RUNTIME_DATAFRAME_KEYS_V68_15 = {
@@ -1550,8 +1551,82 @@ def _checkpoint_json_safe_value_v68_96(value):
     return str(value)
 
 
+def _checkpoint_melodyiq_import_scope_v68_104(value) -> Dict:
+    """Return the small, durable part of one MelodyIQ import choice."""
+    raw = value if isinstance(value, dict) else {}
+    mode = safe_str(raw.get("mode")).lower()
+    if mode not in {"top", "latest", "all"}:
+        mode = "top"
+    sort_field = safe_str(raw.get("sort_field")) or "viewCount"
+    if sort_field not in {
+        "viewCount",
+        "likeCount",
+        "commentCount",
+        "shareCount",
+        "creatorFollowerCount",
+        "rank",
+    }:
+        sort_field = "viewCount"
+    default_limit = 20000 if mode == "all" else 100
+    try:
+        limit = int(raw.get("limit", default_limit) or default_limit)
+    except (TypeError, ValueError):
+        limit = default_limit
+    max_limit = 20000 if mode == "all" else 10000
+    return {
+        "mode": mode,
+        "limit": min(max(limit, 1), max_limit),
+        "sort_field": sort_field,
+    }
+
+
+def _checkpoint_melodyiq_reports_to_payload_v68_104(value) -> List[Dict]:
+    """Keep report references while excluding live responses and signed URLs."""
+    if not isinstance(value, list):
+        return []
+    reports = []
+    seen_report_ids = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        report_id = safe_str(raw.get("report_id"))[:256]
+        if not report_id or report_id in seen_report_ids:
+            continue
+        seen_report_ids.add(report_id)
+        raw_sound_ids = raw.get("sound_ids", [])
+        if not isinstance(raw_sound_ids, (list, tuple, set)):
+            raw_sound_ids = []
+        sound_ids = list(
+            dict.fromkeys(
+                safe_str(sound_id)[:256]
+                for sound_id in raw_sound_ids
+                if safe_str(sound_id)
+            )
+        )[:100]
+        reports.append(
+            {
+                "report_id": report_id,
+                "track": safe_str(raw.get("track"))[:500],
+                "artist": safe_str(raw.get("artist"))[:500],
+                "sound_ids": sound_ids,
+                "import_scope": _checkpoint_melodyiq_import_scope_v68_104(
+                    raw.get("import_scope")
+                ),
+            }
+        )
+    return reports
+
+
+def _checkpoint_melodyiq_reports_from_payload_v68_104(value) -> List[Dict]:
+    """Restore report references with an empty live response to refresh safely."""
+    return [
+        {**report, "report": {}}
+        for report in _checkpoint_melodyiq_reports_to_payload_v68_104(value)
+    ]
+
+
 def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
-    """Return whether workflow state contains at least one meaningful post."""
+    """Return whether workflow state contains posts or queued MelodyIQ work."""
     if not hasattr(state, "get"):
         return False
     for key in RUNTIME_DATAFRAME_KEYS_V68_15:
@@ -1562,6 +1637,12 @@ def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
             rows = value.get("data")
             if isinstance(rows, list) and bool(rows):
                 return True
+    reports = state.get("melodyiq_reports_v68_100")
+    if isinstance(reports, list) and any(
+        isinstance(value, dict) and bool(str(value.get("report_id") or "").strip())
+        for value in reports
+    ):
+        return True
     return False
 
 
@@ -1906,6 +1987,10 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
         value = st.session_state.get(key)
         if key in RUNTIME_DATAFRAME_KEYS_V68_15:
             state_payload[key] = _checkpoint_dataframe_to_payload_v68_15(value)
+        elif key == "melodyiq_reports_v68_100":
+            state_payload[key] = _checkpoint_melodyiq_reports_to_payload_v68_104(
+                value
+            )
         else:
             state_payload[key] = _checkpoint_json_safe_value_v68_96(value)
     payload = {
@@ -1977,7 +2062,7 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
 
 
 def _render_continue_later_v68_85() -> None:
-    """Offer a private recovery link only after the workflow contains posts."""
+    """Offer a private recovery link after posts or reports have been added."""
     if not _runtime_checkpoint_has_posts_v68_44(st.session_state):
         return
     _, action_column = st.columns([5, 1])
@@ -2023,6 +2108,10 @@ def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
                     value = saved_state[key]
                     if key in RUNTIME_DATAFRAME_KEYS_V68_15:
                         value = _checkpoint_dataframe_from_payload_v68_15(value)
+                    elif key == "melodyiq_reports_v68_100":
+                        value = _checkpoint_melodyiq_reports_from_payload_v68_104(
+                            value
+                        )
                     elif key in {"viral_date", "date_start_v68", "date_end_v68"} and safe_str(value):
                         parsed = pd.to_datetime(value, errors="coerce")
                         value = parsed.date() if not pd.isna(parsed) else date.today()
@@ -2073,11 +2162,7 @@ def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
                     setting["end"] = (
                         legacy_center + pd.Timedelta(days=legacy_track_radius)
                     ).date()
-                restored = any(
-                    isinstance(st.session_state.get(key), pd.DataFrame)
-                    and not st.session_state.get(key).empty
-                    for key in RUNTIME_DATAFRAME_KEYS_V68_15
-                )
+                restored = _runtime_checkpoint_has_posts_v68_44(st.session_state)
         except Exception:
             restored = False
 
@@ -3732,6 +3817,7 @@ def render_melodyiq_import_v68_97() -> None:
                         }
                     )
                     _melodyiq_save_report_queue_v68_100(queue)
+                    _persist_runtime_checkpoint_v68_15()
                     st.rerun()
                 except MelodyIQError as exc:
                     st.error(str(exc))

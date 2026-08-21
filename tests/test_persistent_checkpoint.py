@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 from urllib.parse import urlencode
 from unittest.mock import Mock
 
@@ -472,7 +472,53 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertNotIn("secret-value", serialized)
         self.assertNotIn("downloaded.mp4", serialized)
 
-    def test_remote_checkpoint_waits_until_the_batch_contains_a_post(self):
+    def test_melodyiq_checkpoint_excludes_live_response_and_signed_url(self):
+        namespace = {
+            "safe_str": lambda value: str(value or "").strip(),
+            "Dict": Dict,
+            "List": List,
+        }
+        namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
+            "_checkpoint_melodyiq_import_scope_v68_104",
+            namespace,
+        )
+        to_payload = load_function(
+            "_checkpoint_melodyiq_reports_to_payload_v68_104",
+            namespace,
+        )
+        from_payload = load_function(
+            "_checkpoint_melodyiq_reports_from_payload_v68_104",
+            namespace,
+        )
+
+        payload = to_payload([
+            {
+                "report_id": "report-1",
+                "report": {
+                    "tktk": {
+                        "postsExportUrl": "https://signed.example/report.csv?token=secret"
+                    }
+                },
+                "track": "Treat You Better",
+                "artist": "Shawn Mendes",
+                "sound_ids": ["sound-1", "sound-1", "sound-2"],
+                "import_scope": {
+                    "mode": "all",
+                    "limit": 20000,
+                    "sort_field": "viewCount",
+                },
+            }
+        ])
+
+        serialized = json.dumps(payload)
+        self.assertEqual(payload[0]["report_id"], "report-1")
+        self.assertEqual(payload[0]["sound_ids"], ["sound-1", "sound-2"])
+        self.assertNotIn("report", payload[0])
+        self.assertNotIn("postsExportUrl", serialized)
+        self.assertNotIn("token=secret", serialized)
+        self.assertEqual(from_payload(payload)[0]["report"], {})
+
+    def test_remote_checkpoint_waits_until_recoverable_work_exists(self):
         has_posts = load_function(
             "_runtime_checkpoint_has_posts_v68_44",
             {
@@ -491,8 +537,13 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "data": [["https://example.com/post"]],
             },
         }
+        queued_report_state = {
+            "batch_df": pd.DataFrame(),
+            "melodyiq_reports_v68_100": [{"report_id": "report-1"}],
+        }
         self.assertFalse(has_posts(empty_state))
         self.assertTrue(has_posts(populated_state))
+        self.assertTrue(has_posts(queued_report_state))
         self.assertIn(
             "if not has_posts:",
             APP_SOURCE,
@@ -656,6 +707,163 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         )
         self.assertTrue(remote.objects["runtime.json"]["state"]["batch_df"]["data"])
 
+    def test_report_only_checkpoint_is_persisted_without_signed_url(self):
+        recovery_id = "9" * 32
+        remote = MemoryObjectStore()
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState({
+                "runtime_run_id_v68_15": recovery_id,
+                "melodyiq_reports_v68_100": [{
+                    "report_id": "report-1",
+                    "report": {
+                        "tktk": {
+                            "postsExportUrl": "https://signed.example/report.csv?token=secret"
+                        }
+                    },
+                    "track": "Treat You Better",
+                    "artist": "Shawn Mendes",
+                    "sound_ids": ["sound-1"],
+                    "import_scope": {
+                        "mode": "all",
+                        "limit": 20000,
+                        "sort_field": "viewCount",
+                    },
+                }],
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "datetime": datetime,
+                "timezone": timezone,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "LOGGER": Mock(),
+                "safe_str": lambda value: str(value or "").strip(),
+                "Dict": Dict,
+                "List": List,
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": (
+                    "melodyiq_reports_v68_100",
+                ),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": set(),
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_runtime_checkpoint_path_v68_15": (
+                    lambda run_id: checkpoint_dir / f"{run_id}.json"
+                ),
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: None,
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: remote,
+            }
+            namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
+                "_checkpoint_melodyiq_import_scope_v68_104",
+                namespace,
+            )
+            namespace["_checkpoint_melodyiq_reports_to_payload_v68_104"] = load_function(
+                "_checkpoint_melodyiq_reports_to_payload_v68_104",
+                namespace,
+            )
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            status = persist(verify_remote=True)
+
+        saved = remote.objects["runtime.json"]
+        serialized = json.dumps(saved)
+        self.assertEqual(status, "verified")
+        self.assertEqual(
+            saved["state"]["melodyiq_reports_v68_100"][0]["report_id"],
+            "report-1",
+        )
+        self.assertNotIn("postsExportUrl", serialized)
+        self.assertNotIn("token=secret", serialized)
+
+    def test_report_only_checkpoint_restores_the_queue(self):
+        recovery_id = "a" * 32
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState()
+
+        payload = {
+            "saved_at": "2026-08-21T00:00:00+00:00",
+            "state": {
+                "step": 2,
+                "melodyiq_reports_v68_100": [{
+                    "report_id": "report-1",
+                    "track": "Treat You Better",
+                    "artist": "Shawn Mendes",
+                    "sound_ids": ["sound-1"],
+                    "import_scope": {
+                        "mode": "all",
+                        "limit": 20000,
+                        "sort_field": "viewCount",
+                    },
+                }],
+            },
+        }
+        namespace = {
+            "st": FakeStreamlit(),
+            "pd": pd,
+            "date": date,
+            "safe_str": lambda value: str(value or "").strip(),
+            "Dict": Dict,
+            "List": List,
+            "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": (
+                "step",
+                "melodyiq_reports_v68_100",
+            ),
+            "RUNTIME_DATAFRAME_KEYS_V68_15": set(),
+            "_valid_runtime_id_v68_15": lambda value: value,
+            "_runtime_query_value_v68_15": (
+                lambda name: recovery_id if name == "run" else "2"
+            ),
+            "_runtime_checkpoint_candidates_v68_44": lambda run_id: [payload],
+            "_runtime_checkpoint_candidate_rank_v68_79": lambda value: (1, 1),
+            "_checkpoint_dataframe_from_payload_v68_15": lambda value: pd.DataFrame(),
+            "_sync_runtime_query_v68_15": lambda: None,
+            "_persist_runtime_checkpoint_v68_15": lambda: None,
+        }
+        namespace["_checkpoint_melodyiq_import_scope_v68_104"] = load_function(
+            "_checkpoint_melodyiq_import_scope_v68_104",
+            namespace,
+        )
+        namespace["_checkpoint_melodyiq_reports_to_payload_v68_104"] = load_function(
+            "_checkpoint_melodyiq_reports_to_payload_v68_104",
+            namespace,
+        )
+        namespace["_checkpoint_melodyiq_reports_from_payload_v68_104"] = load_function(
+            "_checkpoint_melodyiq_reports_from_payload_v68_104",
+            namespace,
+        )
+        namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+            "_runtime_checkpoint_has_posts_v68_44",
+            namespace,
+        )
+        restore = load_function("_restore_runtime_checkpoint_v68_15", namespace)
+
+        restore(persist=False)
+
+        restored = FakeStreamlit.session_state["melodyiq_reports_v68_100"]
+        self.assertEqual(restored[0]["report_id"], "report-1")
+        self.assertEqual(restored[0]["report"], {})
+        self.assertTrue(FakeStreamlit.session_state.runtime_resume_notice_v68_15)
+        self.assertTrue(FakeStreamlit.session_state.runtime_restore_checked_v68_15)
+
     def test_runtime_checkpoint_converts_non_dataframe_state_to_strict_json(self):
         recovery_id = "8" * 32
         remote = MemoryObjectStore()
@@ -756,7 +964,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertNotIn("Current recovery ID", APP_SOURCE)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', APP_SOURCE)
 
-    def test_continue_later_is_hidden_until_posts_exist_and_saves_before_opening(self):
+    def test_continue_later_appears_for_a_report_before_posts_are_imported(self):
         events = []
 
         class FakeColumn:
@@ -779,11 +987,17 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 events.append(("button", label, kwargs))
                 return True
 
+        has_work_namespace = {
+            "pd": pd,
+            "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df"},
+        }
+        has_work = load_function(
+            "_runtime_checkpoint_has_posts_v68_44",
+            has_work_namespace,
+        )
         namespace = {
             "st": FakeStreamlit(),
-            "_runtime_checkpoint_has_posts_v68_44": lambda state: isinstance(
-                state.get("batch_df"), pd.DataFrame
-            ) and not state["batch_df"].empty,
+            "_runtime_checkpoint_has_posts_v68_44": has_work,
             "_persist_runtime_checkpoint_v68_15": lambda **kwargs: events.append(
                 ("persist", kwargs)
             ),
@@ -794,9 +1008,9 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         render()
         self.assertEqual(events, [])
 
-        FakeStreamlit.session_state["batch_df"] = pd.DataFrame(
-            [{"Link": "https://www.tiktok.com/@creator/video/1"}]
-        )
+        FakeStreamlit.session_state["melodyiq_reports_v68_100"] = [
+            {"report_id": "report-1"}
+        ]
         render()
 
         self.assertEqual(events[0], ("columns", [5, 1]))

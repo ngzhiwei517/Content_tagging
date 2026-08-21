@@ -65,6 +65,7 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn("queue = _melodyiq_report_queue_v68_100()", source)
         self.assertIn("queue.append(", source)
         self.assertIn("_melodyiq_save_report_queue_v68_100(queue)", source)
+        self.assertIn("_persist_runtime_checkpoint_v68_15()", source)
         self.assertNotIn(
             "st.session_state.melodyiq_report_v68_97 = report",
             source,
