@@ -3501,8 +3501,7 @@ def _render_melodyiq_report_card_v68_100(
                 st.session_state.pop(preview_key, None)
 
             st.caption(
-                "This selection controls Current batch only. Download always "
-                "contains the complete MelodyIQ report."
+                "This selection controls which posts are added to Current batch."
             )
             delete_after = st.checkbox(
                 "Delete this temporary report after a successful import",
@@ -3513,8 +3512,10 @@ def _render_melodyiq_report_card_v68_100(
                 ),
                 key=f"melodyiq_delete_after_{report_key}",
             )
-            action_columns = st.columns(3)
-            with action_columns[0]:
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="distribute",
+            ):
                 preview_clicked = st.button(
                     "Preview report",
                     icon=":material/visibility:",
@@ -3522,7 +3523,6 @@ def _render_melodyiq_report_card_v68_100(
                     key=f"melodyiq_preview_report_{report_key}",
                     help="Shows up to 20 posts from the current import selection.",
                 )
-            with action_columns[1]:
                 import_clicked = st.button(
                     "Add posts to Current batch",
                     type="primary",
@@ -3530,19 +3530,6 @@ def _render_melodyiq_report_card_v68_100(
                     key=f"melodyiq_import_posts_{report_key}",
                 )
             export_url = safe_str(tiktok_report.get("postsExportUrl"))
-            with action_columns[2]:
-                st.link_button(
-                    "Download full report CSV",
-                    export_url or "https://api.melodyiq.com",
-                    key=f"melodyiq_download_report_{report_key}",
-                    icon=":material/download:",
-                    disabled=not bool(export_url),
-                    help=(
-                        "Downloads the complete MelodyIQ CSV. The import selection "
-                        "does not limit this file."
-                    ),
-                    width="stretch",
-                )
 
             if preview_clicked:
                 try:
@@ -3825,8 +3812,8 @@ def render_melodyiq_import_v68_97() -> None:
                 "MelodyIQ automatically adds related TikTok sounds and prepares the "
                 "complete report first. Large tracks may include thousands of posts "
                 "and take longer to prepare. You can create multiple reports at the same time. "
-                "Choose posts to import or download the full CSV after the report "
-                "is ready. Delete each report after import to free a report slot."
+                "Choose posts to import after the report is ready. Delete each report "
+                "after import to free a report slot."
             )
 
         queue = _melodyiq_report_queue_v68_100()

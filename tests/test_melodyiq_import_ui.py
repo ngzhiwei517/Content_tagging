@@ -86,7 +86,7 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertNotIn("_render_melodyiq_import_plan_controls_v68_101(", source)
         self.assertIn("import_plan = _melodyiq_import_plan_v68_101()", source)
         self.assertIn('"import_scope": import_plan', source)
-        self.assertIn("Choose posts to import or download the full CSV", source)
+        self.assertIn("Choose posts to import after the report is ready", source)
 
     def test_import_scope_offers_top_latest_and_all(self):
         source = _function_source(
@@ -114,9 +114,10 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('sort_field=sort_field', source)
         self.assertIn('max_rows=int(import_plan["limit"])', source)
         self.assertIn('tiktok_report.get("postsExportUrl")', source)
-        self.assertIn('"Download full report CSV"', source)
-        self.assertIn('key=f"melodyiq_download_report_{report_key}"', source)
-        self.assertIn("Download always", source)
+        self.assertNotIn('"Download full report CSV"', source)
+        self.assertNotIn('key=f"melodyiq_download_report_{report_key}"', source)
+        self.assertNotIn("st.link_button(", source)
+        self.assertNotIn("Download always", source)
 
     def test_report_preview_links_open_the_original_post(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")
