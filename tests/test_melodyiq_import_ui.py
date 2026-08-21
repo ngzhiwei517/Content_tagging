@@ -40,6 +40,14 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('"Create report"', source)
         self.assertIn('st.markdown(f"#### Reports ({len(queue)})")', source)
 
+    def test_find_track_uses_direct_button_on_the_first_click(self):
+        source = _function_source("render_melodyiq_import_v68_97")
+
+        self.assertIn("search_submitted = st.button(", source)
+        self.assertIn('key="melodyiq_find_track_v68_102"', source)
+        self.assertNotIn("with st.form(", source)
+        self.assertNotIn("st.form_submit_button(", source)
+
     def test_report_creation_copy_is_concise_and_supports_multiple_reports(self):
         source = _function_source("render_melodyiq_import_v68_97")
 

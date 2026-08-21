@@ -3492,7 +3492,7 @@ def _render_melodyiq_report_card_v68_100(
 def render_melodyiq_import_v68_97() -> None:
     """Render the primary MelodyIQ track-to-batch importer.
 
-    Requests occur only behind explicit form submissions/buttons so ordinary
+    Requests occur only behind explicit button clicks so ordinary
     Streamlit reruns never consume MelodyIQ quota.
     """
     with st.container(border=True):
@@ -3508,27 +3508,20 @@ def render_melodyiq_import_v68_97() -> None:
             return
 
         client = MelodyIQClient(api_key)
-        with st.form("melodyiq_sound_search_v68_97"):
-            track_col, artist_col = st.columns(2)
-            with track_col:
-                track = st.text_input(
-                    "Track name",
-                    value=safe_str(st.session_state.get("melodyiq_track_v68_97")),
-                    placeholder="e.g. Every Summertime",
-                )
-            with artist_col:
-                artist = st.text_input(
-                    "Artist (optional)",
-                    value=safe_str(
-                        st.session_state.get("melodyiq_artist_input_v68_98")
-                    ),
-                    placeholder="e.g. NIKI",
-                )
-            search_submitted = st.form_submit_button(
-                "Find track",
-                type="primary",
-                width="stretch",
-                icon=":material/search:",
+        track_col, artist_col = st.columns(2)
+        with track_col:
+            track = st.text_input(
+                "Track name",
+                value=safe_str(st.session_state.get("melodyiq_track_v68_97")),
+                placeholder="e.g. Every Summertime",
+            )
+        with artist_col:
+            artist = st.text_input(
+                "Artist (optional)",
+                value=safe_str(
+                    st.session_state.get("melodyiq_artist_input_v68_98")
+                ),
+                placeholder="e.g. NIKI",
             )
 
         resolved_artist = safe_str(artist)
@@ -3537,6 +3530,13 @@ def render_melodyiq_import_v68_97() -> None:
                 track,
                 artist,
             )
+        search_submitted = st.button(
+            "Find track",
+            type="primary",
+            width="stretch",
+            icon=":material/search:",
+            key="melodyiq_find_track_v68_102",
+        )
 
         search_failed = False
         if search_submitted:
