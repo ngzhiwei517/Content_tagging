@@ -72,8 +72,9 @@ class MelodyIQImportUiTests(unittest.TestCase):
     def test_report_creation_saves_the_requested_import_scope(self):
         source = _function_source("render_melodyiq_import_v68_97")
 
-        self.assertIn("_render_melodyiq_import_plan_controls_v68_101(", source)
+        self.assertNotIn("_render_melodyiq_import_plan_controls_v68_101(", source)
         self.assertIn('"import_scope": import_plan', source)
+        self.assertIn('"Latest, or All posts after each report is ready', source)
 
     def test_import_scope_offers_top_latest_and_all(self):
         source = _function_source(
@@ -87,16 +88,20 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn("st.segmented_control(", source)
         self.assertIn('"Number of posts"', source)
         self.assertIn('"Number of recent posts"', source)
-        self.assertIn('"Maximum rows to import"', source)
+        self.assertNotIn('"Maximum rows to import"', source)
+        self.assertIn("Preview or download the complete report", source)
 
     def test_ready_report_applies_its_saved_import_scope(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")
 
+        self.assertIn("_render_melodyiq_import_plan_controls_v68_101(", source)
         self.assertIn('if import_plan["mode"] == "all":', source)
         self.assertIn('"postCreatedAt"', source)
         self.assertIn('limit=int(import_plan["limit"])', source)
         self.assertIn('sort_field=sort_field', source)
-        self.assertIn('max_rows=int(import_plan["limit"])', source)
+        self.assertIn('"Preview report"', source)
+        self.assertIn('"Download full report CSV"', source)
+        self.assertIn("limit=20", source)
 
     def test_report_queue_migrates_legacy_single_report(self):
         source = _function_source("_melodyiq_report_queue_v68_100")
