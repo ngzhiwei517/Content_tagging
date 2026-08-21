@@ -3129,6 +3129,7 @@ MELODYIQ_IMPORT_MODE_LABELS_V68_101 = {
     "latest": "Latest posts",
     "all": "All posts",
 }
+MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102 = 20000
 MELODYIQ_IMPORT_SORT_FIELDS_V68_101 = {
     "Views": "viewCount",
     "Likes": "likeCount",
@@ -3148,7 +3149,9 @@ def _melodyiq_import_plan_v68_101(value: Optional[Dict] = None) -> Dict:
     sort_field = safe_str(raw.get("sort_field")) or "viewCount"
     if sort_field not in MELODYIQ_IMPORT_SORT_FIELDS_V68_101.values():
         sort_field = "viewCount"
-    default_limit = 20000 if mode == "all" else 100
+    default_limit = (
+        MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102 if mode == "all" else 100
+    )
     limit = clean_num(raw.get("limit")) or default_limit
     return {
         "mode": mode,
@@ -3243,14 +3246,10 @@ def _render_melodyiq_import_plan_controls_v68_101(
             key=f"{key_prefix}_limit_latest",
         )
     else:
-        limit = st.number_input(
-            "Maximum rows to import",
-            min_value=100,
-            max_value=100000,
-            value=min(max(int(limit), 100), 100000),
-            step=1000,
-            help="A safety limit protects Streamlit from very large report exports.",
-            key=f"{key_prefix}_limit_all",
+        limit = MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102
+        st.caption(
+            "All posts are selected automatically. Very large exports use the "
+            "app's safety limit."
         )
 
     if show_report_note:

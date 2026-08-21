@@ -87,7 +87,9 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn("st.segmented_control(", source)
         self.assertIn('"Number of posts"', source)
         self.assertIn('"Number of recent posts"', source)
-        self.assertIn('"Maximum rows to import"', source)
+        self.assertNotIn('"Maximum rows to import"', source)
+        self.assertIn("MELODYIQ_ALL_POSTS_SAFETY_LIMIT_V68_102", source)
+        self.assertIn("All posts are selected automatically", source)
 
     def test_ready_report_applies_its_saved_import_scope(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")
