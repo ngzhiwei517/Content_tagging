@@ -115,6 +115,22 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('key=f"melodyiq_download_report_{report_key}"', source)
         self.assertIn("Download always", source)
 
+    def test_report_preview_links_open_the_original_post(self):
+        source = _function_source("_render_melodyiq_report_card_v68_100")
+        preview_source = _function_source("_melodyiq_report_preview_rows_v68_103")
+
+        self.assertIn('"Preview report"', source)
+        self.assertIn('preview_column_config["Link"]', source)
+        self.assertIn("st.column_config.LinkColumn(", source)
+        self.assertIn(
+            'key=f"melodyiq_report_preview_table_{report_key}"',
+            source,
+        )
+        self.assertIn(
+            'limit=min(max(int(import_plan.get("limit", 20)), 1), 20)',
+            preview_source,
+        )
+
     def test_report_queue_migrates_legacy_single_report(self):
         source = _function_source("_melodyiq_report_queue_v68_100")
 

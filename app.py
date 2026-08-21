@@ -3339,6 +3339,35 @@ def _melodyiq_import_rows_v68_97(
     return standardized
 
 
+def _melodyiq_report_preview_rows_v68_103(
+    client: MelodyIQClient,
+    report_id: str,
+    import_plan: Dict,
+    *,
+    track: str,
+    artist: str,
+) -> pd.DataFrame:
+    """Load a small report preview only after the user requests it."""
+    sort_field = (
+        "postCreatedAt"
+        if import_plan.get("mode") == "latest"
+        else safe_str(import_plan.get("sort_field")) or "viewCount"
+    )
+    posts = client.get_all_impactful_posts(
+        report_id,
+        limit=min(max(int(import_plan.get("limit", 20)), 1), 20),
+        sort_field=sort_field,
+        sort_direction="asc" if sort_field == "rank" else "desc",
+    )
+    return _melodyiq_import_rows_v68_97(
+        impactful_posts_frame(posts),
+        source_name=f"MelodyIQ API - {track}",
+        track=track,
+        artist=artist,
+        impactful=True,
+    ).head(20)
+
+
 def _render_melodyiq_report_card_v68_100(
     client: MelodyIQClient,
     entry: Dict,
@@ -3368,6 +3397,7 @@ def _render_melodyiq_report_card_v68_100(
         if not ready:
             st.info("MelodyIQ is preparing this report. Its status refreshes automatically.")
         else:
+            preview_key = f"melodyiq_preview_frame_{report_key}"
             import_plan = _melodyiq_import_plan_v68_101(entry.get("import_scope"))
             updated_plan = _render_melodyiq_import_plan_controls_v68_101(
                 f"melodyiq_report_scope_{report_key}",
@@ -3383,6 +3413,7 @@ def _render_melodyiq_report_card_v68_100(
                 _melodyiq_save_report_queue_v68_100(queue)
                 entry["import_scope"] = updated_plan
                 import_plan = updated_plan
+                st.session_state.pop(preview_key, None)
 
             st.caption(
                 "This selection controls Current batch only. Download always "
@@ -3397,8 +3428,16 @@ def _render_melodyiq_report_card_v68_100(
                 ),
                 key=f"melodyiq_delete_after_{report_key}",
             )
-            action_columns = st.columns(2)
+            action_columns = st.columns(3)
             with action_columns[0]:
+                preview_clicked = st.button(
+                    "Preview report",
+                    icon=":material/visibility:",
+                    width="stretch",
+                    key=f"melodyiq_preview_report_{report_key}",
+                    help="Shows up to 20 posts from the current import selection.",
+                )
+            with action_columns[1]:
                 import_clicked = st.button(
                     "Add posts to Current batch",
                     type="primary",
@@ -3406,7 +3445,7 @@ def _render_melodyiq_report_card_v68_100(
                     key=f"melodyiq_import_posts_{report_key}",
                 )
             export_url = safe_str(tiktok_report.get("postsExportUrl"))
-            with action_columns[1]:
+            with action_columns[2]:
                 st.link_button(
                     "Download full report CSV",
                     export_url or "https://api.melodyiq.com",
@@ -3419,6 +3458,54 @@ def _render_melodyiq_report_card_v68_100(
                     ),
                     width="stretch",
                 )
+
+            if preview_clicked:
+                try:
+                    preview = _melodyiq_report_preview_rows_v68_103(
+                        client,
+                        report_id,
+                        import_plan,
+                        track=track_value,
+                        artist=artist_value,
+                    )
+                    if preview.empty:
+                        raise MelodyIQError(
+                            "The report did not contain supported TikTok post URLs."
+                        )
+                    st.session_state[preview_key] = preview
+                except MelodyIQError as exc:
+                    st.error(str(exc))
+
+            preview_frame = st.session_state.get(preview_key)
+            if isinstance(preview_frame, pd.DataFrame) and not preview_frame.empty:
+                preview_columns = [
+                    column
+                    for column in (
+                        "Platform",
+                        "Creator",
+                        "Link",
+                        "Views",
+                        "Likes",
+                        "Comments",
+                        "Shares",
+                    )
+                    if column in preview_frame.columns
+                ]
+                preview_column_config = {}
+                if "Link" in preview_columns:
+                    preview_column_config["Link"] = st.column_config.LinkColumn(
+                        "Link",
+                        width="large",
+                        help="Click a URL to open that TikTok post.",
+                    )
+                st.dataframe(
+                    preview_frame[preview_columns],
+                    hide_index=True,
+                    width="stretch",
+                    column_config=preview_column_config,
+                    key=f"melodyiq_report_preview_table_{report_key}",
+                )
+
             if import_clicked:
                 try:
                     if import_plan["mode"] == "all":
@@ -3462,6 +3549,7 @@ def _render_melodyiq_report_card_v68_100(
                         try:
                             client.delete_report(report_id)
                             _melodyiq_remove_report_v68_100(report_id)
+                            st.session_state.pop(preview_key, None)
                         except MelodyIQError:
                             cleanup_warning = (
                                 " The posts were imported, but the temporary report "
@@ -3484,6 +3572,10 @@ def _render_melodyiq_report_card_v68_100(
             try:
                 client.delete_report(report_id)
                 _melodyiq_remove_report_v68_100(report_id)
+                st.session_state.pop(
+                    f"melodyiq_preview_frame_{report_key}",
+                    None,
+                )
                 st.rerun()
             except MelodyIQError as exc:
                 st.error(str(exc))
