@@ -3369,13 +3369,11 @@ def _render_melodyiq_report_card_v68_100(
             st.info("MelodyIQ is preparing this report. Its status refreshes automatically.")
         else:
             import_plan = _melodyiq_import_plan_v68_101(entry.get("import_scope"))
-            st.caption(f"Import selection: {_melodyiq_import_plan_caption_v68_101(import_plan)}")
-            with st.expander("Change import selection"):
-                updated_plan = _render_melodyiq_import_plan_controls_v68_101(
-                    f"melodyiq_report_scope_{report_key}",
-                    initial=import_plan,
-                    show_report_note=False,
-                )
+            updated_plan = _render_melodyiq_import_plan_controls_v68_101(
+                f"melodyiq_report_scope_{report_key}",
+                initial=import_plan,
+                show_report_note=False,
+            )
             if updated_plan != import_plan:
                 queue = _melodyiq_report_queue_v68_100()
                 for queue_entry in queue:
@@ -3386,6 +3384,10 @@ def _render_melodyiq_report_card_v68_100(
                 entry["import_scope"] = updated_plan
                 import_plan = updated_plan
 
+            st.caption(
+                "This selection controls Current batch only. Download always "
+                "contains the complete MelodyIQ report."
+            )
             delete_after = st.checkbox(
                 "Delete this temporary report after a successful import",
                 value=True,
@@ -3395,15 +3397,31 @@ def _render_melodyiq_report_card_v68_100(
                 ),
                 key=f"melodyiq_delete_after_{report_key}",
             )
-            if st.button(
-                "Add posts to Current batch",
-                type="primary",
-                width="stretch",
-                key=f"melodyiq_import_posts_{report_key}",
-            ):
+            action_columns = st.columns(2)
+            with action_columns[0]:
+                import_clicked = st.button(
+                    "Add posts to Current batch",
+                    type="primary",
+                    width="stretch",
+                    key=f"melodyiq_import_posts_{report_key}",
+                )
+            export_url = safe_str(tiktok_report.get("postsExportUrl"))
+            with action_columns[1]:
+                st.link_button(
+                    "Download full report CSV",
+                    export_url or "https://api.melodyiq.com",
+                    key=f"melodyiq_download_report_{report_key}",
+                    icon=":material/download:",
+                    disabled=not bool(export_url),
+                    help=(
+                        "Downloads the complete MelodyIQ CSV. The import selection "
+                        "does not limit this file."
+                    ),
+                    width="stretch",
+                )
+            if import_clicked:
                 try:
                     if import_plan["mode"] == "all":
-                        export_url = safe_str(tiktok_report.get("postsExportUrl"))
                         raw = client.download_csv(
                             export_url,
                             max_rows=int(import_plan["limit"]),
@@ -3582,13 +3600,7 @@ def render_melodyiq_import_v68_97() -> None:
                     f"about {selected_posts:,} tracked posts"
                 )
 
-            import_plan = _render_melodyiq_import_plan_controls_v68_101(
-                "melodyiq_new_report_scope_v68_101",
-                initial=st.session_state.get(
-                    "melodyiq_new_report_scope_value_v68_101"
-                ),
-            )
-            st.session_state.melodyiq_new_report_scope_value_v68_101 = import_plan
+            import_plan = _melodyiq_import_plan_v68_101()
             if st.button(
                 "Create report",
                 disabled=not bool(selected_sound_ids),
@@ -3632,8 +3644,10 @@ def render_melodyiq_import_v68_97() -> None:
                 except MelodyIQError as exc:
                     st.error(str(exc))
             st.caption(
-                "You can create multiple reports at the same time. Delete each one "
-                "after import to free a report slot."
+                "MelodyIQ prepares the complete report first. Large tracks may take "
+                "several minutes. You can create multiple reports at the same time. "
+                "Choose posts to import or download the full CSV after the report "
+                "is ready. Delete each report after import to free a report slot."
             )
 
         queue = _melodyiq_report_queue_v68_100()
