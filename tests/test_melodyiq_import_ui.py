@@ -52,6 +52,8 @@ class MelodyIQImportUiTests(unittest.TestCase):
         source = _function_source("render_melodyiq_import_v68_97")
 
         self.assertIn('"Review matched TikTok sounds"', source)
+        self.assertIn("automatically adds related TikTok sounds", source)
+        self.assertIn("may include thousands of posts", source)
         self.assertIn("You can create multiple reports at the same time", source)
         self.assertIn("after import to free a report slot.", source)
         self.assertNotIn("Prepare another standard report?", source)

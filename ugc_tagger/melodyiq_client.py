@@ -162,7 +162,7 @@ class MelodyIQClient:
         body: Dict[str, Any] = {
             "name": str(name or "Content Tagger import").strip(),
             "isPriorityReport": False,
-            "isSuggestedSoundAutoAddEnabled": False,
+            "isSuggestedSoundAutoAddEnabled": True,
             "tktk": {"soundIds": ids},
         }
         clean_artists = [str(value).strip() for value in (artists or []) if str(value).strip()]

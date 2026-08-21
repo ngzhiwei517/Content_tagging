@@ -3736,8 +3736,9 @@ def render_melodyiq_import_v68_97() -> None:
                 except MelodyIQError as exc:
                     st.error(str(exc))
             st.caption(
-                "MelodyIQ prepares the complete report first. Large tracks may take "
-                "several minutes. You can create multiple reports at the same time. "
+                "MelodyIQ automatically adds related TikTok sounds and prepares the "
+                "complete report first. Large tracks may include thousands of posts "
+                "and take longer to prepare. You can create multiple reports at the same time. "
                 "Choose posts to import or download the full CSV after the report "
                 "is ready. Delete each report after import to free a report slot."
             )

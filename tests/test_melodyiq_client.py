@@ -75,7 +75,7 @@ class MelodyIQClientTests(unittest.TestCase):
         self.assertEqual(kwargs["json"]["artists"], ["NIKI"])
         self.assertEqual(kwargs["json"]["sortField"], "postCount")
 
-    def test_create_report_is_non_priority_and_deduplicates_sound_ids(self):
+    def test_create_report_is_non_priority_adds_related_sounds_and_deduplicates_ids(self):
         session = FakeSession([FakeResponse(status_code=201, payload={"reportId": "r1"})])
         client = MelodyIQClient("test-key", session=session)
 
@@ -84,7 +84,7 @@ class MelodyIQClientTests(unittest.TestCase):
         self.assertEqual(result["reportId"], "r1")
         body = session.calls[0][2]["json"]
         self.assertFalse(body["isPriorityReport"])
-        self.assertFalse(body["isSuggestedSoundAutoAddEnabled"])
+        self.assertTrue(body["isSuggestedSoundAutoAddEnabled"])
         self.assertEqual(body["tktk"]["soundIds"], ["sound-1", "sound-2"])
 
     def test_impactful_pagination_stops_at_requested_limit(self):
