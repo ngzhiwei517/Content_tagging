@@ -109,6 +109,7 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn("MELODYIQ_API_BATCH_ROWS_V68_106", source)
         self.assertIn('"No app row maximum.', source)
         self.assertIn('"Creator country (optional)"', source)
+        self.assertIn("creatorCountryCodes", source)
         self.assertIn("accept_new_options=True", source)
         self.assertIn('"Post date range (optional)"', source)
         self.assertIn("st.date_input(", source)

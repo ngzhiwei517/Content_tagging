@@ -3590,8 +3590,8 @@ def _render_melodyiq_import_plan_controls_v68_101(
         accept_new_options=True,
         placeholder="Select or enter a country code",
         help=(
-            "Sent to MelodyIQ as creatorCountries before pagination, for example "
-            "SG or MY."
+            "Sent to MelodyIQ as creatorCountryCodes before pagination, for "
+            "example SG or MY."
         ),
         key=f"{key_prefix}_creator_country",
     )

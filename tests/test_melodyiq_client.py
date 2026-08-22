@@ -69,7 +69,7 @@ class MelodyIQClientTests(unittest.TestCase):
         self.assertEqual(result["sounds"], [])
         method, url, kwargs = session.calls[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://api.melodyiq.com/v1/tktk/sounds/search")
+        self.assertEqual(url, "https://api.melodyiq.com/v1/sounds/tktk/search")
         self.assertEqual(kwargs["headers"]["x-api-key"], "test-key")
         self.assertEqual(kwargs["json"]["title"], "Every Summertime")
         self.assertEqual(kwargs["json"]["artists"], ["NIKI"])
@@ -121,7 +121,7 @@ class MelodyIQClientTests(unittest.TestCase):
                 FakeResponse(
                     payload={
                         "posts": [
-                            {"postId": "1", "creatorCountry": "SG"},
+                            {"postId": "1", "creatorCountryCode": "SG"},
                         ],
                         "pagination": {"currentPage": 1, "lastPage": 2},
                     }
@@ -129,7 +129,7 @@ class MelodyIQClientTests(unittest.TestCase):
                 FakeResponse(
                     payload={
                         "posts": [
-                            {"postId": "2", "creatorCountry": "MY"},
+                            {"postId": "2", "creatorCountryCode": "MY"},
                         ],
                         "pagination": {"currentPage": 2, "lastPage": 2},
                     }
@@ -149,7 +149,10 @@ class MelodyIQClientTests(unittest.TestCase):
         self.assertEqual([post["postId"] for post in posts], ["1", "2"])
         self.assertEqual(len(session.calls), 2)
         for _method, _url, kwargs in session.calls:
-            self.assertEqual(kwargs["params"]["creatorCountries"], "SG,MY")
+            self.assertEqual(
+                kwargs["params"]["creatorCountryCodes"],
+                "SG,MY",
+            )
             self.assertEqual(
                 kwargs["params"]["postCreatedAt[min]"],
                 "2026-08-01T00:00:00.000Z",
@@ -175,7 +178,7 @@ class MelodyIQClientTests(unittest.TestCase):
         client.get_impactful_posts("r1")
 
         params = session.calls[0][2]["params"]
-        self.assertNotIn("creatorCountries", params)
+        self.assertNotIn("creatorCountryCodes", params)
         self.assertNotIn("postCreatedAt[min]", params)
         self.assertNotIn("postCreatedAt[max]", params)
 
@@ -265,7 +268,7 @@ class MelodyIQClientTests(unittest.TestCase):
                 {
                     "url": "https://www.tiktok.com/@creator/video/123",
                     "creatorUsername": "creator",
-                    "creatorCountry": "SG",
+                    "creatorCountryCode": "SG",
                     "creatorFollowerCount": 100,
                     "viewCount": 1000,
                     "likeCount": 10,
@@ -277,6 +280,7 @@ class MelodyIQClientTests(unittest.TestCase):
         )
 
         self.assertEqual(frame.loc[0, "Total Engagement"], 15)
+        self.assertEqual(frame.loc[0, "Market"], "SG")
         self.assertTrue(pd.isna(frame.loc[0, "Saves"]))
         self.assertEqual(frame.loc[0, "MelodyIQ Impact Rank"], 1)
 

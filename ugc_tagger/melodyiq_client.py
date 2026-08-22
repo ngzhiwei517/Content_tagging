@@ -144,7 +144,7 @@ class MelodyIQClient:
         return self._json(
             self._request(
                 "POST",
-                "/v1/tktk/sounds/search",
+                "/v1/sounds/tktk/search",
                 json_body=body,
             )
         )
@@ -217,7 +217,7 @@ class MelodyIQClient:
             )
         )[:100]
         if countries:
-            params["creatorCountries"] = ",".join(countries)
+            params["creatorCountryCodes"] = ",".join(countries)
         if str(post_created_at_min or "").strip():
             params["postCreatedAt[min]"] = str(post_created_at_min).strip()
         if str(post_created_at_max or "").strip():
@@ -356,7 +356,11 @@ def impactful_posts_frame(posts: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
                 "Link": post.get("url"),
                 "Date": post.get("postCreatedAt"),
                 "Creator": post.get("creatorUsername"),
-                "Market": post.get("creatorCountry"),
+                "Market": (
+                    post.get("creatorCountryCode")
+                    or post.get("creatorCountry")
+                    or post.get("creatorCountryName")
+                ),
                 "Followers": post.get("creatorFollowerCount"),
                 "Views": post.get("viewCount"),
                 "Likes": likes,
