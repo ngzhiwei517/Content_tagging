@@ -141,6 +141,24 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('"fewer rows."', source)
         self.assertNotIn('"Download full report CSV"', source)
         self.assertNotIn("Download always", source)
+        self.assertIn("attach_melodyiq_scope_rows(", source)
+
+    def test_current_batch_offers_a_larger_loaded_api_csv_without_fetching(self):
+        app_source = APP_PATH.read_text(encoding="utf-8")
+        render_source = _function_source(
+            "_render_melodyiq_api_csv_downloads_v68_108"
+        )
+
+        self.assertIn('"Download loaded API CSV"', render_source)
+        self.assertIn("can exceed 10,000 rows", render_source)
+        self.assertIn("makes no additional MelodyIQ requests", render_source)
+        self.assertIn("melodyiq_scope_export_frame(batch, scope_key)", render_source)
+        self.assertIn("st.download_button(", render_source)
+        self.assertNotIn("MelodyIQClient", render_source)
+        self.assertIn(
+            "_render_melodyiq_api_csv_downloads_v68_108(batch)",
+            app_source,
+        )
 
     def test_report_preview_links_open_the_original_post(self):
         source = _function_source("_render_melodyiq_report_card_v68_100")

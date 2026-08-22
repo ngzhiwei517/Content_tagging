@@ -472,6 +472,16 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertNotIn("secret-value", serialized)
         self.assertNotIn("downloaded.mp4", serialized)
 
+    def test_runtime_dataframe_preserves_normalized_melodyiq_export_membership(self):
+        scope_ranks = '{"scope-1":1}'
+        payload = self.to_payload(pd.DataFrame([{
+            "Link": "https://www.tiktok.com/@creator/video/1",
+            "_MelodyIQ API Scope Ranks": scope_ranks,
+        }]))
+
+        self.assertIn("_MelodyIQ API Scope Ranks", payload["columns"])
+        self.assertIn(scope_ranks, payload["data"][0])
+
     def test_melodyiq_checkpoint_excludes_live_response_and_signed_url(self):
         namespace = {
             "date": date,

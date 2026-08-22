@@ -16,6 +16,11 @@ from ugc_tagger.instagram_reels_adapter import (
     is_supported_post_url,
 )
 from ugc_tagger.final_update2_adapter import normalize_url as final_update2_normalize_url
+from ugc_tagger.melodyiq_export import (
+    MELODYIQ_SCOPE_RANKS_COLUMN,
+    melodyiq_scope_rank_map,
+    merge_melodyiq_scope_rank_values,
+)
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -73,6 +78,8 @@ class CsvCompatibilityTests(unittest.TestCase):
             "is_instagram_post_url": is_instagram_post_url,
             "is_supported_post_url": is_supported_post_url,
             "final_update2_normalize_url": final_update2_normalize_url,
+            "MELODYIQ_SCOPE_RANKS_COLUMN": MELODYIQ_SCOPE_RANKS_COLUMN,
+            "merge_melodyiq_scope_rank_values": merge_melodyiq_scope_rank_values,
         }
         for name in [
             "safe_str",
@@ -670,6 +677,32 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "Source"], "upload.csv")
         self.assertEqual(merged.loc[0, "Market"], "ID")
         self.assertEqual(merged.loc[0, "Views"], 125)
+
+    def test_duplicate_row_preserves_multiple_melodyiq_api_scopes(self):
+        link = "https://www.tiktok.com/@audio/video/7600000000000000097"
+        first_scope = '{"report_id":"report-1"}'
+        second_scope = '{"report_id":"report-2"}'
+        combined = pd.DataFrame([
+            {
+                "Link": link,
+                "Source": "MelodyIQ API - Track",
+                MELODYIQ_SCOPE_RANKS_COLUMN: '{"{\\"report_id\\":\\"report-1\\"}":1}',
+            },
+            {
+                "Link": link,
+                "Source": "MelodyIQ API - Track",
+                MELODYIQ_SCOPE_RANKS_COLUMN: '{"{\\"report_id\\":\\"report-2\\"}":25}',
+            },
+        ])
+        combined["_link_key"] = combined["Link"]
+
+        merged = self.coalesce_duplicate_batch_rows(combined)
+        rank_map = melodyiq_scope_rank_map(
+            merged.loc[0, MELODYIQ_SCOPE_RANKS_COLUMN]
+        )
+
+        self.assertEqual(rank_map[first_scope], 1)
+        self.assertEqual(rank_map[second_scope], 25)
 
 
 if __name__ == "__main__":

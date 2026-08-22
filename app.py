@@ -130,6 +130,15 @@ from ugc_tagger.melodyiq_client import (
     MelodyIQError,
     impactful_posts_frame,
 )
+from ugc_tagger.melodyiq_export import (
+    MELODYIQ_SCOPE_RANKS_COLUMN,
+    attach_melodyiq_scope_rows,
+    melodyiq_scope_details,
+    melodyiq_scope_export_frame,
+    melodyiq_scope_key,
+    melodyiq_scope_keys,
+    merge_melodyiq_scope_rank_values,
+)
 from ugc_tagger.melodyiq_status import (
     elapsed_seconds as melodyiq_elapsed_seconds,
     format_elapsed as format_melodyiq_elapsed,
@@ -3172,6 +3181,12 @@ def coalesce_duplicate_batch_rows(frame: pd.DataFrame) -> pd.DataFrame:
                     continue
                 if missing(merged.get(column), column) and not missing(candidate.get(column), column):
                     merged[column] = normalize_market(candidate[column]) if column == "Market" else candidate[column]
+        if MELODYIQ_SCOPE_RANKS_COLUMN in frame.columns:
+            merged_scope_ranks = merge_melodyiq_scope_rank_values(
+                group[MELODYIQ_SCOPE_RANKS_COLUMN].tolist()
+            )
+            if merged_scope_ranks:
+                merged[MELODYIQ_SCOPE_RANKS_COLUMN] = merged_scope_ranks
         if "Market" in frame.columns:
             merged["Market"] = normalize_market(merged.get("Market"))
         merged_rows.append(merged)
@@ -3501,6 +3516,78 @@ def _render_melodyiq_api_progress_v68_106(state: Dict) -> None:
         f"filtered impactful posts through page {current_page:,}{page_total}."
         f"{completion_text}"
     )
+
+
+@st.cache_data(max_entries=12, show_spinner=False)
+def _melodyiq_api_csv_bytes_v68_108(frame: pd.DataFrame) -> bytes:
+    """Serialize already-loaded normalized API rows without another API call."""
+    return frame.to_csv(index=False).encode("utf-8-sig")
+
+
+def _melodyiq_api_csv_filename_v68_108(
+    frame: pd.DataFrame,
+    scope_key: str,
+) -> str:
+    """Return a concise filename for one loaded MelodyIQ API scope."""
+    details = melodyiq_scope_details(scope_key)
+    track = safe_str(frame.iloc[0].get("Track")) if not frame.empty else "report"
+    track_slug = re.sub(r"[^A-Za-z0-9]+", "_", track).strip("_")[:60] or "report"
+    country_slug = safe_str(details.get("creator_country")) or "all_countries"
+    return f"melodyiq_api_{track_slug}_{country_slug}_{len(frame)}_loaded.csv"
+
+
+def _render_melodyiq_api_csv_downloads_v68_108(batch: pd.DataFrame) -> None:
+    """Render report-specific CSV downloads from API rows already in Current Batch."""
+    scope_keys = melodyiq_scope_keys(batch)
+    if not scope_keys:
+        return
+
+    st.markdown("#### MelodyIQ API CSV downloads")
+    st.caption(
+        "These CSVs contain unique API posts already loaded into Current batch and "
+        "can exceed 10,000 rows. Downloading makes no additional MelodyIQ requests."
+    )
+    for index, scope_key in enumerate(scope_keys):
+        export_frame = melodyiq_scope_export_frame(batch, scope_key)
+        if export_frame.empty:
+            continue
+        details = melodyiq_scope_details(scope_key)
+        track = safe_str(export_frame.iloc[0].get("Track")) or "Untitled track"
+        artist = safe_str(export_frame.iloc[0].get("Campaign Artist"))
+        country = safe_str(details.get("creator_country")) or "All countries"
+        date_min = safe_str(details.get("post_created_at_min"))
+        date_max = safe_str(details.get("post_created_at_max"))
+        date_text = ""
+        if date_min and date_max:
+            date_text = f" · {date_min} to {date_max}"
+        elif date_min:
+            date_text = f" · from {date_min}"
+        elif date_max:
+            date_text = f" · through {date_max}"
+        artist_text = f" — {artist}" if artist else ""
+        with st.container(border=True):
+            st.markdown(f"**{track}{artist_text}**")
+            st.caption(
+                f"{len(export_frame):,} unique loaded posts · {country}{date_text}. "
+                "If API progress is not Complete, this file contains only the pages "
+                "loaded so far."
+            )
+            st.download_button(
+                "Download loaded API CSV",
+                data=_melodyiq_api_csv_bytes_v68_108(export_frame),
+                file_name=_melodyiq_api_csv_filename_v68_108(
+                    export_frame,
+                    scope_key,
+                ),
+                mime="text/csv",
+                icon=":material/download:",
+                width="stretch",
+                key=f"melodyiq_api_csv_{index}_{hashlib.sha256(scope_key.encode('utf-8')).hexdigest()[:12]}",
+                help=(
+                    "Exports the normalized MelodyIQ API rows already saved in "
+                    "Current batch. It does not call MelodyIQ again."
+                ),
+            )
 
 
 def _render_melodyiq_import_plan_controls_v68_101(
@@ -4020,6 +4107,16 @@ def _render_melodyiq_report_card_v68_100(
                         date_min, date_max = _melodyiq_post_date_filters_v68_107(
                             import_plan
                         )
+                        api_scope_key = melodyiq_scope_key(
+                            report_id,
+                            creator_country=creator_country,
+                            post_created_at_min=safe_str(
+                                import_plan.get("post_created_at_min")
+                            ),
+                            post_created_at_max=safe_str(
+                                import_plan.get("post_created_at_max")
+                            ),
+                        )
                         pagination_state = _melodyiq_pagination_state_v68_106(
                             entry.get("pagination_state"),
                             creator_country=creator_country,
@@ -4045,12 +4142,18 @@ def _render_melodyiq_report_card_v68_100(
                                 page_result["source_post_count"]
                             )
                             if page_posts:
+                                raw_page = impactful_posts_frame(page_posts)
                                 imported_page = _melodyiq_import_rows_v68_97(
-                                    impactful_posts_frame(page_posts),
+                                    raw_page,
                                     source_name=f"MelodyIQ API - {track_value}",
                                     track=track_value,
                                     artist=artist_value,
                                     impactful=True,
+                                )
+                                imported_page = attach_melodyiq_scope_rows(
+                                    raw_page,
+                                    imported_page,
+                                    api_scope_key,
                                 )
                                 page_added, page_skipped = append_to_batch(
                                     imported_page
@@ -10687,6 +10790,7 @@ if st.session_state.step == 2:
             ("Sources", str(batch["Source"].nunique()), "Files + pasted"),
         ]), unsafe_allow_html=True)
         st.markdown(render_table(batch, max_rows=10, cols=["Platform", "Source", "Link", "Market", "Track", "Original Sound", "Campaign Artist", "Date", "Creator"]), unsafe_allow_html=True)
+        _render_melodyiq_api_csv_downloads_v68_108(batch)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("Clear batch", width="stretch"):
