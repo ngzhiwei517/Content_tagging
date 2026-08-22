@@ -3737,9 +3737,8 @@ def _render_melodyiq_import_plan_controls_v68_101(
     }
 
 
-@st.fragment(run_every=10)
 def _render_melodyiq_report_progress_v68_99(api_key: str) -> None:
-    """Refresh one queued report per interval without rerunning the whole app."""
+    """Refresh one queued report only after an explicit quota-aware request."""
     queue = _melodyiq_report_queue_v68_100()
     pending = [
         (index, value)
@@ -3748,6 +3747,27 @@ def _render_melodyiq_report_progress_v68_99(api_key: str) -> None:
         and safe_str(value.get("report_id"))
     ]
     if not pending:
+        return
+
+    st.info(
+        f"{len(pending)} report(s) are preparing. To protect the shared API "
+        "allowance, MelodyIQ status is checked only when you request it."
+    )
+    check_requested = st.button(
+        "Check report status",
+        icon=":material/refresh:",
+        key="melodyiq_check_report_status_v68_109",
+        help=(
+            "Checks one preparing report. Each click uses one shared MelodyIQ "
+            "API request."
+        ),
+    )
+    if not check_requested:
+        st.caption(
+            "Each click checks one preparing report and uses one shared MelodyIQ "
+            "API request. If several reports are preparing, click again to check "
+            "the next one."
+        )
         return
 
     cursor = int(st.session_state.get("melodyiq_poll_cursor_v68_100", 0))
@@ -3764,12 +3784,14 @@ def _render_melodyiq_report_progress_v68_99(api_key: str) -> None:
         st.warning(f"The report status could not be refreshed yet: {exc}")
         return
 
-    if _melodyiq_report_ready_v68_97(report):
-        st.rerun()
-
-    st.info(
-        f"{len(pending)} report(s) are preparing. Status refreshes automatically, "
-        "one report at a time."
+    track = safe_str(entry.get("track")) or "This report"
+    status = (
+        "is ready"
+        if _melodyiq_report_ready_v68_97(report)
+        else "is still preparing"
+    )
+    st.success(
+        f"Checked {track}: it {status}. One shared MelodyIQ API request was used."
     )
 
 

@@ -186,15 +186,21 @@ class MelodyIQImportUiTests(unittest.TestCase):
         self.assertIn('value["import_scope"] = _melodyiq_import_plan_v68_101(', source)
         self.assertIn("st.session_state.melodyiq_reports_v68_100 = queue", source)
 
-    def test_pending_report_refreshes_automatically(self):
+    def test_pending_report_refreshes_only_when_requested(self):
         source = _function_source("_render_melodyiq_report_progress_v68_99")
         app_source = APP_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("@st.fragment(run_every=10)", app_source)
+        self.assertNotIn("@st.fragment(run_every=10)", app_source)
+        self.assertIn('"Check report status"', source)
+        self.assertIn("if not check_requested:", source)
         self.assertIn("MelodyIQClient(api_key).get_report(report_id)", source)
         self.assertIn("pending[cursor % len(pending)]", source)
-        self.assertIn("refreshes automatically", source)
-        self.assertNotIn("Check report status", app_source)
+        self.assertIn("Each click uses one shared MelodyIQ", source)
+        self.assertNotIn("refreshes automatically", source)
+        self.assertLess(
+            source.index("if not check_requested:"),
+            source.index("MelodyIQClient(api_key).get_report(report_id)"),
+        )
 
     def test_preparing_report_shows_elapsed_time_and_rough_eta(self):
         card_source = _function_source("_render_melodyiq_report_card_v68_100")
