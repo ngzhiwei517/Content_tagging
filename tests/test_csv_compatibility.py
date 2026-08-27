@@ -92,6 +92,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "read_any_table",
             "norm_col",
             "detect_col",
+            "detect_link_column",
             "detect_columns",
             "instagram_export_campaign_context",
             "infer_track_from_filename",
@@ -240,6 +241,53 @@ class CsvCompatibilityTests(unittest.TestCase):
             fallback_market="TH",
         )
         self.assertEqual(rows.loc[0, "Market"], "SG")
+
+    def test_descriptive_post_link_header_is_detected_without_renaming(self):
+        text = (
+            "Date of posting,Post link (direct link to post on tiktok),BGM\n"
+            "2026-08-04,https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072,\n"
+        )
+        rows, columns = self.parse(text, name="MY iQiyi hate that i made you love me.csv")
+        self.assertEqual(columns["link"], "Post link (direct link to post on tiktok)")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows.loc[0, "Link"],
+            "https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072",
+        )
+
+    def test_link_column_can_be_found_from_supported_url_values(self):
+        text = (
+            "Date of posting,Column B,Notes\n"
+            "2026-08-04,https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072,Campaign post\n"
+        )
+        rows, columns = self.parse(text, name="opaque-link-header.csv")
+        self.assertEqual(columns["link"], "Column B")
+        self.assertEqual(len(rows), 1)
+
+    def test_xlsx_descriptive_post_link_header_is_detected(self):
+        workbook = io.BytesIO()
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            pd.DataFrame(
+                [
+                    {
+                        "Date of posting": "2026-08-04",
+                        "Post link (direct link to post on tiktok)": (
+                            "https://www.tiktok.com/@seriesvibe.my/video/"
+                            "7670138745248632072"
+                        ),
+                        "BGM": "",
+                    }
+                ]
+            ).to_excel(
+                writer,
+                index=False,
+                sheet_name="MY hate that i made you love me",
+            )
+        file_name = "MY iQiyi hate that i made you love me.xlsx"
+        frame = self.read_any_table(UploadedFile(file_name, workbook.getvalue()))
+        rows, columns = self.standardize_file_rows(frame, file_name)
+        self.assertEqual(columns["link"], "Post link (direct link to post on tiktok)")
+        self.assertEqual(len(rows), 1)
 
     def test_instagram_reel_file_uses_the_same_canonical_schema(self):
         text = (

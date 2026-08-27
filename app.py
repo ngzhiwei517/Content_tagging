@@ -2782,9 +2782,45 @@ def detect_col(df: pd.DataFrame, candidates: List[str], contains: Optional[List[
     return None
 
 
+def detect_link_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Find a post-link column even when an export adds descriptive wording.
+
+    Many campaign workbooks use headers such as ``Post link (direct link to
+    post on tiktok)`` instead of a short ``Link`` alias. Prefer the usual
+    exact aliases, then use descriptive header tokens, and finally inspect a
+    bounded sample of values for supported TikTok/Instagram post URLs.
+    """
+    exact = detect_col(df, candidates)
+    if exact:
+        return exact
+
+    for terms in [
+        ["post", "link"],
+        ["tiktok", "link"],
+        ["instagram", "link"],
+        ["reel", "link"],
+        ["link"],
+        ["url"],
+        ["permalink"],
+    ]:
+        hinted = detect_col(df, [], contains=terms)
+        if hinted:
+            return hinted
+
+    best_column = None
+    best_matches = 0
+    for column in df.columns:
+        sample = df[column].dropna().head(2000)
+        matches = sum(1 for value in sample if is_supported_link(value))
+        if matches > best_matches:
+            best_column = column
+            best_matches = matches
+    return best_column
+
+
 def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {
-        "link": detect_col(df, [
+        "link": detect_link_column(df, [
             "Link", "URL", "TikTok Link", "TikTok URL", "TikTok Post URL",
             "Instagram Link", "Instagram URL", "Instagram Reel", "Instagram Reel URL",
             "Reel Link", "Reel URL",
