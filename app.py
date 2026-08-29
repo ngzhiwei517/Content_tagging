@@ -3039,6 +3039,20 @@ def append_to_batch(new_df: pd.DataFrame) -> Tuple[int, int]:
     return added, max(skipped, 0)
 
 
+def add_uploaded_rows_to_batch_v68_96(uploaded_rows: pd.DataFrame) -> None:
+    """Commit prepared upload rows before Streamlit reruns the page.
+
+    Button values are ephemeral and only remain true for the run triggered by
+    the click. Using a callback applies the already-prepared rows first, so a
+    slow file reparse or another rerun cannot consume the click before the
+    batch update happens.
+    """
+    added, skipped = append_to_batch(uploaded_rows)
+    st.session_state.last_message = (
+        f"Added {added} uploaded rows. Skipped {skipped} duplicate rows."
+    )
+
+
 # Reusable HTML and workflow presentation helpers
 
 
@@ -8998,6 +9012,12 @@ if st.session_state.step != 6:
 if st.session_state.step == 2:
     st.markdown("<div class='card page-heading'><h2>Add posts</h2><p class='sub'>Upload files or paste post links into one batch.</p></div>", unsafe_allow_html=True)
 
+    if st.session_state.last_message:
+        st.markdown(
+            f"<div class='good-note'>{esc(st.session_state.last_message)}</div>",
+            unsafe_allow_html=True,
+        )
+
     with st.container(border=True):
         durable_analysis_mode_v68_93 = safe_str(
             st.session_state.get("analysis_mode_v68_86")
@@ -9224,15 +9244,15 @@ if st.session_state.step == 2:
             if not combined_upload.empty:
                 if missing_track_files:
                     st.caption("Enter a track name for each uploaded file before adding it to the batch.")
-                if st.button(
+                st.button(
                     "Add uploaded rows to batch",
                     type="primary",
                     width="stretch",
                     disabled=bool(missing_track_files),
-                ):
-                    added, skipped = append_to_batch(combined_upload)
-                    st.session_state.last_message = f"Added {added} uploaded rows. Skipped {skipped} duplicate rows."
-                    st.rerun()
+                    key="add_uploaded_rows_to_batch_v68_96",
+                    on_click=add_uploaded_rows_to_batch_v68_96,
+                    args=(combined_upload,),
+                )
         else:
             st.markdown("<p class='sub'>No file selected yet.</p>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -9332,9 +9352,6 @@ if st.session_state.step == 2:
                 st.session_state.last_message = f"Added {added} pasted links. Skipped {skipped} duplicate links."
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-
-    if st.session_state.last_message:
-        st.markdown(f"<div class='good-note'>{esc(st.session_state.last_message)}</div>", unsafe_allow_html=True)
 
     batch = st.session_state.batch_df
     st.markdown("<div class='card'><h3>Current batch</h3>", unsafe_allow_html=True)
