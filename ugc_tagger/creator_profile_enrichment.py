@@ -18,6 +18,7 @@ from urllib.parse import quote, urlsplit
 
 import pandas as pd
 
+from ugc_tagger.apify_usage_guard import apify_fallback_slot
 from ugc_tagger.instagram_reels_adapter import INSTAGRAM_REELS, TIKTOK
 
 
@@ -175,12 +176,26 @@ def _dataset_id(run) -> str:
     )
 
 
-def _run_actor_items(client, actor_id: str, run_input: Dict) -> List[Dict]:
-    run = client.actor(actor_id).call(run_input=run_input)
-    dataset_id = _dataset_id(run)
-    if not dataset_id:
-        raise RuntimeError("Actor completed without a dataset.")
-    return [item for item in client.dataset(dataset_id).iterate_items() if isinstance(item, dict)]
+def _run_actor_items(
+    client,
+    actor_id: str,
+    run_input: Dict,
+    *,
+    apify_token: str = "",
+) -> List[Dict]:
+    with apify_fallback_slot(
+        apify_token,
+        purpose=f"Creator profile fallback ({actor_id})",
+    ):
+        run = client.actor(actor_id).call(run_input=run_input)
+        dataset_id = _dataset_id(run)
+        if not dataset_id:
+            raise RuntimeError("Actor completed without a dataset.")
+        return [
+            item
+            for item in client.dataset(dataset_id).iterate_items()
+            if isinstance(item, dict)
+        ]
 
 
 def _tiktok_post_row(record: Dict) -> Dict:
@@ -1557,12 +1572,14 @@ def scrape_creator_profile_metrics(
         return pd.DataFrame(columns=PROFILE_METRIC_COLUMNS), []
     if not _text(apify_token) and client is None:
         raise RuntimeError("Missing Apify token.")
+    guard_token = ""
     if client is None:
         try:
             from apify_client import ApifyClient
         except Exception as exc:  # pragma: no cover - dependency contract
             raise RuntimeError("Missing dependency: install apify-client.") from exc
         client = ApifyClient(apify_token)
+        guard_token = apify_token
 
     post_limit = min(max(int(post_limit), 1), 1000)
     instagram_post_limit = min(
@@ -1592,7 +1609,7 @@ def scrape_creator_profile_metrics(
                 "shouldDownloadAvatars": False,
                 "shouldDownloadMusicCovers": False,
                 "commentsPerPost": 0,
-            })
+            }, apify_token=guard_token)
             tiktok_rows = [_tiktok_post_row(item) for item in items]
             rows.extend(tiktok_rows)
             returned_keys = {
@@ -1628,7 +1645,7 @@ def scrape_creator_profile_metrics(
                 "resultsLimit": instagram_post_limit,
                 "onlyPostsNewerThan": f"{months} months",
                 "skipPinnedPosts": True,
-            })
+            }, apify_token=guard_token)
             rows.extend(_instagram_post_row(item) for item in items)
         except Exception:
             failed_platforms.append(INSTAGRAM_REELS)
@@ -1639,7 +1656,7 @@ def scrape_creator_profile_metrics(
                 "resultsType": "details",
                 "resultsLimit": 1,
                 "addProfileStatistics": True,
-            })
+            }, apify_token=guard_token)
             instagram_followers = _instagram_profile_followers(details)
         except Exception:
             errors.append("Instagram follower counts could not be refreshed in this run.")

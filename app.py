@@ -68,6 +68,15 @@ from ugc_tagger.batch_checkpoint import (
     BatchCheckpointStore,
     input_fingerprint,
 )
+from ugc_tagger.apify_usage_guard import (
+    ApifyGuardConfig,
+    active_apify_fallback,
+    apify_capacity_state,
+    configure_apify_guard,
+    current_apify_guard_config,
+    effective_stop_usd,
+    get_apify_usage,
+)
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
     RecoveryCheckpointObjects,
@@ -2126,6 +2135,119 @@ def _managed_api_secret_v68_43(name: str) -> str:
         return ""
 
 
+def _apify_guard_setting_v68_97(name: str, environment_name: str, default):
+    """Read non-secret beta guard settings from Streamlit Secrets or the environment."""
+    try:
+        settings = st.secrets.get("apify_guard", {})
+        value = settings.get(name, default) if settings else default
+    except Exception:
+        value = default
+    return os.getenv(environment_name, value)
+
+
+def _apify_guard_bool_v68_97(value, default: bool) -> bool:
+    text = safe_str(value).casefold()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _configure_apify_guard_v68_97() -> ApifyGuardConfig:
+    """Apply safe beta defaults without exposing account credentials to users."""
+    try:
+        warning = float(
+            _apify_guard_setting_v68_97(
+                "warning_usd", "APIFY_GUARD_WARNING_USD", 3.50
+            )
+        )
+    except (TypeError, ValueError):
+        warning = 3.50
+    try:
+        stop = float(
+            _apify_guard_setting_v68_97(
+                "stop_usd", "APIFY_GUARD_STOP_USD", 4.00
+            )
+        )
+    except (TypeError, ValueError):
+        stop = 4.00
+    config = ApifyGuardConfig(
+        enabled=_apify_guard_bool_v68_97(
+            _apify_guard_setting_v68_97(
+                "enabled", "APIFY_GUARD_ENABLED", True
+            ),
+            True,
+        ),
+        warning_usd=warning,
+        stop_usd=stop,
+        fail_closed=_apify_guard_bool_v68_97(
+            _apify_guard_setting_v68_97(
+                "fail_closed", "APIFY_GUARD_FAIL_CLOSED", True
+            ),
+            True,
+        ),
+    )
+    return configure_apify_guard(config)
+
+
+APIFY_GUARD_CONFIG_V68_97 = _configure_apify_guard_v68_97()
+
+
+def _current_apify_token_v68_97() -> str:
+    return (
+        _managed_api_secret_v68_43("APIFY_TOKEN")
+        or clean_api_secret(
+            st.session_state.get("apify_token", "")
+            or st.session_state.get("apify_token_input_v52", "")
+            or st.session_state.get("apify_token_input", "")
+        )
+    )
+
+
+def _render_apify_beta_safeguard_v68_97(*, show_available: bool = False) -> None:
+    """Show shared fallback capacity without revealing the deployment token."""
+    token = _current_apify_token_v68_97()
+    config = current_apify_guard_config()
+    if not token or not config.enabled:
+        return
+
+    active = active_apify_fallback()
+    try:
+        snapshot = get_apify_usage(token)
+    except Exception:
+        if config.fail_closed:
+            st.warning(
+                "Shared Apify usage cannot be verified, so new paid fallback "
+                "work is paused. Direct retrieval can continue."
+            )
+        return
+
+    state = apify_capacity_state(snapshot, config)
+    stop = effective_stop_usd(snapshot, config)
+    if state == "blocked":
+        st.error(
+            "Apify fallback is temporarily paused because shared usage reached "
+            f"the ${stop:.2f} beta safety threshold. Direct retrieval can continue."
+        )
+    elif state == "warning":
+        st.warning(
+            f"Shared Apify usage is ${snapshot.monthly_usage_usd:.2f}. New paid "
+            f"fallback work will stop at ${stop:.2f}."
+        )
+    elif show_available:
+        st.caption(
+            f"Shared Apify fallback is available · ${snapshot.monthly_usage_usd:.2f} "
+            f"used · safety stop ${stop:.2f}. Direct retrieval runs first."
+        )
+
+    if active or snapshot.active_actor_job_count > 0:
+        st.info(
+            "Another Actor job is currently using the shared Apify account. "
+            "New fallback work will wait for a later retry."
+        )
+
+
 def display_empty(v: str, fallback: str = "Not specified") -> str:
     s = safe_str(v)
     return s if s else fallback
@@ -4023,6 +4145,8 @@ def _is_quota_interruption_v68_43(error) -> bool:
         marker in text
         for marker in (
             "GEMINI_QUOTA_EXHAUSTED",
+            "APIFY_BETA_USAGE_LIMIT",
+            "APIFY_USAGE_CHECK_UNAVAILABLE",
             "RESOURCE_EXHAUSTED",
             "429",
             "QUOTA",
@@ -4052,6 +4176,7 @@ def _large_batch_must_pause_v68_43(error) -> bool:
     return any(
         marker in text
         for marker in (
+            "APIFY_FALLBACK_BUSY",
             "SYSTEMIC_TAGGING_FAILURE",
             "API_KEY_INVALID",
             "API KEY NOT VALID",
@@ -9034,6 +9159,9 @@ st.markdown(
 )
 step_strip(st.session_state.step)
 _render_continue_later_v68_85()
+_render_apify_beta_safeguard_v68_97(
+    show_available=st.session_state.step == 2,
+)
 if st.session_state.pop("runtime_resume_notice_v68_15", False):
     st.markdown(
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",

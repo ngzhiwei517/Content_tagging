@@ -1,5 +1,16 @@
 # Changelog
 
+## v68.42.13 — Shared Apify beta safeguards
+
+- Added a server-side monthly usage check before every paid Apify Actor start.
+- Added configurable $3.50 warning and $4.00 stop thresholds for the shared beta.
+- Serialized paid fallback calls within one Streamlit server process so two
+  concurrent sessions cannot start Actors at the same time.
+- Kept direct retrieval and completed checkpoints available when paid fallback
+  is busy, unavailable, or blocked by the safety threshold.
+- Added setup guidance for Apify notifications, the hard account limit, and
+  multi-instance limitations without exposing the deployment token.
+
 ## v68.42.12 hotfix — Streamlit deployment import compatibility
 
 - Removed the new large-batch fallback helper from the module-level adapter

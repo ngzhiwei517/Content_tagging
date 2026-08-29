@@ -26,6 +26,7 @@ from ugc_tagger.model_comparison import (
     TARGETED_VERIFIER_MODEL,
     normalize_gemini_model,
 )
+from ugc_tagger.apify_usage_guard import apify_fallback_slot
 
 from ugc_tagger.review_routing import apply_review_policy, review_risk_reasons, visual_escalation_reasons
 from ugc_tagger.evidence_verifier import (
@@ -1099,21 +1100,25 @@ def run_apify_tiktok_scraper_api(links, apify_token):
         'scrapeRelatedVideos': False,
         'proxyCountryCode': 'None',
     }
-    run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
+    with apify_fallback_slot(
+        apify_token,
+        purpose="TikTok post fallback",
+    ):
+        run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
 
-    # Apify Python client may return either a dict-like object or a Run object
-    if isinstance(run, dict):
-        dataset_id = run.get('defaultDatasetId') or run.get('default_dataset_id')
-    else:
-        dataset_id = (
-            getattr(run, 'default_dataset_id', None)
-            or getattr(run, 'defaultDatasetId', None)
-        )
+        # Apify Python client may return either a dict-like object or a Run object
+        if isinstance(run, dict):
+            dataset_id = run.get('defaultDatasetId') or run.get('default_dataset_id')
+        else:
+            dataset_id = (
+                getattr(run, 'default_dataset_id', None)
+                or getattr(run, 'defaultDatasetId', None)
+            )
 
-    if not dataset_id:
-        raise RuntimeError('Apify run finished but no default dataset was returned.')
+        if not dataset_id:
+            raise RuntimeError('Apify run finished but no default dataset was returned.')
 
-    return list(client.dataset(dataset_id).iterate_items())
+        return list(client.dataset(dataset_id).iterate_items())
 
 def _apply_original_market_to_results(result_df):
     """Use original CSV/XLSX Country/Market as the source of truth for market."""
@@ -7585,9 +7590,13 @@ elif page == "Batch Filter":
             'scrapeRelatedVideos': False,
             'proxyCountryCode': 'None',
         }
-        run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
-        dataset_id = run.get('defaultDatasetId') if isinstance(run, dict) else getattr(run, 'default_dataset_id', None)
-        items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
+        with apify_fallback_slot(
+            token,
+            purpose="TikTok saves fallback",
+        ):
+            run = client.actor('clockworks/tiktok-scraper').call(run_input=run_input)
+            dataset_id = run.get('defaultDatasetId') if isinstance(run, dict) else getattr(run, 'default_dataset_id', None)
+            items = list(client.dataset(dataset_id).iterate_items()) if dataset_id else []
 
         saves_by_video = {}
         followers_by_video = {}

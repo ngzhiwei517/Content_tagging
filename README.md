@@ -64,9 +64,17 @@ Store deployment credentials in Streamlit Secrets:
 ```toml
 GEMINI_API_KEY = "replace-with-the-deployment-key"
 APIFY_TOKEN = "replace-with-the-deployment-token"
+
+[apify_guard]
+enabled = true
+warning_usd = 3.50
+stop_usd = 4.00
+fail_closed = true
 ```
 
 Never commit real credentials. For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the values there.
+For a shared beta, also enable Apify billing notifications and set the hard
+account limit. See [Apify beta safeguards](docs/APIFY_BETA_SAFEGUARDS.md).
 
 ## Run locally
 
