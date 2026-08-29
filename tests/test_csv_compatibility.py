@@ -92,6 +92,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "read_any_table",
             "norm_col",
             "detect_col",
+            "detect_link_column",
             "detect_columns",
             "instagram_export_campaign_context",
             "infer_track_from_filename",
@@ -241,6 +242,53 @@ class CsvCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(rows.loc[0, "Market"], "SG")
 
+    def test_descriptive_post_link_header_is_detected_without_renaming(self):
+        text = (
+            "Date of posting,Post link (direct link to post on tiktok),BGM\n"
+            "2026-08-04,https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072,\n"
+        )
+        rows, columns = self.parse(text, name="MY iQiyi hate that i made you love me.csv")
+        self.assertEqual(columns["link"], "Post link (direct link to post on tiktok)")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows.loc[0, "Link"],
+            "https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072",
+        )
+
+    def test_link_column_can_be_found_from_supported_url_values(self):
+        text = (
+            "Date of posting,Column B,Notes\n"
+            "2026-08-04,https://www.tiktok.com/@seriesvibe.my/video/7670138745248632072,Campaign post\n"
+        )
+        rows, columns = self.parse(text, name="opaque-link-header.csv")
+        self.assertEqual(columns["link"], "Column B")
+        self.assertEqual(len(rows), 1)
+
+    def test_xlsx_descriptive_post_link_header_is_detected(self):
+        workbook = io.BytesIO()
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            pd.DataFrame(
+                [
+                    {
+                        "Date of posting": "2026-08-04",
+                        "Post link (direct link to post on tiktok)": (
+                            "https://www.tiktok.com/@seriesvibe.my/video/"
+                            "7670138745248632072"
+                        ),
+                        "BGM": "",
+                    }
+                ]
+            ).to_excel(
+                writer,
+                index=False,
+                sheet_name="MY hate that i made you love me",
+            )
+        file_name = "MY iQiyi hate that i made you love me.xlsx"
+        frame = self.read_any_table(UploadedFile(file_name, workbook.getvalue()))
+        rows, columns = self.standardize_file_rows(frame, file_name)
+        self.assertEqual(columns["link"], "Post link (direct link to post on tiktok)")
+        self.assertEqual(len(rows), 1)
+
     def test_instagram_reel_file_uses_the_same_canonical_schema(self):
         text = (
             "Instagram Reel URL,Market,Track Name,View Count,Like Count\n"
@@ -348,6 +396,57 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertNotIn("Market in file:", APP_SOURCE)
         self.assertIn("links = parse_links(link_text)", APP_SOURCE)
         self.assertIn('"Platform": detected_platform', APP_SOURCE)
+        self.assertIn(
+            'key="add_uploaded_rows_to_batch_v68_96"',
+            upload_section,
+        )
+        self.assertIn(
+            "on_click=add_uploaded_rows_to_batch_v68_96",
+            upload_section,
+        )
+        self.assertIn("args=(combined_upload,)", upload_section)
+        self.assertNotIn(
+            'if st.button(\n                    "Add uploaded rows to batch"',
+            upload_section,
+        )
+
+    def test_upload_add_callback_commits_prepared_rows_before_rerun(self):
+        calls = []
+
+        class SessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        class FakeStreamlit:
+            session_state = SessionState(last_message="")
+
+        def append_stub(frame):
+            calls.append(frame.copy())
+            return 2, 1
+
+        callback = load_function(
+            "add_uploaded_rows_to_batch_v68_96",
+            {
+                "pd": pd,
+                "st": FakeStreamlit,
+                "append_to_batch": append_stub,
+            },
+        )
+        prepared_rows = pd.DataFrame(
+            {"Link": ["first", "second", "duplicate"]}
+        )
+
+        callback(prepared_rows)
+
+        self.assertEqual(len(calls), 1)
+        pd.testing.assert_frame_equal(calls[0], prepared_rows)
+        self.assertEqual(
+            FakeStreamlit.session_state.last_message,
+            "Added 2 uploaded rows. Skipped 1 duplicate rows.",
+        )
 
     def test_uploaded_file_track_allows_add_button_without_manual_override(self):
         rows, _ = self.parse(
