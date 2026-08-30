@@ -1,5 +1,14 @@
 # Changelog
 
+## v68.42.14 — Private Apify owner alerts
+
+- Replaced the user-facing Apify spend warning with private, SMTP-based owner
+  emails at the warning and stop thresholds.
+- Kept blocked-user wording neutral while preserving direct retrieval and
+  saved progress.
+- Deduplicated owner alerts by usage cycle and threshold, and kept email
+  delivery failure from weakening the paid-fallback guard.
+
 ## v68.42.13 — Shared Apify beta safeguards
 
 - Added a server-side monthly usage check before every paid Apify Actor start.

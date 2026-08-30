@@ -74,7 +74,9 @@ fail_closed = true
 
 Never commit real credentials. For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the values there.
 For a shared beta, also enable Apify billing notifications and set the hard
-account limit. See [Apify beta safeguards](docs/APIFY_BETA_SAFEGUARDS.md).
+account limit. Private owner alerts can be configured through the optional
+`[apify_guard_email]` Streamlit Secrets section; users do not see usage amounts.
+See [Apify beta safeguards](docs/APIFY_BETA_SAFEGUARDS.md).
 
 ## Run locally
 

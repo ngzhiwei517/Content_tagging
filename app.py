@@ -70,12 +70,14 @@ from ugc_tagger.batch_checkpoint import (
 )
 from ugc_tagger.apify_usage_guard import (
     ApifyGuardConfig,
+    ApifyOwnerEmailConfig,
     active_apify_fallback,
     apify_capacity_state,
     configure_apify_guard,
+    configure_apify_owner_email,
     current_apify_guard_config,
-    effective_stop_usd,
     get_apify_usage,
+    notify_apify_owner_if_needed,
 )
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
@@ -2194,6 +2196,78 @@ def _configure_apify_guard_v68_97() -> ApifyGuardConfig:
 APIFY_GUARD_CONFIG_V68_97 = _configure_apify_guard_v68_97()
 
 
+def _apify_email_setting_v68_98(name: str, environment_name: str, default=""):
+    """Read owner-email settings without placing them in session state."""
+    try:
+        settings = st.secrets.get("apify_guard_email", {})
+        value = settings.get(name, default) if settings else default
+    except Exception:
+        value = default
+    return os.getenv(environment_name, value)
+
+
+def _configure_apify_owner_email_v68_98() -> ApifyOwnerEmailConfig:
+    try:
+        smtp_port = int(
+            _apify_email_setting_v68_98(
+                "smtp_port", "APIFY_ALERT_SMTP_PORT", 587
+            )
+        )
+    except (TypeError, ValueError):
+        smtp_port = 587
+    config = ApifyOwnerEmailConfig(
+        enabled=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "enabled", "APIFY_ALERT_EMAIL_ENABLED", False
+            ),
+            False,
+        ),
+        owner_email=safe_str(
+            _apify_email_setting_v68_98(
+                "owner_email", "APIFY_ALERT_OWNER_EMAIL"
+            )
+        ),
+        sender_email=safe_str(
+            _apify_email_setting_v68_98(
+                "sender_email", "APIFY_ALERT_SENDER_EMAIL"
+            )
+        ),
+        smtp_host=safe_str(
+            _apify_email_setting_v68_98(
+                "smtp_host", "APIFY_ALERT_SMTP_HOST"
+            )
+        ),
+        smtp_port=smtp_port,
+        smtp_username=safe_str(
+            _apify_email_setting_v68_98(
+                "smtp_username", "APIFY_ALERT_SMTP_USERNAME"
+            )
+        ),
+        smtp_password=str(
+            _apify_email_setting_v68_98(
+                "smtp_password", "APIFY_ALERT_SMTP_PASSWORD"
+            )
+            or ""
+        ),
+        use_tls=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "use_tls", "APIFY_ALERT_SMTP_USE_TLS", True
+            ),
+            True,
+        ),
+        use_ssl=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "use_ssl", "APIFY_ALERT_SMTP_USE_SSL", False
+            ),
+            False,
+        ),
+    )
+    return configure_apify_owner_email(config)
+
+
+APIFY_OWNER_EMAIL_CONFIG_V68_98 = _configure_apify_owner_email_v68_98()
+
+
 def _current_apify_token_v68_97() -> str:
     return (
         _managed_api_secret_v68_43("APIFY_TOKEN")
@@ -2205,8 +2279,8 @@ def _current_apify_token_v68_97() -> str:
     )
 
 
-def _render_apify_beta_safeguard_v68_97(*, show_available: bool = False) -> None:
-    """Show shared fallback capacity without revealing the deployment token."""
+def _render_apify_beta_safeguard_v68_97() -> None:
+    """Notify the owner privately and show users only neutral availability text."""
     token = _current_apify_token_v68_97()
     config = current_apify_guard_config()
     if not token or not config.enabled:
@@ -2216,35 +2290,20 @@ def _render_apify_beta_safeguard_v68_97(*, show_available: bool = False) -> None
     try:
         snapshot = get_apify_usage(token)
     except Exception:
-        if config.fail_closed:
-            st.warning(
-                "Shared Apify usage cannot be verified, so new paid fallback "
-                "work is paused. Direct retrieval can continue."
-            )
         return
 
     state = apify_capacity_state(snapshot, config)
-    stop = effective_stop_usd(snapshot, config)
+    notify_apify_owner_if_needed(snapshot, guard_config=config)
     if state == "blocked":
-        st.error(
-            "Apify fallback is temporarily paused because shared usage reached "
-            f"the ${stop:.2f} beta safety threshold. Direct retrieval can continue."
-        )
-    elif state == "warning":
-        st.warning(
-            f"Shared Apify usage is ${snapshot.monthly_usage_usd:.2f}. New paid "
-            f"fallback work will stop at ${stop:.2f}."
-        )
-    elif show_available:
-        st.caption(
-            f"Shared Apify fallback is available · ${snapshot.monthly_usage_usd:.2f} "
-            f"used · safety stop ${stop:.2f}. Direct retrieval runs first."
+        st.info(
+            "Some fallback data is temporarily unavailable. Direct-only retrieval "
+            "can continue, and your saved progress is safe."
         )
 
     if active or snapshot.active_actor_job_count > 0:
         st.info(
-            "Another Actor job is currently using the shared Apify account. "
-            "New fallback work will wait for a later retry."
+            "Shared fallback is temporarily busy. Direct-only retrieval can "
+            "continue, and fallback work will retry later."
         )
 
 
@@ -9159,9 +9218,7 @@ st.markdown(
 )
 step_strip(st.session_state.step)
 _render_continue_later_v68_85()
-_render_apify_beta_safeguard_v68_97(
-    show_available=st.session_state.step == 2,
-)
+_render_apify_beta_safeguard_v68_97()
 if st.session_state.pop("runtime_resume_notice_v68_15", False):
     st.markdown(
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",

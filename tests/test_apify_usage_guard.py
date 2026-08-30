@@ -1,4 +1,5 @@
 import ast
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from ugc_tagger.apify_usage_guard import (
     APIFY_LIMITS_URL,
     ApifyFallbackBusyError,
     ApifyGuardConfig,
+    ApifyOwnerEmailConfig,
     ApifyUsageBlockedError,
     ApifyUsageSnapshot,
     ApifyUsageUnavailableError,
@@ -17,6 +19,7 @@ from ugc_tagger.apify_usage_guard import (
     configure_apify_guard,
     effective_stop_usd,
     fetch_apify_usage,
+    notify_apify_owner_if_needed,
 )
 
 
@@ -40,6 +43,24 @@ class _Response:
 
     def json(self):
         return self.payload
+
+
+class _SMTPClient:
+    def __init__(self, calls, host, port, timeout):
+        self.calls = calls
+        self.calls.append(("connect", host, port, timeout))
+
+    def starttls(self, *, context):
+        self.calls.append(("starttls", bool(context)))
+
+    def login(self, username, password):
+        self.calls.append(("login", username, password))
+
+    def send_message(self, message):
+        self.calls.append(("message", message))
+
+    def quit(self):
+        self.calls.append(("quit",))
 
 
 class ApifyUsageGuardTests(unittest.TestCase):
@@ -88,6 +109,131 @@ class ApifyUsageGuardTests(unittest.TestCase):
         snapshot = usage(2.9, maximum=3.0)
         self.assertEqual(effective_stop_usd(snapshot, config), 3.0)
         self.assertEqual(apify_capacity_state(usage(3.0, 3.0), config), "blocked")
+
+    def test_warning_email_is_private_and_sent_only_once_per_cycle(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as state_dir:
+            email_config = ApifyOwnerEmailConfig(
+                enabled=True,
+                owner_email="owner@example.com",
+                sender_email="tagger@example.com",
+                smtp_host="smtp.example.com",
+                smtp_username="tagger@example.com",
+                smtp_password="secret-password",
+                state_dir=state_dir,
+            )
+
+            def factory(host, port, timeout):
+                return _SMTPClient(calls, host, port, timeout)
+
+            first = notify_apify_owner_if_needed(
+                usage(3.5),
+                guard_config=ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+            second = notify_apify_owner_if_needed(
+                usage(3.75),
+                guard_config=ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+
+        messages = [item[1] for item in calls if item[0] == "message"]
+        self.assertEqual(first, "sent")
+        self.assertEqual(second, "already_sent")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["To"], "owner@example.com")
+        self.assertIn("$3.50", messages[0].get_content())
+        self.assertIn(("starttls", True), calls)
+        self.assertIn(
+            ("login", "tagger@example.com", "secret-password"),
+            calls,
+        )
+        self.assertNotIn("secret-password", messages[0].as_string())
+        self.assertNotIn("secret-password", repr(email_config))
+
+    def test_warning_and_blocked_emails_are_distinct(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as state_dir:
+            email_config = ApifyOwnerEmailConfig(
+                enabled=True,
+                owner_email="owner@example.com",
+                sender_email="tagger@example.com",
+                smtp_host="smtp.example.com",
+                state_dir=state_dir,
+            )
+
+            def factory(host, port, timeout):
+                return _SMTPClient(calls, host, port, timeout)
+
+            warning_status = notify_apify_owner_if_needed(
+                usage(3.5),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+            blocked_status = notify_apify_owner_if_needed(
+                usage(4.0),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+
+        messages = [item[1] for item in calls if item[0] == "message"]
+        self.assertEqual((warning_status, blocked_status), ("sent", "sent"))
+        self.assertEqual(len(messages), 2)
+        self.assertIn("warning", messages[0]["Subject"].lower())
+        self.assertIn("paused", messages[1]["Subject"].lower())
+
+    def test_owner_email_is_optional_and_failure_does_not_break_guard(self):
+        self.assertEqual(
+            notify_apify_owner_if_needed(
+                usage(3.5),
+                email_config=ApifyOwnerEmailConfig(),
+            ),
+            "not_configured",
+        )
+        with tempfile.TemporaryDirectory() as state_dir:
+            email_config = ApifyOwnerEmailConfig(
+                enabled=True,
+                owner_email="owner@example.com",
+                sender_email="tagger@example.com",
+                smtp_host="smtp.example.com",
+                state_dir=state_dir,
+            )
+
+            def failing_factory(host, port, timeout):
+                raise OSError("SMTP unavailable")
+
+            first = notify_apify_owner_if_needed(
+                usage(3.5),
+                email_config=email_config,
+                smtp_factory=failing_factory,
+            )
+            second = notify_apify_owner_if_needed(
+                usage(3.5),
+                email_config=email_config,
+                smtp_factory=failing_factory,
+            )
+        self.assertEqual(first, "failed")
+        self.assertEqual(second, "retry_later")
+
+    def test_streamlit_capacity_notice_does_not_reveal_spend(self):
+        root = Path(__file__).resolve().parents[1]
+        module = ast.parse((root / "app.py").read_text(encoding="utf-8"))
+        function = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_render_apify_beta_safeguard_v68_97"
+        )
+        source = ast.get_source_segment(
+            (root / "app.py").read_text(encoding="utf-8"),
+            function,
+        )
+        self.assertNotIn("st.warning(", source)
+        self.assertNotIn("st.error(", source)
+        self.assertNotIn("$", source)
+        self.assertNotIn("monthly_usage_usd", source)
 
     def test_blocked_usage_prevents_paid_call_body(self):
         body_called = False

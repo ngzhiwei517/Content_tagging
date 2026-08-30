@@ -14,13 +14,15 @@ spending; they do not turn the Streamlit pilot into a production job queue.
    in source code, screenshots, exports, or client-side controls.
 
 Apify does not document an arbitrary custom email threshold such as exactly
-$4. The app therefore shows its own warning and blocks new paid fallback before
-the account hard limit; Apify's notifications remain the out-of-app alert.
+$4. The app therefore sends a private owner email through the deployment's SMTP
+account and blocks new paid fallback before the account hard limit. Apify's own
+notifications remain a separate backup alert.
 
 ## Streamlit Secrets
 
 The safe beta defaults are a warning at $3.50 and a stop at $4.00. No additional
-app setting is required when those values are correct.
+threshold setting is required when those values are correct. Owner email alerts
+remain off until the SMTP section below is configured and enabled.
 
 To make the values explicit or change them, add:
 
@@ -32,11 +34,32 @@ enabled = true
 warning_usd = 3.50
 stop_usd = 4.00
 fail_closed = true
+
+[apify_guard_email]
+enabled = true
+owner_email = "owner@example.com"
+sender_email = "tagger@example.com"
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "tagger@example.com"
+smtp_password = "replace-with-the-smtp-password"
+use_tls = true
+use_ssl = false
 ```
 
 Equivalent environment variables are `APIFY_GUARD_ENABLED`,
 `APIFY_GUARD_WARNING_USD`, `APIFY_GUARD_STOP_USD`, and
 `APIFY_GUARD_FAIL_CLOSED`.
+
+Email equivalents are `APIFY_ALERT_EMAIL_ENABLED`,
+`APIFY_ALERT_OWNER_EMAIL`, `APIFY_ALERT_SENDER_EMAIL`,
+`APIFY_ALERT_SMTP_HOST`, `APIFY_ALERT_SMTP_PORT`,
+`APIFY_ALERT_SMTP_USERNAME`, `APIFY_ALERT_SMTP_PASSWORD`,
+`APIFY_ALERT_SMTP_USE_TLS`, and `APIFY_ALERT_SMTP_USE_SSL`.
+
+Use the SMTP host, port and credentials supplied by the organisation's email
+administrator. The password stays in Streamlit Secrets and is never included
+in the alert, app UI, checkpoint, or source code.
 
 Keep `fail_closed = true` for shared testing. If the usage endpoint cannot be
 verified, the app pauses new paid fallback instead of risking an unknown charge.
@@ -51,10 +74,19 @@ Direct retrieval remains available.
   paid Actor start.
 - If Apify reports an active Actor job on the shared account, the next paid
   start pauses for a later retry.
-- At the warning threshold, users see a shared-capacity warning.
+- At the warning threshold, the owner receives a private email. Ordinary users
+  do not see the usage amount or threshold.
 - At the stop threshold, new paid Actor starts are blocked before they run.
+- When blocked, users see only a neutral fallback-unavailable message; the
+  owner receives a separate blocked email containing the usage details.
 - Only one paid Actor call can run at a time inside one Streamlit server process.
 - Existing row and batch checkpoints continue to save completed progress.
+
+Warning and blocked emails are deduplicated separately for each usage cycle on
+the app's local filesystem. A redeploy that clears local state can cause one
+alert to be sent again. SMTP failure never disables the spending guard: the app
+logs a non-sensitive failure category and retries later while paid work remains
+subject to the same stop rule.
 
 The one-at-a-time lock coordinates users connected to the same running app
 process. The account-level active-job check reduces overlap with another
@@ -68,10 +100,12 @@ checkpoints alone are temporary.
 
 1. Temporarily set `warning_usd` and `stop_usd` below the current usage in a
    non-production test deployment.
-2. Confirm the warning or blocked message appears without showing the token.
-3. Attempt a post that requires fallback and confirm no Actor starts.
-4. Raise the stop threshold above current usage.
-5. Open two browser sessions and start two fallback-requiring batches together.
-6. Confirm only one Actor call runs and the other batch pauses safely.
-7. Confirm direct-only posts and saved checkpoints remain usable.
-8. Restore the intended $3.50 / $4.00 values.
+2. Confirm the owner receives the warning email and the app shows no dollar
+   amount to ordinary users.
+3. Confirm a blocked user sees only the neutral fallback-unavailable message.
+4. Attempt a post that requires fallback and confirm no Actor starts.
+5. Raise the stop threshold above current usage.
+6. Open two browser sessions and start two fallback-requiring batches together.
+7. Confirm only one Actor call runs and the other batch pauses safely.
+8. Confirm direct-only posts and saved checkpoints remain usable.
+9. Restore the intended $3.50 / $4.00 values.
