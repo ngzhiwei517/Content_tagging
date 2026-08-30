@@ -807,6 +807,90 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             [("persist", {"verify_remote": True}), "dialog"],
         )
 
+    def test_quota_pause_prompts_for_private_link_and_manual_resume(self):
+        events = []
+
+        class FakeStreamlit:
+            session_state = {
+                "batch_df": pd.DataFrame(
+                    [{"Link": "https://www.tiktok.com/@creator/video/1"}]
+                )
+            }
+
+            @staticmethod
+            def info(message):
+                events.append(("info", message))
+
+            @staticmethod
+            def button(label, **kwargs):
+                events.append(("button", label, kwargs))
+                return True
+
+            @staticmethod
+            def caption(message):
+                events.append(("caption", message))
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "safe_str": lambda value: str(value or "").strip(),
+            "_runtime_checkpoint_has_posts_v68_44": lambda state: not state[
+                "batch_df"
+            ].empty,
+            "_persist_runtime_checkpoint_v68_15": lambda **kwargs: events.append(
+                ("persist", kwargs)
+            ),
+            "_show_runtime_save_dialog_v68_44": lambda: events.append("dialog"),
+        }
+        render = load_function("_render_quota_recovery_prompt_v68_99", namespace)
+
+        shown = render(
+            {"status": "paused_quota", "saved_rows": 12},
+            total_rows=20,
+            resume_label="Resume metrics",
+        )
+
+        self.assertTrue(shown)
+        self.assertIn("12 of 20 completed posts are saved", events[0][1])
+        self.assertNotIn("$", events[0][1])
+        self.assertNotIn("Apify", events[0][1])
+        self.assertEqual(events[1][0:2], ("button", "Save link & continue later"))
+        self.assertEqual(
+            events[-3:],
+            [
+                ("persist", {"verify_remote": True}),
+                "dialog",
+                (
+                    "caption",
+                    "When access is restored, open that exact link and select Resume metrics. "
+                    "Already completed posts will be reused.",
+                ),
+            ],
+        )
+
+        events.clear()
+        self.assertFalse(render({"status": "running"}, total_rows=20))
+        self.assertEqual(events, [])
+
+    def test_both_run_modes_offer_the_quota_recovery_prompt(self):
+        metrics_runner = APP_SOURCE.split(
+            "def _run_metrics_only_chunk_v68_86",
+            1,
+        )[1].split("def run_real_tagging_backend", 1)[0]
+        step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
+            "# STEP 5: Review",
+            1,
+        )[0]
+
+        self.assertIn("metrics_only_quota_paused_v68_99", metrics_runner)
+        self.assertIn("_is_quota_interruption_v68_43(exc)", metrics_runner)
+        self.assertIn('resume_label="Resume metrics"', step_four)
+        self.assertIn("with apify_batch_owner(metrics_owner_v68_100):", step_four)
+        self.assertIn("with apify_batch_owner(tagging_owner_v68_100):", step_four)
+        self.assertGreaterEqual(
+            step_four.count("_render_quota_recovery_prompt_v68_99("),
+            3,
+        )
+
     def test_save_link_hides_recovery_id_inside_the_url(self):
         recovery_id = "e" * 32
 

@@ -14,16 +14,18 @@ from ugc_tagger.apify_usage_guard import (
     ApifyUsageUnavailableError,
     _reset_apify_guard_for_tests,
     active_apify_fallback,
+    apify_batch_owner,
     apify_capacity_state,
     apify_fallback_slot,
     configure_apify_guard,
     effective_stop_usd,
+    effective_emergency_stop_usd,
     fetch_apify_usage,
     notify_apify_owner_if_needed,
 )
 
 
-def usage(used=1.0, maximum=5.0, active_jobs=0):
+def usage(used=1.0, maximum=10.0, active_jobs=0):
     return ApifyUsageSnapshot(
         monthly_usage_usd=used,
         max_monthly_usage_usd=maximum,
@@ -99,16 +101,26 @@ class ApifyUsageGuardTests(unittest.TestCase):
         self.assertEqual(snapshot.active_actor_job_count, 1)
 
     def test_capacity_states_follow_beta_thresholds(self):
-        config = ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0)
-        self.assertEqual(apify_capacity_state(usage(3.49), config), "available")
-        self.assertEqual(apify_capacity_state(usage(3.5), config), "warning")
-        self.assertEqual(apify_capacity_state(usage(4.0), config), "blocked")
+        config = ApifyGuardConfig(
+            warning_usd=8.0,
+            stop_usd=8.7,
+            emergency_stop_usd=9.5,
+        )
+        self.assertEqual(apify_capacity_state(usage(7.99), config), "available")
+        self.assertEqual(apify_capacity_state(usage(8.0), config), "warning")
+        self.assertEqual(apify_capacity_state(usage(8.7), config), "restricted")
+        self.assertEqual(apify_capacity_state(usage(9.5), config), "blocked")
 
     def test_account_hard_limit_caps_the_effective_stop(self):
-        config = ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0)
-        snapshot = usage(2.9, maximum=3.0)
-        self.assertEqual(effective_stop_usd(snapshot, config), 3.0)
-        self.assertEqual(apify_capacity_state(usage(3.0, 3.0), config), "blocked")
+        config = ApifyGuardConfig(
+            warning_usd=8.0,
+            stop_usd=8.7,
+            emergency_stop_usd=9.5,
+        )
+        snapshot = usage(8.6, maximum=9.0)
+        self.assertEqual(effective_stop_usd(snapshot, config), 8.7)
+        self.assertEqual(effective_emergency_stop_usd(snapshot, config), 9.0)
+        self.assertEqual(apify_capacity_state(usage(9.0, 9.0), config), "blocked")
 
     def test_warning_email_is_private_and_sent_only_once_per_cycle(self):
         calls = []
@@ -127,14 +139,22 @@ class ApifyUsageGuardTests(unittest.TestCase):
                 return _SMTPClient(calls, host, port, timeout)
 
             first = notify_apify_owner_if_needed(
-                usage(3.5),
-                guard_config=ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0),
+                usage(8.0),
+                guard_config=ApifyGuardConfig(
+                    warning_usd=8.0,
+                    stop_usd=8.7,
+                    emergency_stop_usd=9.5,
+                ),
                 email_config=email_config,
                 smtp_factory=factory,
             )
             second = notify_apify_owner_if_needed(
-                usage(3.75),
-                guard_config=ApifyGuardConfig(warning_usd=3.5, stop_usd=4.0),
+                usage(8.5),
+                guard_config=ApifyGuardConfig(
+                    warning_usd=8.0,
+                    stop_usd=8.7,
+                    emergency_stop_usd=9.5,
+                ),
                 email_config=email_config,
                 smtp_factory=factory,
             )
@@ -144,7 +164,7 @@ class ApifyUsageGuardTests(unittest.TestCase):
         self.assertEqual(second, "already_sent")
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["To"], "owner@example.com")
-        self.assertIn("$3.50", messages[0].get_content())
+        self.assertIn("$8.00", messages[0].get_content())
         self.assertIn(("starttls", True), calls)
         self.assertIn(
             ("login", "tagger@example.com", "secret-password"),
@@ -153,7 +173,7 @@ class ApifyUsageGuardTests(unittest.TestCase):
         self.assertNotIn("secret-password", messages[0].as_string())
         self.assertNotIn("secret-password", repr(email_config))
 
-    def test_warning_and_blocked_emails_are_distinct(self):
+    def test_warning_restriction_and_emergency_emails_are_distinct(self):
         calls = []
         with tempfile.TemporaryDirectory() as state_dir:
             email_config = ApifyOwnerEmailConfig(
@@ -168,26 +188,64 @@ class ApifyUsageGuardTests(unittest.TestCase):
                 return _SMTPClient(calls, host, port, timeout)
 
             warning_status = notify_apify_owner_if_needed(
-                usage(3.5),
+                usage(8.0),
                 email_config=email_config,
                 smtp_factory=factory,
             )
-            blocked_status = notify_apify_owner_if_needed(
-                usage(4.0),
+            restricted_status = notify_apify_owner_if_needed(
+                usage(8.7),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+            emergency_status = notify_apify_owner_if_needed(
+                usage(9.5),
                 email_config=email_config,
                 smtp_factory=factory,
             )
 
         messages = [item[1] for item in calls if item[0] == "message"]
-        self.assertEqual((warning_status, blocked_status), ("sent", "sent"))
+        self.assertEqual(
+            (warning_status, restricted_status, emergency_status),
+            ("sent", "sent", "sent"),
+        )
+        self.assertEqual(len(messages), 3)
+        self.assertIn("warning", messages[0]["Subject"].lower())
+        self.assertIn("restricted", messages[1]["Subject"].lower())
+        self.assertIn("paused", messages[2]["Subject"].lower())
+        self.assertIn("$8.00", messages[0].get_content())
+        self.assertIn("$8.70", messages[1].get_content())
+        self.assertIn("$9.50", messages[2].get_content())
+
+    def test_usage_jump_sends_every_newly_reached_threshold_email(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as state_dir:
+            email_config = ApifyOwnerEmailConfig(
+                enabled=True,
+                owner_email="owner@example.com",
+                sender_email="tagger@example.com",
+                smtp_host="smtp.example.com",
+                state_dir=state_dir,
+            )
+
+            def factory(host, port, timeout):
+                return _SMTPClient(calls, host, port, timeout)
+
+            status = notify_apify_owner_if_needed(
+                usage(8.7),
+                email_config=email_config,
+                smtp_factory=factory,
+            )
+
+        messages = [item[1] for item in calls if item[0] == "message"]
+        self.assertEqual(status, "sent")
         self.assertEqual(len(messages), 2)
         self.assertIn("warning", messages[0]["Subject"].lower())
-        self.assertIn("paused", messages[1]["Subject"].lower())
+        self.assertIn("restricted", messages[1]["Subject"].lower())
 
     def test_owner_email_is_optional_and_failure_does_not_break_guard(self):
         self.assertEqual(
             notify_apify_owner_if_needed(
-                usage(3.5),
+                usage(8.0),
                 email_config=ApifyOwnerEmailConfig(),
             ),
             "not_configured",
@@ -205,12 +263,12 @@ class ApifyUsageGuardTests(unittest.TestCase):
                 raise OSError("SMTP unavailable")
 
             first = notify_apify_owner_if_needed(
-                usage(3.5),
+                usage(8.0),
                 email_config=email_config,
                 smtp_factory=failing_factory,
             )
             second = notify_apify_owner_if_needed(
-                usage(3.5),
+                usage(8.0),
                 email_config=email_config,
                 smtp_factory=failing_factory,
             )
@@ -241,11 +299,57 @@ class ApifyUsageGuardTests(unittest.TestCase):
             with apify_fallback_slot(
                 "token",
                 purpose="test actor",
-                usage_provider=lambda _token: usage(4.0),
+                usage_provider=lambda _token: usage(9.5),
             ):
                 body_called = True
         self.assertFalse(body_called)
         self.assertEqual(active_apify_fallback(), {})
+
+    def test_admitted_batch_continues_while_second_batch_is_restricted(self):
+        with apify_batch_owner("batch-a"):
+            with apify_fallback_slot(
+                "token",
+                purpose="admit batch a",
+                usage_provider=lambda _token: usage(8.6),
+            ):
+                pass
+            with apify_fallback_slot(
+                "token",
+                purpose="continue batch a",
+                usage_provider=lambda _token: usage(8.7),
+            ):
+                pass
+
+        with apify_batch_owner("batch-b"):
+            with self.assertRaisesRegex(
+                ApifyUsageBlockedError,
+                "APIFY_BETA_USAGE_LIMIT",
+            ):
+                with apify_fallback_slot(
+                    "token",
+                    purpose="restrict batch b",
+                    usage_provider=lambda _token: usage(8.7),
+                ):
+                    self.fail("a second paid batch must not start")
+
+    def test_emergency_stop_also_pauses_the_admitted_batch(self):
+        with apify_batch_owner("batch-a"):
+            with apify_fallback_slot(
+                "token",
+                purpose="admit batch a",
+                usage_provider=lambda _token: usage(8.6),
+            ):
+                pass
+            with self.assertRaisesRegex(
+                ApifyUsageBlockedError,
+                "emergency safety threshold",
+            ):
+                with apify_fallback_slot(
+                    "token",
+                    purpose="emergency stop batch a",
+                    usage_provider=lambda _token: usage(9.5),
+                ):
+                    self.fail("no paid batch may start at the emergency stop")
 
     def test_unavailable_usage_fails_closed_by_default(self):
         def unavailable(_token):

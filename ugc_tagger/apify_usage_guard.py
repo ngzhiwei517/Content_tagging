@@ -15,6 +15,7 @@ import ssl
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -25,8 +26,9 @@ import requests
 
 
 APIFY_LIMITS_URL = "https://api.apify.com/v2/users/me/limits"
-DEFAULT_WARNING_USD = 3.50
-DEFAULT_STOP_USD = 4.00
+DEFAULT_WARNING_USD = 8.00
+DEFAULT_STOP_USD = 8.70
+DEFAULT_EMERGENCY_STOP_USD = 9.50
 LOGGER = logging.getLogger(__name__)
 
 
@@ -51,6 +53,7 @@ class ApifyGuardConfig:
     enabled: bool = True
     warning_usd: float = DEFAULT_WARNING_USD
     stop_usd: float = DEFAULT_STOP_USD
+    emergency_stop_usd: float = DEFAULT_EMERGENCY_STOP_USD
     fail_closed: bool = True
     usage_cache_seconds: float = 60.0
     request_timeout_seconds: float = 8.0
@@ -58,10 +61,12 @@ class ApifyGuardConfig:
     def normalized(self) -> "ApifyGuardConfig":
         warning = max(float(self.warning_usd), 0.0)
         stop = max(float(self.stop_usd), 0.01)
+        emergency = max(float(self.emergency_stop_usd), stop)
         return ApifyGuardConfig(
             enabled=bool(self.enabled),
             warning_usd=min(warning, stop),
             stop_usd=stop,
+            emergency_stop_usd=emergency,
             fail_closed=bool(self.fail_closed),
             usage_cache_seconds=max(float(self.usage_cache_seconds), 0.0),
             request_timeout_seconds=max(float(self.request_timeout_seconds), 1.0),
@@ -116,6 +121,16 @@ _CONFIG_LOCK = threading.Lock()
 _USAGE_CACHE: Dict[str, tuple[float, ApifyUsageSnapshot]] = {}
 _USAGE_CACHE_LOCK = threading.Lock()
 _APIFY_FALLBACK_LOCK = threading.Lock()
+_BATCH_OWNER_CONTEXT: ContextVar[str] = ContextVar(
+    "apify_batch_owner",
+    default="",
+)
+_ADMISSION_LOCK = threading.Lock()
+_ADMISSION_STATE: Dict[str, str] = {
+    "cycle": "",
+    "candidate_owner": "",
+    "admitted_owner": "",
+}
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_CALL: Dict[str, object] = {}
 _EMAIL_ALERT_LOCK = threading.Lock()
@@ -236,19 +251,95 @@ def effective_stop_usd(
     return policy.stop_usd
 
 
+def effective_emergency_stop_usd(
+    snapshot: ApifyUsageSnapshot,
+    config: Optional[ApifyGuardConfig] = None,
+) -> float:
+    policy = (config or current_apify_guard_config()).normalized()
+    if snapshot.max_monthly_usage_usd > 0:
+        return min(policy.emergency_stop_usd, snapshot.max_monthly_usage_usd)
+    return policy.emergency_stop_usd
+
+
 def apify_capacity_state(
     snapshot: ApifyUsageSnapshot,
     config: Optional[ApifyGuardConfig] = None,
 ) -> str:
-    """Return ``available``, ``warning`` or ``blocked`` for one snapshot."""
+    """Return available, warning, restricted, or blocked for one snapshot."""
     policy = (config or current_apify_guard_config()).normalized()
     stop = effective_stop_usd(snapshot, policy)
+    emergency = effective_emergency_stop_usd(snapshot, policy)
     warning = min(policy.warning_usd, stop)
-    if snapshot.monthly_usage_usd >= stop:
+    if snapshot.monthly_usage_usd >= emergency:
         return "blocked"
+    if snapshot.monthly_usage_usd >= stop:
+        return "restricted"
     if snapshot.monthly_usage_usd >= warning:
         return "warning"
     return "available"
+
+
+def _usage_cycle_id(snapshot: ApifyUsageSnapshot) -> str:
+    return (
+        snapshot.cycle_start_at
+        or snapshot.cycle_end_at
+        or str(snapshot.checked_at or "")[:7]
+        or "unknown-cycle"
+    )
+
+
+@contextmanager
+def apify_batch_owner(owner_id: str):
+    """Attach a stable, non-secret batch identity to nested Actor calls."""
+    token = _BATCH_OWNER_CONTEXT.set(str(owner_id or "").strip())
+    try:
+        yield
+    finally:
+        _BATCH_OWNER_CONTEXT.reset(token)
+
+
+def _resolved_owner_id(owner_id: str) -> str:
+    return str(owner_id or _BATCH_OWNER_CONTEXT.get() or "").strip()
+
+
+def _reset_admission_cycle_locked(snapshot: ApifyUsageSnapshot) -> None:
+    cycle = _usage_cycle_id(snapshot)
+    if _ADMISSION_STATE.get("cycle") == cycle:
+        return
+    _ADMISSION_STATE.clear()
+    _ADMISSION_STATE.update(
+        cycle=cycle,
+        candidate_owner="",
+        admitted_owner="",
+    )
+
+
+def _remember_admission_candidate(
+    snapshot: ApifyUsageSnapshot,
+    owner_id: str,
+) -> None:
+    if not owner_id:
+        return
+    with _ADMISSION_LOCK:
+        _reset_admission_cycle_locked(snapshot)
+        if not _ADMISSION_STATE.get("admitted_owner"):
+            _ADMISSION_STATE["candidate_owner"] = owner_id
+
+
+def _owner_is_admitted(
+    snapshot: ApifyUsageSnapshot,
+    owner_id: str,
+) -> bool:
+    if not owner_id:
+        return False
+    with _ADMISSION_LOCK:
+        _reset_admission_cycle_locked(snapshot)
+        admitted = _ADMISSION_STATE.get("admitted_owner", "")
+        if not admitted:
+            admitted = _ADMISSION_STATE.get("candidate_owner", "")
+            if admitted:
+                _ADMISSION_STATE["admitted_owner"] = admitted
+        return bool(admitted and owner_id == admitted)
 
 
 def _alert_key(
@@ -256,12 +347,7 @@ def _alert_key(
     state: str,
     owner_email: str = "",
 ) -> str:
-    cycle = (
-        snapshot.cycle_start_at
-        or snapshot.cycle_end_at
-        or str(snapshot.checked_at or "")[:7]
-        or "unknown-cycle"
-    )
+    cycle = _usage_cycle_id(snapshot)
     recipient = str(owner_email or "").strip().lower()
     return hashlib.sha256(
         f"{cycle}|{state}|{recipient}".encode("utf-8")
@@ -272,6 +358,24 @@ def _alert_marker_path(config: ApifyOwnerEmailConfig, key: str) -> Path:
     return Path(config.state_dir) / f"{key}.sent"
 
 
+def _reached_alert_states(
+    snapshot: ApifyUsageSnapshot,
+    config: ApifyGuardConfig,
+) -> list[str]:
+    """Return every threshold state reached by the latest usage snapshot."""
+    warning = min(config.warning_usd, effective_stop_usd(snapshot, config))
+    stop = effective_stop_usd(snapshot, config)
+    emergency = effective_emergency_stop_usd(snapshot, config)
+    states = []
+    if snapshot.monthly_usage_usd >= warning:
+        states.append("warning")
+    if snapshot.monthly_usage_usd >= stop:
+        states.append("restricted")
+    if snapshot.monthly_usage_usd >= emergency:
+        states.append("blocked")
+    return states
+
+
 def _owner_alert_message(
     snapshot: ApifyUsageSnapshot,
     state: str,
@@ -279,8 +383,10 @@ def _owner_alert_message(
     email_config: ApifyOwnerEmailConfig,
 ) -> EmailMessage:
     stop = effective_stop_usd(snapshot, config)
+    emergency = effective_emergency_stop_usd(snapshot, config)
     warning = min(config.warning_usd, stop)
     blocked = state == "blocked"
+    restricted = state == "restricted"
     message = EmailMessage()
     message["To"] = email_config.owner_email.strip()
     message["From"] = (
@@ -290,13 +396,22 @@ def _owner_alert_message(
     message["Subject"] = (
         "[Tagger] Apify fallback paused at the safety threshold"
         if blocked
-        else "[Tagger] Apify usage warning threshold reached"
+        else (
+            "[Tagger] New Apify batches restricted"
+            if restricted
+            else "[Tagger] Apify usage warning threshold reached"
+        )
     )
-    threshold = stop if blocked else warning
+    threshold = emergency if blocked else (stop if restricted else warning)
     action = (
         "New paid Apify Actor starts are now blocked by the app."
         if blocked
-        else f"New paid Apify Actor starts will be blocked at ${stop:.2f}."
+        else (
+            "New paid batches are restricted to the already-admitted batch. "
+            f"All paid starts stop at ${emergency:.2f}."
+            if restricted
+            else f"New paid batches will be restricted at ${stop:.2f}."
+        )
     )
     message.set_content(
         "This is an automatic private alert from the UGC Post Tagging Tool.\n\n"
@@ -349,44 +464,56 @@ def notify_apify_owner_if_needed(
     email_config: Optional[ApifyOwnerEmailConfig] = None,
     smtp_factory: Optional[Callable] = None,
 ) -> str:
-    """Send one private warning/blocked email per usage cycle and threshold."""
+    """Send one private email per usage cycle and threshold state."""
     policy = (guard_config or current_apify_guard_config()).normalized()
     mail = email_config or current_apify_owner_email_config()
-    state = apify_capacity_state(snapshot, policy)
-    if state == "available":
+    reached_states = _reached_alert_states(snapshot, policy)
+    if not reached_states:
         return "not_needed"
     if not mail.is_ready():
         return "not_configured"
 
-    key = _alert_key(snapshot, state, mail.owner_email)
-    marker = _alert_marker_path(mail, key)
+    sent_any = False
+    failed_any = False
+    retry_later = False
     with _EMAIL_ALERT_LOCK:
-        if marker.exists():
-            return "already_sent"
-        retry_after = _EMAIL_RETRY_AFTER.get(key, 0.0)
-        if time.monotonic() < retry_after:
-            return "retry_later"
-        try:
-            message = _owner_alert_message(snapshot, state, policy, mail)
-            _send_owner_email(message, mail, smtp_factory=smtp_factory)
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            temporary = marker.with_suffix(
-                f".{os.getpid()}.{threading.get_ident()}.tmp"
-            )
-            temporary.write_text(
-                datetime.now(timezone.utc).isoformat(),
-                encoding="utf-8",
-            )
-            temporary.replace(marker)
-            _EMAIL_RETRY_AFTER.pop(key, None)
-            return "sent"
-        except Exception as exc:
-            _EMAIL_RETRY_AFTER[key] = time.monotonic() + 300.0
-            LOGGER.warning(
-                "Apify owner alert email could not be sent (%s).",
-                exc.__class__.__name__,
-            )
-            return "failed"
+        for state in reached_states:
+            key = _alert_key(snapshot, state, mail.owner_email)
+            marker = _alert_marker_path(mail, key)
+            if marker.exists():
+                continue
+            retry_after = _EMAIL_RETRY_AFTER.get(key, 0.0)
+            if time.monotonic() < retry_after:
+                retry_later = True
+                continue
+            try:
+                message = _owner_alert_message(snapshot, state, policy, mail)
+                _send_owner_email(message, mail, smtp_factory=smtp_factory)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                temporary = marker.with_suffix(
+                    f".{os.getpid()}.{threading.get_ident()}.tmp"
+                )
+                temporary.write_text(
+                    datetime.now(timezone.utc).isoformat(),
+                    encoding="utf-8",
+                )
+                temporary.replace(marker)
+                _EMAIL_RETRY_AFTER.pop(key, None)
+                sent_any = True
+            except Exception as exc:
+                _EMAIL_RETRY_AFTER[key] = time.monotonic() + 300.0
+                failed_any = True
+                LOGGER.warning(
+                    "Apify owner alert email could not be sent (%s).",
+                    exc.__class__.__name__,
+                )
+    if failed_any:
+        return "failed"
+    if sent_any:
+        return "sent"
+    if retry_later:
+        return "retry_later"
+    return "already_sent"
 
 
 def active_apify_fallback() -> Dict[str, object]:
@@ -405,6 +532,7 @@ def apify_fallback_slot(
 ):
     """Serialize and preflight one paid Actor call for the shared beta account."""
     config = current_apify_guard_config()
+    resolved_owner = _resolved_owner_id(owner_id)
     if not config.enabled or not str(token or "").strip():
         yield None
         return
@@ -433,26 +561,40 @@ def apify_fallback_slot(
                 ) from exc
             snapshot = None
 
-        if snapshot is not None and apify_capacity_state(snapshot, config) == "blocked":
-            notify_apify_owner_if_needed(snapshot, guard_config=config)
-            raise ApifyUsageBlockedError(
-                "APIFY_BETA_USAGE_LIMIT: Shared Apify fallback reached the beta "
-                "safety threshold. Direct retrieval remains available and "
-                "completed progress is saved."
-            )
         if snapshot is not None:
             notify_apify_owner_if_needed(snapshot, guard_config=config)
+            capacity_state = apify_capacity_state(snapshot, config)
+            if capacity_state == "blocked":
+                raise ApifyUsageBlockedError(
+                    "APIFY_BETA_USAGE_LIMIT: Shared Apify fallback reached the "
+                    "emergency safety threshold. Direct retrieval remains "
+                    "available and completed progress is saved."
+                )
+            if capacity_state == "restricted" and not _owner_is_admitted(
+                snapshot,
+                resolved_owner,
+            ):
+                raise ApifyUsageBlockedError(
+                    "APIFY_BETA_USAGE_LIMIT: New paid fallback batches are "
+                    "temporarily restricted. Direct retrieval remains available "
+                    "and completed progress is saved."
+                )
         if snapshot is not None and snapshot.active_actor_job_count > 0:
             raise ApifyFallbackBusyError(
                 "APIFY_FALLBACK_BUSY: The shared Apify account already has an "
                 "active Actor job. Completed progress is safe; retry shortly."
             )
+        if snapshot is not None and apify_capacity_state(snapshot, config) in {
+            "available",
+            "warning",
+        }:
+            _remember_admission_candidate(snapshot, resolved_owner)
 
         with _ACTIVE_LOCK:
             _ACTIVE_CALL.clear()
             _ACTIVE_CALL.update({
                 "purpose": str(purpose or "Apify fallback"),
-                "owner_id": str(owner_id or ""),
+                "owner_id": resolved_owner,
                 "started_at": datetime.now(timezone.utc).isoformat(),
             })
         yield snapshot
@@ -472,3 +614,11 @@ def _reset_apify_guard_for_tests() -> None:
         _ACTIVE_CALL.clear()
     with _EMAIL_ALERT_LOCK:
         _EMAIL_RETRY_AFTER.clear()
+    with _ADMISSION_LOCK:
+        _ADMISSION_STATE.clear()
+        _ADMISSION_STATE.update(
+            cycle="",
+            candidate_owner="",
+            admitted_owner="",
+        )
+    _BATCH_OWNER_CONTEXT.set("")

@@ -67,8 +67,9 @@ APIFY_TOKEN = "replace-with-the-deployment-token"
 
 [apify_guard]
 enabled = true
-warning_usd = 3.50
-stop_usd = 4.00
+warning_usd = 8.00
+stop_usd = 8.70
+emergency_stop_usd = 9.50
 fail_closed = true
 ```
 

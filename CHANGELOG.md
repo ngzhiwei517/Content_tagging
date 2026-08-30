@@ -1,5 +1,18 @@
 # Changelog
 
+## v68.42.15 — Quota-pause recovery prompt
+
+- Updated the temporary $10 beta policy to email the owner at $8.00, restrict
+  new paid batches at $8.70, and stop all paid starts at $9.50.
+- Added a process-scoped batch owner so the admitted batch can continue between
+  the restriction and emergency thresholds while a second batch pauses safely.
+- Added a clear `Save link & continue later` action when shared processing
+  capacity pauses an AI-tagging or Metrics-only run.
+- Kept provider spending details private while explaining that completed posts
+  are saved and can be reused after the owner restores access.
+- Recovery links remain manual-resume links and do not automatically restart
+  paid work when reopened.
+
 ## v68.42.14 — Private Apify owner alerts
 
 - Replaced the user-facing Apify spend warning with private, SMTP-based owner

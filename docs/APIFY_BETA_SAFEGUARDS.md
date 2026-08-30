@@ -9,20 +9,20 @@ spending; they do not turn the Streamlit pilot into a production job queue.
 1. Open Apify **Settings -> Notifications** and enable billing and usage email
    notifications.
 2. Open **Billing -> Limits** and set the account hard usage limit. For the
-   current beta allowance, use **$5**.
+   current beta allowance through 9 September, use **$10**.
 3. Keep the dedicated token in Streamlit Secrets as `APIFY_TOKEN`. Never put it
    in source code, screenshots, exports, or client-side controls.
 
 Apify does not document an arbitrary custom email threshold such as exactly
-$4. The app therefore sends a private owner email through the deployment's SMTP
-account and blocks new paid fallback before the account hard limit. Apify's own
-notifications remain a separate backup alert.
+$8. The app therefore sends private owner emails through the deployment's SMTP
+account, restricts a second paid batch before the account hard limit, and keeps
+an emergency stop. Apify's own notifications remain a separate backup alert.
 
 ## Streamlit Secrets
 
-The safe beta defaults are a warning at $3.50 and a stop at $4.00. No additional
-threshold setting is required when those values are correct. Owner email alerts
-remain off until the SMTP section below is configured and enabled.
+The current beta defaults are an owner warning at $8.00, a new-batch restriction
+at $8.70, and an emergency stop at $9.50. Owner email alerts remain off until
+the SMTP section below is configured and enabled.
 
 To make the values explicit or change them, add:
 
@@ -31,8 +31,9 @@ APIFY_TOKEN = "replace-with-the-deployment-token"
 
 [apify_guard]
 enabled = true
-warning_usd = 3.50
-stop_usd = 4.00
+warning_usd = 8.00
+stop_usd = 8.70
+emergency_stop_usd = 9.50
 fail_closed = true
 
 [apify_guard_email]
@@ -48,8 +49,8 @@ use_ssl = false
 ```
 
 Equivalent environment variables are `APIFY_GUARD_ENABLED`,
-`APIFY_GUARD_WARNING_USD`, `APIFY_GUARD_STOP_USD`, and
-`APIFY_GUARD_FAIL_CLOSED`.
+`APIFY_GUARD_WARNING_USD`, `APIFY_GUARD_STOP_USD`,
+`APIFY_GUARD_EMERGENCY_STOP_USD`, and `APIFY_GUARD_FAIL_CLOSED`.
 
 Email equivalents are `APIFY_ALERT_EMAIL_ENABLED`,
 `APIFY_ALERT_OWNER_EMAIL`, `APIFY_ALERT_SENDER_EMAIL`,
@@ -76,36 +77,46 @@ Direct retrieval remains available.
   start pauses for a later retry.
 - At the warning threshold, the owner receives a private email. Ordinary users
   do not see the usage amount or threshold.
-- At the stop threshold, new paid Actor starts are blocked before they run.
-- When blocked, users see only a neutral fallback-unavailable message; the
-  owner receives a separate blocked email containing the usage details.
+- At $8.70, the owner receives a second email and the app freezes admission to
+  the batch that most recently owned the paid lane below that threshold.
+- The admitted batch may continue; another batch is paused before its paid call
+  and sees only neutral capacity and recovery wording.
+- At $9.50, all paid starts pause, including the admitted batch's next Actor
+  call. The owner receives an emergency email.
+- If an AI-tagging or Metrics-only run pauses, the user can select **Save link
+  & continue later**, keep the private recovery link, and reopen it after access
+  is restored. Reopening the link requires a manual resume action and reuses
+  completed checkpointed posts.
 - Only one paid Actor call can run at a time inside one Streamlit server process.
 - Existing row and batch checkpoints continue to save completed progress.
 
-Warning and blocked emails are deduplicated separately for each usage cycle on
-the app's local filesystem. A redeploy that clears local state can cause one
-alert to be sent again. SMTP failure never disables the spending guard: the app
-logs a non-sensitive failure category and retries later while paid work remains
-subject to the same stop rule.
+Warning, restriction, and emergency emails are deduplicated separately for each
+usage cycle on the app's local filesystem. A redeploy that clears local state
+can cause one alert to be sent again. SMTP failure never disables the spending
+guard: the app logs a non-sensitive failure category and retries later while
+paid work remains subject to the same stop rules.
 
-The one-at-a-time lock coordinates users connected to the same running app
-process. The account-level active-job check reduces overlap with another
-instance but cannot eliminate an exact simultaneous race. If the deployment is
-later scaled to multiple replicas or services, a shared database lease or real
-queue is required. Supabase/Postgres checkpoint storage should also be
-configured and live-tested before relying on recovery after a redeploy; local
-checkpoints alone are temporary.
+The admitted owner and one-at-a-time lock coordinate users connected to the same
+running app process. The owner lease is deliberately fail-closed after a server
+restart at or above $8.70 rather than guessing which user was active. The
+account-level active-job check reduces overlap with another instance but cannot
+eliminate an exact simultaneous race. Multiple replicas require a shared
+database lease or real queue. Supabase/Postgres checkpoint storage should also
+be configured and live-tested before relying on recovery after a redeploy;
+local checkpoints alone are temporary.
 
 ## Beta smoke test
 
-1. Temporarily set `warning_usd` and `stop_usd` below the current usage in a
+1. Temporarily set all three thresholds below the current usage in a
    non-production test deployment.
 2. Confirm the owner receives the warning email and the app shows no dollar
    amount to ordinary users.
 3. Confirm a blocked user sees only the neutral fallback-unavailable message.
-4. Attempt a post that requires fallback and confirm no Actor starts.
-5. Raise the stop threshold above current usage.
-6. Open two browser sessions and start two fallback-requiring batches together.
-7. Confirm only one Actor call runs and the other batch pauses safely.
-8. Confirm direct-only posts and saved checkpoints remain usable.
-9. Restore the intended $3.50 / $4.00 values.
+4. Start one paid batch below the restriction threshold, then move the test
+   threshold below current usage.
+5. Confirm that same batch can make its next paid call while a different batch
+   pauses and receives the recovery-link prompt.
+6. Move the emergency threshold below current usage and confirm the admitted
+   batch's next paid call also pauses.
+7. Confirm direct-only posts and saved checkpoints remain usable.
+8. Restore the intended $8.00 / $8.70 / $9.50 values.

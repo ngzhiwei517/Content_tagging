@@ -43,7 +43,7 @@ from ugc_tagger.direct_post_scraper import (
 # to fail when its hot-reload cache briefly exposed the older initializer.
 # ``app.py`` imports this constant with the rest of the adapter API, so startup
 # no longer depends on package metadata being refreshed first.
-APP_VERSION = "v68.42.14"
+APP_VERSION = "v68.42.15"
 
 
 ProgressCallback = Callable[[int, int, str], None]
