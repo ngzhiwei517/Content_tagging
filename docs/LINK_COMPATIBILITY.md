@@ -9,7 +9,9 @@ Use a direct public post URL whenever possible:
 - Instagram Reel: `https://www.instagram.com/reel/SHORTCODE/`
 - Instagram post/carousel: `https://www.instagram.com/p/SHORTCODE/`
 
-The app accepts these links from CSV/XLSX uploads or pasted input. Market and Track remain optional.
+The app accepts these links from CSV/XLSX uploads or pasted input. Track is
+required when rows are added to the Current Batch; Artist and Market remain
+optional.
 
 ## Verified compatibility
 

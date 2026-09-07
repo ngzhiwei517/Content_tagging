@@ -1,7 +1,9 @@
 # Technical maintainer handover
 
 This guide is the complete clean-account workflow for installing, running,
-testing, changing and publishing the UGC Content Tagging Platform.
+testing, changing and publishing the UGC Content Tagging Platform. The active
+marketing workflow has five user-facing steps: Add Posts, Select Posts, Run,
+Review, and Summary & Export.
 
 Use this guide during the handover rehearsal. A new maintainer should be able to
 complete the workflow without private instructions or access to the previous
@@ -11,7 +13,7 @@ maintainer's computer.
 
 The repository contains:
 
-- `app.py` — the Streamlit entry point and six-step user interface;
+- `app.py` — the Streamlit entry point and five-step user interface;
 - `ugc_tagger/` — platform adapters, tagging backend, review routing and drama
   analysis;
 - `creative_knowledge/` — approved reusable tagging patterns;
@@ -21,10 +23,14 @@ The repository contains:
 - `AGENTS.md` — durable instructions for Codex or another coding agent;
 - `docs/CODE_MAP.md` — where each technical responsibility lives;
 - `docs/TESTING.md` — automated and manual testing expectations;
+- `docs/PERSISTENT_CHECKPOINTS.md` — optional restart/redeployment recovery;
+- `docs/APIFY_BETA_SAFEGUARDS.md` — shared-beta paid-fallback controls;
 - `CHANGELOG.md` — current release behavior and recent changes.
 
 The runtime version in `ugc_tagger/final_update2_adapter.py` and the latest
-entry in `CHANGELOG.md` are the version sources of truth.
+entry in `CHANGELOG.md` are the version sources of truth. Do not assume that
+separate feature branches have been combined; compare the selected branch with
+`origin/main` before relying on a feature described elsewhere.
 
 ## 2. Account and access setup
 
@@ -185,10 +191,13 @@ python3 -m venv .venv
 
 ## 6. API keys
 
-The app requires:
+The complete hosted workflow uses:
 
 - a Gemini API key;
-- an Apify API token.
+- an Apify API token;
+- optional Supabase/Postgres checkpoint credentials for recovery after restart
+  or redeployment; and
+- optional SMTP credentials for private Apify owner alerts.
 
 ### Create a Gemini API key
 
@@ -240,6 +249,14 @@ Never:
 
 The clean-account rehearsal must use the test maintainer's own credentials.
 
+For a shared beta, copy only the placeholder structure from
+`.streamlit/secrets.toml.example`, configure the thresholds documented in
+`docs/APIFY_BETA_SAFEGUARDS.md`, enable Apify's own billing notifications and
+set an account-level hard usage limit. Keep SMTP passwords and checkpoint keys
+in Streamlit Secrets only. A successful local/mock test does not prove SMTP or
+remote checkpoint recovery; perform one controlled live test in the target
+deployment and record the result.
+
 ## 7. First functional smoke test
 
 Use a small batch of approximately six public direct-post URLs:
@@ -267,23 +284,31 @@ Complete the full workflow:
    local uncommitted `.streamlit/secrets.toml` file.
 2. Open **Add Posts**.
 3. Upload a small CSV/XLSX file, paste additional links, or do both.
-4. Confirm uploaded and pasted rows appear in one **Current Batch**.
-5. Confirm TikTok and Instagram are detected automatically.
-6. Confirm duplicates are removed.
-7. Open **Select Posts**.
-8. Choose **Tag every link** for the smoke test.
-9. Use Gemini 3.1 Flash-Lite unless testing a specific model comparison.
-10. Run tagging and keep the terminal open for logs.
-11. Confirm unavailable/private posts are removed automatically.
-12. Confirm uncertain or restricted-but-viewable posts enter Human Review.
-13. On **Review**, keep one post, edit one post and remove one post.
-14. Confirm Original AI Labels remain preserved in the QA output.
-15. Confirm blank Instagram Shares/Saves display as `Not available`, not zero.
-16. Open **Summary & Export**.
-17. Download the final CSV, grouped XLSX and internal QA workbook.
-18. Confirm TikTok and Instagram remain together in the same exports.
-19. Confirm technical confidence and guardrail fields appear only in QA, not in
+4. Include one spreadsheet whose post-link column has a descriptive or
+   unfamiliar name, and confirm supported URLs are detected from its values.
+5. Select **Add uploaded rows to batch** once and confirm the rows appear in
+   **Current Batch** without requiring a refresh or second click.
+6. Confirm uploaded and pasted rows appear in one **Current Batch**.
+7. Confirm TikTok and Instagram are detected automatically.
+8. Confirm duplicates are removed.
+9. Open **Select Posts**.
+10. Choose **Tag every link** for the smoke test.
+11. Use Gemini 3.1 Flash-Lite unless testing a specific model comparison.
+12. Run tagging and keep the terminal open for logs.
+13. Confirm unavailable/private posts are removed automatically.
+14. Confirm uncertain or restricted-but-viewable posts enter Human Review.
+15. On **Review**, keep one post, edit one post and remove one post.
+16. Confirm Original AI Labels remain preserved in the QA output.
+17. Confirm blank Instagram Shares/Saves display as `Not available`, not zero.
+18. Open **Summary & Export**.
+19. Fetch a small Top Creators sample and confirm unavailable profiles do not
+    overwrite existing batch metrics.
+20. Download the final CSV, grouped XLSX and internal QA workbook.
+21. Confirm TikTok and Instagram remain together in the same exports.
+22. Confirm technical confidence and guardrail fields appear only in QA, not in
     the marketing summary.
+23. For a recovery rehearsal, save a private **Continue later** link after at
+    least one result is complete, reopen it and confirm completed work remains.
 
 Record:
 
@@ -333,20 +358,45 @@ Accuracy changes require a locked, human-labelled validation dataset.
 Open the cloned repository folder in Codex. Start each important task in a new
 conversation so the task has a clear objective.
 
-Use this read-first prompt:
+Use this read-only computer-readiness prompt before the first maintenance task:
 
 ```text
-Read AGENTS.md, docs/PROJECT_CONTEXT.md, docs/CODE_MAP.md,
-docs/TESTING.md and CHANGELOG.md completely.
+Read AGENTS.md, README.md, docs/HANDOVER.md,
+docs/PROJECT_CONTEXT.md and docs/CODE_MAP.md completely.
 
-Do not edit anything yet.
+Do not edit anything.
+
+Check the current branch, Git status, remotes, GitHub account,
+and whether local main matches origin/main.
+
+Do not switch branches, create or delete branches, change remotes,
+authenticate an account, pull, merge, rebase, reset or push.
+
+Tell me if this computer is ready. If it is not ready, list each blocker and
+the exact safe next step, then wait for my approval.
+```
+
+The readiness result should include:
+
+1. the actual Git checkout path, especially when the opened parent folder is
+   only an archive/work area;
+2. the checked-out branch and whether the worktree is clean;
+3. each remote name and URL;
+4. the active GitHub CLI account and whether its authentication is valid;
+5. the local `main` and `origin/main` commit IDs and ahead/behind counts; and
+6. whether the selected feature branch is already merged, still ahead, or
+   behind `origin/main`.
+
+If that check passes, use this second prompt for task orientation:
+
+```text
+Read docs/TESTING.md and CHANGELOG.md completely.
 
 Tell me:
-1. the current Git branch and whether the worktree is clean;
-2. the current app version;
-3. the active runtime path for this request;
-4. the important rules that must remain unchanged;
-5. the tests required before completion.
+1. the current app version;
+2. the active runtime path for this request;
+3. the important rules that must remain unchanged;
+4. the tests required before completion.
 
 Then wait for my change request.
 ```
@@ -385,7 +435,7 @@ Context:
 [attach screenshot, error or example input]
 
 Boundaries:
-- preserve the v41-style six-step workflow;
+- preserve the v41-style five-step workflow;
 - do not change prompts, taxonomy, confidence threshold or drama logic unless
   required for this bug;
 - do not add secrets or real campaign data;
@@ -669,6 +719,28 @@ Stop the previous Streamlit terminal with `Ctrl+C`, or run:
 Confirm the maintainer entered their own active Gemini and Apify credentials.
 Do not request that they send the key to another person.
 
+### Codex says the opened folder is not a Git repository
+
+The top-level `codex_tag` folder may be an archive/work area. Do not initialize
+a new repository there. Locate and open the intended checkout or worktree, then
+repeat the read-only readiness prompt. `git worktree list` must be run from an
+existing checkout.
+
+### GitHub CLI reports an invalid account token
+
+The computer is not ready to publish. Record the affected account from
+`gh auth status`, then ask the maintainer to re-authenticate that intended
+account. Do not switch accounts or log out another account without approval.
+Read-only local inspection can continue, but `gh repo view`, pull-request work
+and GitHub CLI publication remain unverified.
+
+### Local `main` is missing or does not match `origin/main`
+
+Report the exact condition and stop. Do not create, reset or move `main` during
+the readiness check. After approval, fetch `origin`, restore or synchronize the
+local branch with non-destructive commands, and repeat the comparison before
+starting a feature branch.
+
 ### A post is unavailable
 
 Open the direct URL in a browser. Deleted, private and unopenable posts are
@@ -704,6 +776,12 @@ The handover passes only when the new account can independently:
 - explain where UI, tagging, Instagram and review-routing changes belong;
 - explain that software tests do not prove model accuracy;
 - recover from at least one documented setup error.
+- run the read-only Codex readiness check and explain any reported blocker;
+- verify one controlled restart-recovery test when remote checkpoints are part
+  of the deployment;
+- verify one controlled owner-alert test when SMTP alerts are enabled;
+- explain that the Apify process lock coordinates one Streamlit process, not
+  multiple independent replicas.
 
 Record every step that required help. Improve this guide and repeat the
 rehearsal until no undocumented help is required.

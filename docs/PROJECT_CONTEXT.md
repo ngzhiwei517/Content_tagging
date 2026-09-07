@@ -2,9 +2,25 @@
 
 ## Current release
 
-v68.42.9 is the current shared TikTok and Instagram Reels release. It preserves the accepted v41-style UI and General UGC pipeline, keeps Gemini 3.1 Flash-Lite as the recommended default, removes the Pro preview option, and retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
+v68.42.15 is the app version represented by this documentation. It preserves
+the accepted v41-style five-step UI and General UGC pipeline, keeps Gemini 3.1
+Flash-Lite as the recommended default, removes the Pro preview option, and
+retains Gemini 3.5 Flash as an optional slower run. Targeted verification stays
+on the explicitly selected run model; a 3.1 run does not make hidden 3.5 calls.
 
-Instagram Reels uses a platform-specific Apify adapter before the shared Gemini taxonomy, review queue and exports. The adapter supports both current flat actor results and the earlier nested result shape. Missing public Shares or Saves remain `Not available`; the app never reports an unavailable metric as a confirmed zero.
+The app tries direct public retrieval first and uses Apify selectively when
+required fields remain unavailable. Instagram Reels uses a platform-specific
+adapter before the shared Gemini taxonomy, review queue and exports. The
+adapter supports both current flat actor results and the earlier nested result
+shape. Missing public Shares or Saves remain `Not available`; the app never
+reports an unavailable metric as a confirmed zero.
+
+Large runs save completed work and can resume from the first unfinished post.
+Optional Supabase/Postgres persistence supports recovery after a restart or
+redeployment when it has been configured and verified. Shared-beta Apify usage
+guards check account usage before paid Actor starts, serialize paid fallback
+within one Streamlit process, notify the owner privately when configured, and
+offer users a private Continue later link when new paid work is paused.
 
 The verifier checks consistency between existing Narrative, Content Details and labels; it is not an independent second view of the original media and must not be presented as a proven accuracy lift until a fresh locked holdout is scored.
 
@@ -30,8 +46,11 @@ General UGC is the default. Do not add a General-versus-Drama selector unless ex
 - Upload one or more CSV/XLSX files.
 - Paste TikTok or Instagram post/Reel links.
 - Uploaded and pasted sources are additive.
-- A supported TikTok or Instagram post link is the only required field.
-- Market and Track are optional.
+- A supported TikTok or Instagram post link and a Track name are required for
+  each row added to the Current Batch.
+- Artist and Market are optional.
+- The platform is detected from each link; unfamiliar column names are
+  accepted when their values contain supported direct post URLs.
 - Deduplicate by TikTok video ID, Instagram shortcode or normalized URL.
 
 ## Accepted selection behaviour
@@ -56,17 +75,28 @@ General UGC is the default. Do not add a General-versus-Drama selector unless ex
 
 ## Accepted Summary behaviour
 
-Marketing-facing Summary includes KPIs, Creative Type Mix, performance by type, Market Summary, KOL Size Performance, Track Summary, Top Posts and downloads. It must not expose confidence, tier, validation or label history.
+Marketing-facing Summary includes KPIs, Creative Type Mix, performance by
+type, Market Summary, KOL Size Performance, Track Summary, Top Creators, Top
+Posts, Taggy assistance and downloads. Creator profile metrics are kept
+separate from post-level batch metrics. The Summary must not expose confidence,
+tier, validation or label history.
 
 ## Backend architecture
 
 ```text
-Input → Apify → Gemini → global/semantic guardrails → optional Creative KB
-      → market guardrails → temporal validation → targeted evidence verifier when needed
-      → human review → export
+Input → normalize and deduplicate → direct public retrieval
+      → selective guarded Apify fallback → normalized evidence → Gemini
+      → global/semantic guardrails → optional Creative KB → market guardrails
+      → temporal validation → targeted evidence verifier when needed
+      → human review → summary and export
 ```
 
 Normal videos start at temporal Tier 1 and escalate through 3 frames, 9 frames and full video only while unresolved. Review is the final fallback.
+
+This remains an internal beta/pilot. The paid-fallback lock is process-scoped;
+multiple Streamlit replicas require a shared lease or queue for strict global
+coordination. Remote checkpoint recovery, SMTP alerts and live provider calls
+must be tested in the target deployment before they are described as working.
 
 ## Knowledge Base policy
 

@@ -1,19 +1,35 @@
 # Backend Architecture and Current Status
 
-The original phased integration remains complete in v68.15. This document describes the live path and the safest extension points. The v68.15 demo does not change the General UGC tagging backend.
+This document describes the v68.42.15 live path and the safest extension
+points. The current beta keeps one General UGC tagging pipeline for TikTok and
+Instagram Reels.
 
 ## Live path
 
 1. `app.py` normalizes uploads and pasted links into one Current Batch.
-2. Selection chooses Top posts or Tag every link.
-3. `ugc_tagger/final_update2_adapter.py` groups candidates and calls the backend.
-4. `ugc_tagger/final_update2_backend.py` loads the preserved backend definitions without rendering its legacy UI.
-5. `ugc_tagger/final_update2_backend_source.py` runs Apify normalization, Gemini visual analysis, reusable guardrails, temporal escalation and validation.
-6. `ugc_tagger/evidence_verifier.py` selectively cross-checks suspicious label/evidence conflicts after the best temporal result is chosen.
-7. `ugc_tagger/review_routing.py` decides whether unresolved evidence requires human review.
-8. The adapter maps results into the UI/QA schema.
-9. Review preserves original labels and writes final labels plus history.
-10. Summary/export separates clean marketing files from internal QA diagnostics.
+2. Selection chooses Top posts or Tag every link and retrieves only ranking
+   metrics that are required and still missing.
+3. Direct public retrieval runs first. Paid Apify fallback must pass
+   `ugc_tagger/apify_usage_guard.py` before an Actor starts.
+4. `ugc_tagger/final_update2_adapter.py` groups candidates and calls the shared
+   backend. Metrics-only runs skip Gemini classification.
+5. `ugc_tagger/final_update2_backend.py` loads the preserved backend definitions
+   without rendering its legacy UI.
+6. `ugc_tagger/final_update2_backend_source.py` runs normalized evidence,
+   Gemini visual analysis, reusable guardrails, temporal escalation and
+   validation.
+7. `ugc_tagger/evidence_verifier.py` selectively cross-checks suspicious
+   label/evidence conflicts after the best temporal result is chosen.
+8. `ugc_tagger/review_routing.py` decides whether unresolved evidence requires
+   human review.
+9. The adapter maps results into the UI/QA schema.
+10. Review preserves original labels and writes final labels plus history.
+11. Summary/export separates clean marketing files from internal QA
+    diagnostics; optional creator enrichment remains separate from batch
+    metrics.
+12. Local progress checkpoints are always available. Optional
+    `ugc_tagger/persistent_checkpoint.py` backends support restart or
+    redeployment recovery after live configuration is verified.
 
 ## Current audit contract
 
@@ -32,6 +48,8 @@ The original phased integration remains complete in v68.15. This document descri
 - Update the KB only from approved/reviewed rows.
 - Keep new guardrails evidence-based and add regression tests.
 - Re-run a fresh locked holdout before publishing a new accuracy claim.
+- Replace the process-scoped Apify lock with a shared lease or queue before
+  treating the app as a coordinated multi-replica production system.
 
 ## Do not change casually
 
@@ -40,4 +58,4 @@ The original phased integration remains complete in v68.15. This document descri
 - two-label maximum;
 - clean marketing export columns;
 - original-versus-final audit history;
-- the accepted six-step UI flow.
+- the accepted five-step UI flow.

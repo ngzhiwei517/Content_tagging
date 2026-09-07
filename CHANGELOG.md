@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — Maintainer handover refresh
+
+- Updated the project context and code map for v68.42.15, the five-step
+  workflow, direct-first retrieval, creator enrichment, persistent recovery and
+  shared-beta Apify safeguards.
+- Added a read-only Codex computer-readiness prompt covering the checkout,
+  branch, worktree, remotes, GitHub account and local-main synchronization.
+- Expanded the handover smoke test for unfamiliar spreadsheet columns,
+  one-click batch addition, Continue later recovery and Top Creator enrichment.
+- Documented that live SMTP alerts, remote checkpoints and external-provider
+  behavior require controlled deployment verification.
+- Aligned the linked UI, backend, testing, compatibility and open-decision
+  documents with the current beta contract.
+
 ## v68.42.15 — Quota-pause recovery prompt
 
 - Updated the temporary $10 beta policy to email the owner at $8.00, restrict

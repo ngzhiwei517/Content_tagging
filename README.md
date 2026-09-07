@@ -2,11 +2,10 @@
 
 A Streamlit application for tagging, reviewing, and reporting TikTok and Instagram Reels content for music-marketing workflows.
 
-
-
 ## Key capabilities
 
 - Upload multiple CSV/XLSX files or paste TikTok and Instagram post links.
+- Detect supported post URLs from descriptive or unfamiliar spreadsheet columns.
 - Combine both platforms in one batch with duplicate-link detection.
 - Collect public metadata through direct retrieval first, with selective Apify fallback.
 - Classify creative types with Gemini multimodal analysis and reusable guardrails.
@@ -20,7 +19,7 @@ A Streamlit application for tagging, reviewing, and reporting TikTok and Instagr
 Add posts -> Select posts -> Run tagging -> Review -> Dashboard and export
 ```
 
-The app supports **Top posts** and **Tag every link**. If selected posts or creator profiles are unavailable, it continues through the ranked list to return the requested number whenever enough valid records exist.
+The app supports **Top posts** and **Tag every link**. If selected posts or creator profiles are unavailable, it continues through the ranked list to return the requested number whenever enough valid records exist. **Metrics only** follows the same five-step workflow without Gemini classification.
 
 ## Inputs
 
@@ -123,8 +122,13 @@ python -m unittest discover -s tests
 - [Documentation index](docs/README.md)
 - [Maintainer handover](docs/HANDOVER.md)
 - [Code map](docs/CODE_MAP.md)
+- [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md)
+- [Apify beta safeguards](docs/APIFY_BETA_SAFEGUARDS.md)
 - [Validation and limitations](docs/VALIDATION.md)
 - [Changelog](CHANGELOG.md)
+
+For a new maintainer or a different computer, begin with the read-only
+readiness prompt in [Starting a maintenance task with Codex](docs/HANDOVER.md#9-starting-a-maintenance-task-with-codex).
 
 ## Privacy
 

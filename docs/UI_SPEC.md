@@ -1,4 +1,4 @@
-# UI Specification — v68.15
+# UI Specification — v68.42.15
 
 ## Design tone
 
@@ -23,7 +23,10 @@ entry page to marketing users.
 - Date filtering defaults to one shared date; mixed-track batches may choose separate editable dates per track.
 - Review shows only information needed to decide Keep, Edit or Remove.
 - Summary shows marketing insights, not AI debug fields.
-- Summary analysis order is Market Summary, Track Summary, Creative Type Mix, optional Source Summary, Top Posts, then KOL Size Performance.
+- Summary keeps marketing KPIs, creative performance, market and track views,
+  Top Creators, Top Posts, Taggy assistance and downloads concise.
+- Do not add a Source Summary or duplicate dashboard-wide tables unless the
+  user explicitly requests them.
 - QA diagnostics and label history appear only in the internal QA download.
 
 ## Downloads
