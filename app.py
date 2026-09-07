@@ -68,6 +68,18 @@ from ugc_tagger.batch_checkpoint import (
     BatchCheckpointStore,
     input_fingerprint,
 )
+from ugc_tagger.apify_usage_guard import (
+    ApifyGuardConfig,
+    ApifyOwnerEmailConfig,
+    active_apify_fallback,
+    apify_batch_owner,
+    apify_capacity_state,
+    configure_apify_guard,
+    configure_apify_owner_email,
+    current_apify_guard_config,
+    get_apify_usage,
+    notify_apify_owner_if_needed,
+)
 from ugc_tagger.persistent_checkpoint import (
     PersistentCheckpointConfig,
     RecoveryCheckpointObjects,
@@ -1435,6 +1447,7 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "metrics_only_fingerprint_v68_86",
     "metrics_only_purpose_v68_95",
     "metrics_only_previous_analysis_mode_v68_95",
+    "metrics_only_quota_paused_v68_99",
     "tiktok_follower_attempted_keys_v68_65",
     "creator_profile_metrics_v68_51",
     "creator_profile_updated_at_v68_51",
@@ -1987,6 +2000,57 @@ def _render_continue_later_v68_85() -> None:
             _show_runtime_save_dialog_v68_44()
 
 
+def _render_quota_recovery_prompt_v68_99(
+    manifest,
+    *,
+    total_rows: int,
+    resume_label: str = "Resume tagging",
+) -> bool:
+    """Help a safely paused user keep the private link and resume manually."""
+    if (
+        not isinstance(manifest, dict)
+        or safe_str(manifest.get("status")) != "paused_quota"
+    ):
+        return False
+    if not _runtime_checkpoint_has_posts_v68_44(st.session_state):
+        return False
+
+    saved_count = max(
+        0,
+        int(
+            manifest.get(
+                "saved_rows",
+                manifest.get("completed_rows", 0),
+            )
+            or 0
+        ),
+    )
+    total = max(int(total_rows or 0), saved_count)
+    progress_text = (
+        f"{saved_count:,} of {total:,} completed posts are saved."
+        if saved_count
+        else "Your selected batch and current settings are saved."
+    )
+    st.info(
+        "This run is paused because shared processing capacity is temporarily "
+        f"unavailable. {progress_text} Select **Save link & continue later**, "
+        "keep the private link, and reopen it after the app owner restores access."
+    )
+    if st.button(
+        "Save link & continue later",
+        key="quota_save_recovery_link_v68_99",
+        help="Copy a private link that reopens this paused batch.",
+        width="stretch",
+    ):
+        _persist_runtime_checkpoint_v68_15(verify_remote=True)
+        _show_runtime_save_dialog_v68_44()
+    st.caption(
+        f"When access is restored, open that exact link and select {resume_label}. "
+        "Already completed posts will be reused."
+    )
+    return True
+
+
 def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
     """Restore workflow state, optionally without writing it back.
 
@@ -2124,6 +2188,202 @@ def _managed_api_secret_v68_43(name: str) -> str:
         # Local installs without .streamlit/secrets.toml keep the existing
         # session-input flow.
         return ""
+
+
+def _apify_guard_setting_v68_97(name: str, environment_name: str, default):
+    """Read non-secret beta guard settings from Streamlit Secrets or the environment."""
+    try:
+        settings = st.secrets.get("apify_guard", {})
+        value = settings.get(name, default) if settings else default
+    except Exception:
+        value = default
+    return os.getenv(environment_name, value)
+
+
+def _apify_guard_bool_v68_97(value, default: bool) -> bool:
+    text = safe_str(value).casefold()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _configure_apify_guard_v68_97() -> ApifyGuardConfig:
+    """Apply safe beta defaults without exposing account credentials to users."""
+    try:
+        warning = float(
+            _apify_guard_setting_v68_97(
+                "warning_usd", "APIFY_GUARD_WARNING_USD", 8.00
+            )
+        )
+    except (TypeError, ValueError):
+        warning = 8.00
+    try:
+        stop = float(
+            _apify_guard_setting_v68_97(
+                "stop_usd", "APIFY_GUARD_STOP_USD", 8.70
+            )
+        )
+    except (TypeError, ValueError):
+        stop = 8.70
+    try:
+        emergency_stop = float(
+            _apify_guard_setting_v68_97(
+                "emergency_stop_usd",
+                "APIFY_GUARD_EMERGENCY_STOP_USD",
+                9.50,
+            )
+        )
+    except (TypeError, ValueError):
+        emergency_stop = 9.50
+    config = ApifyGuardConfig(
+        enabled=_apify_guard_bool_v68_97(
+            _apify_guard_setting_v68_97(
+                "enabled", "APIFY_GUARD_ENABLED", True
+            ),
+            True,
+        ),
+        warning_usd=warning,
+        stop_usd=stop,
+        emergency_stop_usd=emergency_stop,
+        fail_closed=_apify_guard_bool_v68_97(
+            _apify_guard_setting_v68_97(
+                "fail_closed", "APIFY_GUARD_FAIL_CLOSED", True
+            ),
+            True,
+        ),
+    )
+    return configure_apify_guard(config)
+
+
+APIFY_GUARD_CONFIG_V68_97 = _configure_apify_guard_v68_97()
+
+
+def _apify_email_setting_v68_98(name: str, environment_name: str, default=""):
+    """Read owner-email settings without placing them in session state."""
+    try:
+        settings = st.secrets.get("apify_guard_email", {})
+        value = settings.get(name, default) if settings else default
+    except Exception:
+        value = default
+    return os.getenv(environment_name, value)
+
+
+def _configure_apify_owner_email_v68_98() -> ApifyOwnerEmailConfig:
+    try:
+        smtp_port = int(
+            _apify_email_setting_v68_98(
+                "smtp_port", "APIFY_ALERT_SMTP_PORT", 587
+            )
+        )
+    except (TypeError, ValueError):
+        smtp_port = 587
+    config = ApifyOwnerEmailConfig(
+        enabled=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "enabled", "APIFY_ALERT_EMAIL_ENABLED", False
+            ),
+            False,
+        ),
+        owner_email=safe_str(
+            _apify_email_setting_v68_98(
+                "owner_email", "APIFY_ALERT_OWNER_EMAIL"
+            )
+        ),
+        sender_email=safe_str(
+            _apify_email_setting_v68_98(
+                "sender_email", "APIFY_ALERT_SENDER_EMAIL"
+            )
+        ),
+        smtp_host=safe_str(
+            _apify_email_setting_v68_98(
+                "smtp_host", "APIFY_ALERT_SMTP_HOST"
+            )
+        ),
+        smtp_port=smtp_port,
+        smtp_username=safe_str(
+            _apify_email_setting_v68_98(
+                "smtp_username", "APIFY_ALERT_SMTP_USERNAME"
+            )
+        ),
+        smtp_password=str(
+            _apify_email_setting_v68_98(
+                "smtp_password", "APIFY_ALERT_SMTP_PASSWORD"
+            )
+            or ""
+        ),
+        use_tls=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "use_tls", "APIFY_ALERT_SMTP_USE_TLS", True
+            ),
+            True,
+        ),
+        use_ssl=_apify_guard_bool_v68_97(
+            _apify_email_setting_v68_98(
+                "use_ssl", "APIFY_ALERT_SMTP_USE_SSL", False
+            ),
+            False,
+        ),
+    )
+    return configure_apify_owner_email(config)
+
+
+APIFY_OWNER_EMAIL_CONFIG_V68_98 = _configure_apify_owner_email_v68_98()
+
+
+def _apify_batch_owner_id_v68_100(purpose: str, fingerprint: str = "") -> str:
+    """Return a stable, non-secret owner id for one recoverable app batch."""
+    run_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
+    material = "|".join(
+        (
+            run_id,
+            safe_str(purpose).casefold(),
+            safe_str(fingerprint),
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _current_apify_token_v68_97() -> str:
+    return (
+        _managed_api_secret_v68_43("APIFY_TOKEN")
+        or clean_api_secret(
+            st.session_state.get("apify_token", "")
+            or st.session_state.get("apify_token_input_v52", "")
+            or st.session_state.get("apify_token_input", "")
+        )
+    )
+
+
+def _render_apify_beta_safeguard_v68_97() -> None:
+    """Notify the owner privately and show users only neutral availability text."""
+    token = _current_apify_token_v68_97()
+    config = current_apify_guard_config()
+    if not token or not config.enabled:
+        return
+
+    active = active_apify_fallback()
+    try:
+        snapshot = get_apify_usage(token)
+    except Exception:
+        return
+
+    state = apify_capacity_state(snapshot, config)
+    notify_apify_owner_if_needed(snapshot, guard_config=config)
+    if state == "blocked":
+        st.info(
+            "Some fallback data is temporarily unavailable. Direct-only retrieval "
+            "can continue, and your saved progress is safe."
+        )
+
+    if active or snapshot.active_actor_job_count > 0:
+        st.info(
+            "Shared fallback is temporarily busy. Direct-only retrieval can "
+            "continue, and fallback work will retry later."
+        )
 
 
 def display_empty(v: str, fallback: str = "Not specified") -> str:
@@ -4023,6 +4283,8 @@ def _is_quota_interruption_v68_43(error) -> bool:
         marker in text
         for marker in (
             "GEMINI_QUOTA_EXHAUSTED",
+            "APIFY_BETA_USAGE_LIMIT",
+            "APIFY_USAGE_CHECK_UNAVAILABLE",
             "RESOURCE_EXHAUSTED",
             "429",
             "QUOTA",
@@ -4052,6 +4314,7 @@ def _large_batch_must_pause_v68_43(error) -> bool:
     return any(
         marker in text
         for marker in (
+            "APIFY_FALLBACK_BUSY",
             "SYSTEMIC_TAGGING_FAILURE",
             "API_KEY_INVALID",
             "API KEY NOT VALID",
@@ -4753,6 +5016,7 @@ def _start_metrics_only_run_v68_86(
         st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
         st.session_state.metrics_only_next_position_v68_86 = 0
         st.session_state.metrics_only_fingerprint_v68_86 = fingerprint
+        st.session_state.metrics_only_quota_paused_v68_99 = False
     st.session_state.metrics_only_active_v68_86 = True
 
 
@@ -4849,8 +5113,20 @@ def _run_metrics_only_chunk_v68_86(
         refreshed = add_performance_fields(refreshed)
     except Exception as exc:
         LOGGER.exception("Metrics-only scrape window failed")
-        st.error(f"Metrics collection paused: {exc}")
+        quota_pause = _is_quota_interruption_v68_43(exc)
+        st.session_state.metrics_only_quota_paused_v68_99 = quota_pause
         st.session_state.metrics_only_active_v68_86 = False
+        _persist_runtime_checkpoint_v68_15()
+        if quota_pause:
+            st.error(
+                "Metrics collection paused because shared processing capacity "
+                "is temporarily unavailable. Saved progress is safe."
+            )
+        else:
+            st.error(
+                "Metrics collection paused safely. Ask the app owner to check "
+                "the server logs before retrying."
+            )
         return pd.DataFrame()
 
     if isinstance(existing, pd.DataFrame) and not existing.empty:
@@ -4859,6 +5135,7 @@ def _run_metrics_only_chunk_v68_86(
         combined = refreshed.reset_index(drop=True)
     st.session_state.metrics_only_df_v68_86 = combined
     st.session_state.metrics_only_next_position_v68_86 = end
+    st.session_state.metrics_only_quota_paused_v68_99 = False
     st.session_state.apify_records_by_key.update(final_update2_review_cache(records))
     _persist_runtime_checkpoint_v68_15()
 
@@ -9034,6 +9311,7 @@ st.markdown(
 )
 step_strip(st.session_state.step)
 _render_continue_later_v68_85()
+_render_apify_beta_safeguard_v68_97()
 if st.session_state.pop("runtime_resume_notice_v68_15", False):
     st.markdown(
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",
@@ -9997,7 +10275,14 @@ elif st.session_state.step == 4:
             metrics_result_v68_86 = pd.DataFrame()
 
         if st.session_state.get("metrics_only_active_v68_86", False):
-            completed_metrics_v68_86 = _run_metrics_only_chunk_v68_86(selected)
+            metrics_owner_v68_100 = _apify_batch_owner_id_v68_100(
+                "metrics",
+                selected_fingerprint_v68_86,
+            )
+            with apify_batch_owner(metrics_owner_v68_100):
+                completed_metrics_v68_86 = _run_metrics_only_chunk_v68_86(
+                    selected
+                )
             if completed_metrics_v68_86 is None:
                 st.rerun()
             metrics_result_v68_86 = st.session_state.get(
@@ -10026,6 +10311,16 @@ elif st.session_state.step == 4:
             st.warning(
                 f"Saved metrics for {len(metrics_result_v68_86):,} posts so far. "
                 "Resume to collect the remaining posts."
+            )
+
+        if st.session_state.get("metrics_only_quota_paused_v68_99", False):
+            _render_quota_recovery_prompt_v68_99(
+                {
+                    "status": "paused_quota",
+                    "saved_rows": len(metrics_result_v68_86),
+                },
+                total_rows=len(supported_metrics_selection_v68_86),
+                resume_label="Resume metrics",
             )
 
         metrics_back_v68_86, metrics_run_v68_86 = st.columns(2)
@@ -10144,7 +10439,12 @@ elif st.session_state.step == 4:
         _render_tagging_auto_wait_v68_55(expected_large_job_id)
     elif tagging_job_active:
         try:
-            tagged_result = run_real_tagging_backend(selected)
+            tagging_owner_v68_100 = (
+                expected_large_job_id
+                or _apify_batch_owner_id_v68_100("tagging")
+            )
+            with apify_batch_owner(tagging_owner_v68_100):
+                tagged_result = run_real_tagging_backend(selected)
         finally:
             if execution_lock_acquired and execution_store is not None:
                 execution_store.release_execution(
@@ -10172,7 +10472,13 @@ elif st.session_state.step == 4:
             if _uses_large_batch_checkpoints_v68_43(selected)
             else "Retry tagging"
         )
-        st.warning(f"Tagging is paused. Check the message above, then select {retry_label}.")
+        latest_paused_manifest = _large_batch_manifest_v68_43(selected)
+        recovery_prompt_shown = _render_quota_recovery_prompt_v68_99(
+            latest_paused_manifest,
+            total_rows=len(selected),
+        )
+        if not recovery_prompt_shown:
+            st.warning(f"Tagging is paused. Check the message above, then select {retry_label}.")
         retry_back, retry_run = st.columns(2)
         with retry_back:
             if st.button("Back", width="stretch"):
@@ -10190,6 +10496,10 @@ elif st.session_state.step == 4:
                 start_label = "Use saved results"
             else:
                 start_label = "Resume tagging"
+        _render_quota_recovery_prompt_v68_99(
+            saved_large_batch,
+            total_rows=len(selected),
+        )
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Back", width="stretch"):

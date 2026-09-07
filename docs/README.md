@@ -9,6 +9,7 @@
 - [Backend integration plan](BACKEND_INTEGRATION_PLAN.md)
 - [Validation and limitations](VALIDATION.md)
 - [Link compatibility](LINK_COMPATIBILITY.md)
+- [Apify beta safeguards](APIFY_BETA_SAFEGUARDS.md)
 - [Testing](TESTING.md)
 - [Open questions](OPEN_QUESTIONS.md)
 

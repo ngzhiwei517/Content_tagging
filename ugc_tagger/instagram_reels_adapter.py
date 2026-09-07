@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
+from ugc_tagger.apify_usage_guard import apify_fallback_slot
+
 
 TIKTOK = "TikTok"
 INSTAGRAM_REELS = "Instagram Reels"
@@ -592,12 +594,26 @@ def _dataset_id(run) -> str:
     return _text(getattr(run, "default_dataset_id", None) or getattr(run, "defaultDatasetId", None))
 
 
-def _run_actor_items(client, actor_id: str, run_input: Dict) -> List[Dict]:
-    run = client.actor(actor_id).call(run_input=run_input)
-    dataset_id = _dataset_id(run)
-    if not dataset_id:
-        raise RuntimeError("Instagram Apify run finished but no default dataset was returned.")
-    return [item for item in client.dataset(dataset_id).iterate_items() if isinstance(item, dict)]
+def _run_actor_items(
+    client,
+    actor_id: str,
+    run_input: Dict,
+    *,
+    apify_token: str = "",
+) -> List[Dict]:
+    with apify_fallback_slot(
+        apify_token,
+        purpose=f"Instagram fallback ({actor_id})",
+    ):
+        run = client.actor(actor_id).call(run_input=run_input)
+        dataset_id = _dataset_id(run)
+        if not dataset_id:
+            raise RuntimeError("Instagram Apify run finished but no default dataset was returned.")
+        return [
+            item
+            for item in client.dataset(dataset_id).iterate_items()
+            if isinstance(item, dict)
+        ]
 
 
 def _instagram_profile_follower_counts(items: Iterable[Dict]) -> Dict[str, int]:
@@ -623,7 +639,12 @@ def _instagram_profile_follower_counts(items: Iterable[Dict]) -> Dict[str, int]:
     return followers_by_handle
 
 
-def _backfill_instagram_follower_counts(records: List[Dict], client) -> List[Dict]:
+def _backfill_instagram_follower_counts(
+    records: List[Dict],
+    client,
+    *,
+    apify_token: str = "",
+) -> List[Dict]:
     """Fetch one profile-detail row per missing creator and update post records.
 
     Post/Reel actors do not consistently include the owner's follower count.
@@ -657,6 +678,7 @@ def _backfill_instagram_follower_counts(records: List[Dict], client) -> List[Dic
                 "resultsLimit": 1,
                 "addProfileStatistics": True,
             },
+            apify_token=apify_token,
         )
     except Exception:
         return records
@@ -699,12 +721,14 @@ def scrape_instagram_posts(
         return []
     if not _text(apify_token) and client is None:
         raise RuntimeError("Missing Apify token.")
+    guard_token = ""
     if client is None:
         try:
             from apify_client import ApifyClient
         except Exception as exc:  # pragma: no cover - dependency error is runtime-only
             raise RuntimeError("Missing dependency: install with `pip install apify-client`.") from exc
         client = ApifyClient(apify_token)
+        guard_token = apify_token
 
     reel_links = [link for link in requested if is_explicit_instagram_reel_url(link)]
     generic_links = [link for link in requested if link not in reel_links]
@@ -719,6 +743,7 @@ def scrape_instagram_posts(
                 client,
                 INSTAGRAM_REEL_ACTOR_ID,
                 {"postUrls": reel_links},
+                apify_token=guard_token,
             )
         except Exception:
             # Keep tagging usable if the community actor is temporarily
@@ -750,6 +775,7 @@ def scrape_instagram_posts(
                     "resultsLimit": len(generic_links),
                     "addParentData": True,
                 },
+                apify_token=guard_token,
             )
         )
 
@@ -785,7 +811,11 @@ def scrape_instagram_posts(
                 "error": "POST_NOT_FOUND",
                 "errorCode": "POST_NOT_FOUND",
             })
-    return _backfill_instagram_follower_counts(records, client)
+    return _backfill_instagram_follower_counts(
+        records,
+        client,
+        apify_token=guard_token,
+    )
 
 
 def platform_for_record(record: Optional[Dict], fallback_url: str = "") -> str:

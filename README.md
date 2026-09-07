@@ -64,9 +64,20 @@ Store deployment credentials in Streamlit Secrets:
 ```toml
 GEMINI_API_KEY = "replace-with-the-deployment-key"
 APIFY_TOKEN = "replace-with-the-deployment-token"
+
+[apify_guard]
+enabled = true
+warning_usd = 8.00
+stop_usd = 8.70
+emergency_stop_usd = 9.50
+fail_closed = true
 ```
 
 Never commit real credentials. For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the values there.
+For a shared beta, also enable Apify billing notifications and set the hard
+account limit. Private owner alerts can be configured through the optional
+`[apify_guard_email]` Streamlit Secrets section; users do not see usage amounts.
+See [Apify beta safeguards](docs/APIFY_BETA_SAFEGUARDS.md).
 
 ## Run locally
 
@@ -114,6 +125,24 @@ python -m unittest discover -s tests
 - [Code map](docs/CODE_MAP.md)
 - [Validation and limitations](docs/VALIDATION.md)
 - [Changelog](CHANGELOG.md)
+
+## Handover readiness
+
+On a new maintainer's computer, open the intended repository checkout in Codex
+and use this read-only prompt before requesting any changes:
+
+```text
+Read AGENTS.md, README.md, docs/HANDOVER.md,
+docs/PROJECT_CONTEXT.md and docs/CODE_MAP.md completely.
+
+Do not edit anything.
+
+Check the current branch, Git status, remotes, GitHub account,
+and whether local main matches origin/main.
+
+Tell me if this computer is ready. If it is not ready, list each blocker and
+the exact safe next step, then wait for my approval.
+```
 
 ## Privacy
 

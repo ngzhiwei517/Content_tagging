@@ -1,5 +1,38 @@
 # Changelog
 
+## v68.42.15 — Quota-pause recovery prompt
+
+- Updated the temporary $10 beta policy to email the owner at $8.00, restrict
+  new paid batches at $8.70, and stop all paid starts at $9.50.
+- Added a process-scoped batch owner so the admitted batch can continue between
+  the restriction and emergency thresholds while a second batch pauses safely.
+- Added a clear `Save link & continue later` action when shared processing
+  capacity pauses an AI-tagging or Metrics-only run.
+- Kept provider spending details private while explaining that completed posts
+  are saved and can be reused after the owner restores access.
+- Recovery links remain manual-resume links and do not automatically restart
+  paid work when reopened.
+
+## v68.42.14 — Private Apify owner alerts
+
+- Replaced the user-facing Apify spend warning with private, SMTP-based owner
+  emails at the warning and stop thresholds.
+- Kept blocked-user wording neutral while preserving direct retrieval and
+  saved progress.
+- Deduplicated owner alerts by usage cycle and threshold, and kept email
+  delivery failure from weakening the paid-fallback guard.
+
+## v68.42.13 — Shared Apify beta safeguards
+
+- Added a server-side monthly usage check before every paid Apify Actor start.
+- Added configurable $3.50 warning and $4.00 stop thresholds for the shared beta.
+- Serialized paid fallback calls within one Streamlit server process so two
+  concurrent sessions cannot start Actors at the same time.
+- Kept direct retrieval and completed checkpoints available when paid fallback
+  is busy, unavailable, or blocked by the safety threshold.
+- Added setup guidance for Apify notifications, the hard account limit, and
+  multi-instance limitations without exposing the deployment token.
+
 ## v68.42.12 hotfix — Streamlit deployment import compatibility
 
 - Removed the new large-batch fallback helper from the module-level adapter
