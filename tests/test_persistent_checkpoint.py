@@ -74,7 +74,7 @@ class ChunkWriteFailureObjectStore(MemoryObjectStore):
 
 
 class PersistentLargeBatchTests(unittest.TestCase):
-    def test_compact_partial_snapshot_replaces_per_post_remote_writes(self):
+    def test_per_post_remote_rows_restore_without_a_growing_snapshot(self):
         selected = pd.DataFrame([
             {
                 "Link": f"https://www.tiktok.com/@creator/video/{5000 + index}",
@@ -106,13 +106,11 @@ class PersistentLargeBatchTests(unittest.TestCase):
                         "Link": selected.iloc[position]["Link"],
                         "Creative Type": "Others",
                     },
-                    persist_remote=False,
                 )
-            self.assertTrue(store.save_partial_snapshot(manifest["job_id"], 0))
 
             remote_keys = list(remote.objects)
-            self.assertTrue(any(key.endswith("/snapshot.json") for key in remote_keys))
-            self.assertFalse(any("/row_" in key for key in remote_keys))
+            self.assertFalse(any(key.endswith("/snapshot.json") for key in remote_keys))
+            self.assertEqual(len([key for key in remote_keys if "/row_" in key]), 5)
 
             restarted_root = Path(directory) / "restarted"
             restarted = BatchCheckpointStore(
@@ -414,11 +412,71 @@ class SupabaseBackendTests(unittest.TestCase):
             "https://project.supabase.co",
             "sb_secret_example",
             session=session,
+            retry_delays=(0.0,),
         )
 
         backend.save("e" * 32, "runtime.json", {"state": {"step": 3}})
 
         self.assertEqual(session.post.call_count, 2)
+
+    def test_postgres_57014_response_uses_exponential_retry(self):
+        session = Mock()
+        cancelled = Mock(status_code=400, text='{"code":"57014"}')
+        cancelled.json.return_value = {
+            "code": "57014",
+            "message": "canceling statement due to statement timeout",
+        }
+        successful = Mock(status_code=201, text="")
+        successful.json.return_value = {}
+        successful.raise_for_status.return_value = None
+        session.post.side_effect = [cancelled, successful]
+        sleeps = []
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            session=session,
+            retry_delays=(0.25, 0.5),
+            sleep=sleeps.append,
+        )
+
+        backend.save("f" * 32, "runtime.json", {"state": {"step": 4}})
+
+        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_tagging_worker_claim_uses_atomic_rpc(self):
+        session = Mock()
+        response = Mock(status_code=200, text="")
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "acquired": True,
+            "queue_position": 1,
+            "active_recovery_id": "a" * 32,
+            "lease_until": "2026-09-11T10:00:00Z",
+        }
+        session.post.return_value = response
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            session=session,
+            retry_delays=(),
+        )
+
+        claim = backend.claim_tagging_worker(
+            "a" * 32,
+            "b" * 32,
+            "c" * 32,
+            lease_seconds=600,
+        )
+
+        self.assertTrue(claim["acquired"])
+        self.assertTrue(
+            session.post.call_args.args[0].endswith("/rpc/tagging_queue_claim")
+        )
+        self.assertEqual(
+            session.post.call_args.kwargs["json"]["p_recovery_id"],
+            "a" * 32,
+        )
 
     def test_http_failures_map_to_safe_diagnostic_codes(self):
         response = Mock(status_code=401)
@@ -450,6 +508,42 @@ class PostgresBackendTests(unittest.TestCase):
         self.assertNotIn("d" * 32, statement)
         self.assertNotIn("runtime.json", statement)
         self.assertEqual(params[:2], ("d" * 32, "runtime.json"))
+
+    def test_query_cancel_57014_is_retried_from_a_new_connection(self):
+        class QueryCancelled(Exception):
+            sqlstate = "57014"
+
+        first_cursor = Mock()
+        first_cursor.__enter__ = Mock(return_value=first_cursor)
+        first_cursor.__exit__ = Mock(return_value=False)
+        first_cursor.execute.side_effect = QueryCancelled("cancelled")
+        second_cursor = Mock()
+        second_cursor.__enter__ = Mock(return_value=second_cursor)
+        second_cursor.__exit__ = Mock(return_value=False)
+
+        first_connection = Mock()
+        first_connection.__enter__ = Mock(return_value=first_connection)
+        first_connection.__exit__ = Mock(return_value=False)
+        first_connection.cursor.return_value = first_cursor
+        second_connection = Mock()
+        second_connection.__enter__ = Mock(return_value=second_connection)
+        second_connection.__exit__ = Mock(return_value=False)
+        second_connection.cursor.return_value = second_cursor
+
+        driver = Mock()
+        driver.connect.side_effect = [first_connection, second_connection]
+        sleeps = []
+        backend = PostgresCheckpointBackend(
+            "postgresql://server/database",
+            retry_delays=(0.25, 0.5),
+            sleep=sleeps.append,
+        )
+        backend._driver = Mock(return_value=driver)
+
+        backend.save("d" * 32, "runtime.json", {"state": {"step": 4}})
+
+        self.assertEqual(driver.connect.call_count, 2)
+        self.assertEqual(sleeps, [0.25])
 
 
 class WorkflowCheckpointSafetyTests(unittest.TestCase):

@@ -159,6 +159,14 @@ and targeted verification -> human review when needed -> export.
 - Supabase REST or direct Postgres persistence is optional. Use the schema in
   `checkpoint_schema.sql` and the configuration documented in
   `docs/PERSISTENT_CHECKPOINTS.md`.
+- With persistent checkpoints configured, AI-tagging provider work must pass
+  through the database-backed global single-worker queue. If its schema or RPC
+  is unavailable, fail closed before starting Gemini or Apify work.
+- Save each completed post as one small recovery object. Do not repeatedly
+  rewrite a growing partial-results snapshot; compact a completed chunk only
+  once after its per-post results are durable.
+- Retry Postgres SQLSTATE `57014` only with bounded exponential backoff and a
+  fresh request or connection.
 - Recovery links carry a private recovery ID in `?run=`. Treat them like access
   links and do not expose them publicly.
 - Store only sanitized workflow state and tagging objects. Never store Gemini

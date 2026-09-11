@@ -184,6 +184,9 @@ class BatchCheckpointStore:
     def _execution_lock_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / ".execution_lock.json"
 
+    def _global_execution_lock_path(self) -> Path:
+        return self.root / ".global_execution_lock.json"
+
     @staticmethod
     def _write_local_json(path: Path, payload) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,7 +501,7 @@ class BatchCheckpointStore:
             reconciled["pause_reason"] = ""
         elif reconciled.get("status") == "completed":
             reconciled["status"] = "running"
-        # Partial snapshots already carry their row positions. Keep frequent
+        # Per-post objects already carry their row positions. Keep frequent
         # reconciliation local; completed chunks and explicit pause states
         # still update the remote manifest.
         return (
@@ -585,17 +588,6 @@ class BatchCheckpointStore:
             return self._atomic_write_json(path, payload)
         self._write_local_json(path, payload)
         return False
-
-    def save_partial_snapshot(self, job_id: str, chunk_index: int) -> bool:
-        """Persist one compact snapshot for the current unfinished chunk."""
-        partial = self.load_partial_chunk_results(job_id, chunk_index)
-        if partial.empty:
-            return False
-        payload = _json_safe(dataframe_to_payload(partial.reset_index(drop=True)))
-        return self._atomic_write_json(
-            self._partial_snapshot_path(job_id, chunk_index),
-            payload,
-        )
 
     def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
         """Return saved row positions for one incomplete chunk."""
@@ -846,6 +838,88 @@ class BatchCheckpointStore:
         path = self._execution_lock_path(job_id)
         existing = self._read_execution_lock(job_id)
         if existing.get("owner_id") != str(owner_id or "").strip().lower():
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _read_global_execution_lock(self) -> Dict:
+        path = self._global_execution_lock_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def try_acquire_global_execution(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+    ) -> bool:
+        """Allow one tagging job at a time when no shared backend is configured."""
+        recovery_id = self._validated_job_id(recovery_id)
+        job_id = self._validated_job_id(job_id)
+        owner_id = self._validated_job_id(owner_id)
+        path = self._global_execution_lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lease_until = int(time.time()) + max(60, int(lease_seconds))
+
+        for _attempt in range(3):
+            existing = self._read_global_execution_lock()
+            if existing:
+                try:
+                    existing_until = int(existing.get("lease_until", 0) or 0)
+                except (TypeError, ValueError):
+                    existing_until = 0
+                if existing_until > int(time.time()):
+                    return False
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "recovery_id": recovery_id,
+                            "job_id": job_id,
+                            "owner_id": owner_id,
+                            "lease_until": lease_until,
+                        },
+                        handle,
+                    )
+                return True
+            except Exception:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        return False
+
+    def release_global_execution(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+    ) -> None:
+        """Release the process-local global lease only for its exact owner/job."""
+        path = self._global_execution_lock_path()
+        existing = self._read_global_execution_lock()
+        expected = {
+            "recovery_id": self._validated_job_id(recovery_id),
+            "job_id": self._validated_job_id(job_id),
+            "owner_id": self._validated_job_id(owner_id),
+        }
+        if any(existing.get(key) != value for key, value in expected.items()):
             return
         try:
             path.unlink(missing_ok=True)

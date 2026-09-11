@@ -4,7 +4,9 @@ Local JSON checkpoints remain enabled with no configuration. To retain batches
 when Streamlit replaces or redeploys the app container, configure either
 Supabase REST or a direct Postgres connection.
 
-1. Run `checkpoint_schema.sql` once in Supabase SQL Editor or Postgres.
+1. Run the current `checkpoint_schema.sql` in Supabase SQL Editor or Postgres.
+   Existing deployments must run it again after this update because it also
+   creates the shared tagging queue and lease functions.
 2. Add one backend to Streamlit Secrets.
 
 Direct Postgres, including a Supabase Postgres connection URL:
@@ -53,3 +55,26 @@ run separate jobs without being redirected to the last unfinished batch.
 Remote checkpointing starts only after the current workflow contains at least
 one post. Opening an empty app session does not create a Supabase/Postgres row;
 the local fallback remains available from the first render.
+
+## Shared tagging queue and write pattern
+
+When persistent checkpoints are configured, every AI-tagging batch enters one
+database-backed FIFO queue. Only the batch holding the global lease may call
+Gemini or the Apify fallback. The lease is released after each bounded app
+execution, so another waiting batch can run next. An expired lease is cleared
+automatically if a worker stops unexpectedly.
+
+The queue uses the existing recovery ID and tagging job ID. Resuming from the
+private recovery link therefore re-enters the same job and skips post positions
+that already have a saved result.
+
+Completed results are stored as one small object per post. The app no longer
+rewrites a growing partial-results JSON snapshot every five posts. A completed
+50-row checkpoint chunk may still be compacted once after every row in that
+chunk is durable. Database statement cancellations with SQLSTATE `57014` are
+retried from a fresh request/connection with bounded exponential backoff.
+
+If persistent settings are present but the queue functions are missing or
+unavailable, tagging fails closed before provider work starts and asks the app
+owner to apply the latest schema. Local-only development uses a process-local
+single-worker lock; that fallback does not coordinate multiple app instances.

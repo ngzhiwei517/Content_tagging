@@ -74,6 +74,11 @@ from ugc_tagger.persistent_checkpoint import (
     checkpoint_error_code,
     create_persistent_checkpoint_backend,
 )
+from ugc_tagger.tagging_worker_queue import (
+    TaggingWorkerClaim,
+    TaggingWorkerQueue,
+    TaggingWorkerQueueUnavailable,
+)
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.creator_profile_enrichment import (
     DEFAULT_PROFILE_HISTORY_MODE,
@@ -1355,10 +1360,9 @@ TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
 MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 10
 # Apify media collection can exceed Streamlit Cloud's execution window when a
 # whole campaign is submitted at once. Save each smaller scrape window before
-# yielding, keep every completed Gemini row restart-safe, and compact the
-# remote partial snapshot every five rows.
+# yielding and keep every completed Gemini row restart-safe.
 MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
-REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52 = 5
+TAGGING_GLOBAL_LEASE_SECONDS_V68_100 = 7200
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
 TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
 TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
@@ -1711,6 +1715,15 @@ def _configured_checkpoint_backend_v68_44():
         )
     except Exception:
         return None
+
+
+def _persistent_checkpoint_is_configured_v68_100() -> bool:
+    """Distinguish local-only use from a broken shared checkpoint setup."""
+    return bool(
+        _checkpoint_setting_v68_44("database_url", "CHECKPOINT_DATABASE_URL")
+        or _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL")
+        or _checkpoint_setting_v68_44("supabase_key", "CHECKPOINT_SUPABASE_KEY")
+    )
 
 
 def _checkpoint_objects_v68_44(run_id: str, *, prefix: str = ""):
@@ -3850,6 +3863,19 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
     )
 
 
+def _tagging_worker_queue_v68_100(
+    store: BatchCheckpointStore,
+) -> TaggingWorkerQueue:
+    """Create the distributed queue or its local development fallback."""
+    checkpoint_objects = getattr(store, "persistent_store", None)
+    backend = getattr(checkpoint_objects, "backend", None)
+    return TaggingWorkerQueue(
+        store,
+        persistent_backend=backend,
+        persistent_required=_persistent_checkpoint_is_configured_v68_100(),
+    )
+
+
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
     """Protect every non-empty selection from a Streamlit reconnect."""
     return isinstance(selected, pd.DataFrame) and not selected.empty
@@ -3999,6 +4025,50 @@ def _render_tagging_auto_wait_v68_55(job_id: str) -> None:
     if action == "manual":
         _clear_tagging_continue_query_v68_55()
         st.rerun(scope="app")
+
+
+@st.fragment(run_every="5s")
+def _render_tagging_queue_wait_v68_100(job_id: str) -> None:
+    """Poll the shared FIFO without starting provider work out of turn."""
+    runtime_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
+    owner_id = _tagging_execution_owner_v68_55()
+    try:
+        store = _large_batch_store_v68_43()
+        queue = _tagging_worker_queue_v68_100(store)
+        claim = queue.claim(
+            runtime_id,
+            job_id,
+            owner_id,
+            lease_seconds=TAGGING_GLOBAL_LEASE_SECONDS_V68_100,
+        )
+    except TaggingWorkerQueueUnavailable:
+        st.error(
+            "The shared tagging queue is unavailable. Ask the app owner to "
+            "run the latest checkpoint_schema.sql, then select Resume tagging."
+        )
+        return
+
+    if claim.acquired:
+        _set_tagging_continue_query_v68_55(job_id)
+        st.session_state.tagging_job_active_v68_43 = True
+        st.rerun(scope="app")
+
+    queue_position = max(2, int(claim.queue_position or 0))
+    st.info(
+        f"Another batch is tagging now. This batch is queued at position "
+        f"{queue_position}. Completed posts are saved. Resume keeps this "
+        "recovery ID and skips completed posts; this page will continue "
+        "automatically when the worker is available."
+    )
+    if st.button(
+        "Check queue",
+        type="primary",
+        width="stretch",
+        key="tagging_queue_check_v68_100",
+    ):
+        st.rerun(scope="fragment")
 
 
 def _attach_comparison_metadata_v68_43(
@@ -4509,17 +4579,6 @@ def _run_checkpointed_tag_every_link_v68_43(
                 on_result,
                 on_progress,
             )
-            # Also compact the individual remote rows into a periodic snapshot.
-            # Completed chunks replace these temporary recovery objects.
-            if (
-                len(saved_positions) % REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52
-                == 0
-                and len(saved_positions) < len(chunk)
-            ):
-                store.save_partial_snapshot(
-                    manifest["job_id"],
-                    next_chunk_index,
-                )
 
         partial_chunk = store.load_partial_chunk_results(
             manifest["job_id"],
@@ -10115,24 +10174,71 @@ elif st.session_state.step == 4:
     execution_owner = ""
     execution_lock_acquired = False
     execution_lock_error = False
+    worker_queue = None
+    worker_claim: Optional[TaggingWorkerClaim] = None
+    worker_claim_acquired = False
+    worker_queue_error = False
     if tagging_job_active and expected_large_job_id:
         execution_store = _large_batch_store_v68_43()
         execution_owner = _tagging_execution_owner_v68_55()
         try:
-            execution_lock_acquired = execution_store.try_acquire_execution(
+            worker_queue = _tagging_worker_queue_v68_100(execution_store)
+            worker_claim = worker_queue.claim(
+                _valid_runtime_id_v68_15(
+                    st.session_state.get("runtime_run_id_v68_15")
+                ),
                 expected_large_job_id,
                 execution_owner,
+                lease_seconds=TAGGING_GLOBAL_LEASE_SECONDS_V68_100,
             )
-        except Exception:
-            execution_lock_error = True
-        if not execution_lock_acquired:
+            worker_claim_acquired = bool(worker_claim.acquired)
+        except TaggingWorkerQueueUnavailable:
+            worker_queue_error = True
+
+        if worker_queue_error:
             st.session_state.tagging_job_active_v68_43 = False
             tagging_job_active = False
-            if execution_lock_error:
-                auto_resume_action = "manual"
-                _clear_tagging_continue_query_v68_55()
-            else:
-                auto_resume_action = "wait"
+            auto_resume_action = "manual"
+            _clear_tagging_continue_query_v68_55()
+        elif not worker_claim_acquired:
+            st.session_state.tagging_job_active_v68_43 = False
+            tagging_job_active = False
+            auto_resume_action = "queue_wait"
+            _clear_tagging_continue_query_v68_55()
+        else:
+            try:
+                execution_lock_acquired = execution_store.try_acquire_execution(
+                    expected_large_job_id,
+                    execution_owner,
+                )
+            except Exception:
+                execution_lock_error = True
+            if not execution_lock_acquired:
+                st.session_state.tagging_job_active_v68_43 = False
+                tagging_job_active = False
+                if execution_lock_error:
+                    auto_resume_action = "manual"
+                    _clear_tagging_continue_query_v68_55()
+                else:
+                    auto_resume_action = "wait"
+                try:
+                    worker_queue.release(
+                        _valid_runtime_id_v68_15(
+                            st.session_state.get("runtime_run_id_v68_15")
+                        ),
+                        expected_large_job_id,
+                        execution_owner,
+                    )
+                except Exception:
+                    LOGGER.warning("Could not release an unused tagging worker lease.")
+                worker_claim_acquired = False
+
+    if worker_queue_error:
+        st.error(
+            "The shared tagging queue is unavailable, so no new tagging work "
+            "was started. Ask the app owner to run the latest "
+            "checkpoint_schema.sql, then select Resume tagging."
+        )
 
     if execution_lock_error:
         st.warning(
@@ -10140,7 +10246,9 @@ elif st.session_state.step == 4:
             "could not be created. Select Resume tagging to try again."
         )
 
-    if auto_resume_action == "wait" and not tagging_job_active:
+    if auto_resume_action == "queue_wait" and not tagging_job_active:
+        _render_tagging_queue_wait_v68_100(expected_large_job_id)
+    elif auto_resume_action == "wait" and not tagging_job_active:
         _render_tagging_auto_wait_v68_55(expected_large_job_id)
     elif tagging_job_active:
         try:
@@ -10151,6 +10259,20 @@ elif st.session_state.step == 4:
                     expected_large_job_id,
                     execution_owner,
                 )
+            if worker_claim_acquired and worker_queue is not None:
+                try:
+                    worker_queue.release(
+                        _valid_runtime_id_v68_15(
+                            st.session_state.get("runtime_run_id_v68_15")
+                        ),
+                        expected_large_job_id,
+                        execution_owner,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Could not release the shared tagging worker lease; "
+                        "its expiry will make the queue available again."
+                    )
         if tagged_result is None:
             # Each bounded unit runs in a fresh Streamlit execution. This keeps
             # every run restart-safe without monopolising one script execution.
