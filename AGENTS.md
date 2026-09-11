@@ -29,6 +29,16 @@ authentication, job-queue, monitoring, and governance work.
 - Preserve unrelated user changes. Stage and commit only the intended files.
 - Use a dedicated feature branch/worktree for code changes. Never push, merge,
   rebase, or update `main` unless the user explicitly asks.
+- For a new-computer or maintainer-readiness check, first read `AGENTS.md`,
+  `README.md`, `docs/HANDOVER.md`, `docs/PROJECT_CONTEXT.md` and
+  `docs/CODE_MAP.md` completely. Do not edit or change Git state during this
+  check. Report the actual checkout path, current branch, worktree status,
+  remotes, active GitHub account and whether local `main` matches
+  `origin/main`.
+- Treat missing or diverged local `main`, invalid GitHub authentication, the
+  wrong repository account, an unexpected remote or a dirty worktree as a
+  readiness blocker. Explain the exact safe next step and wait for approval
+  before changing authentication, branches, remotes or history.
 
 ## Current product direction
 - Preserve the accepted v41-style five-step flow unless the user requests a

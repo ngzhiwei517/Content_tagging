@@ -838,6 +838,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "MAX_APIFY_POSTS_PER_EXECUTION_V68_54": 25,
                 "MAX_LIVE_POSTS_PER_EXECUTION_V68_52": 5,
                 "Optional": Optional,
+                "REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52": 5,
                 "_attach_comparison_metadata_v68_43": lambda frame, _manifest: frame,
                 "_final_update2_adapter": adapter,
                 "_is_quota_interruption_v68_43": lambda _exc: False,

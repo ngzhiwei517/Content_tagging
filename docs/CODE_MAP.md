@@ -6,23 +6,29 @@ This guide shows where each responsibility lives. It is intentionally short: use
 
 ```text
 app.py
-  -> ugc_tagger/final_update2_adapter.py
-    -> ugc_tagger/instagram_reels_adapter.py (Instagram ingestion only)
+  -> ugc_tagger/direct_post_scraper.py (direct public retrieval)
+  -> ugc_tagger/instagram_reels_adapter.py (Instagram normalization/fallback)
+  -> ugc_tagger/creator_profile_enrichment.py (Top Creators enrichment)
+  -> ugc_tagger/final_update2_adapter.py (shared tagging boundary)
     -> ugc_tagger/final_update2_backend.py
       -> ugc_tagger/final_update2_backend_source.py
         -> ugc_tagger/evidence_verifier.py
         -> ugc_tagger/review_routing.py
         -> ugc_tagger/drama_analysis.py (only after a drama label is confirmed)
+  -> ugc_tagger/persistent_checkpoint.py (optional restart recovery)
 ```
 
 ## Modules
 
 | Path | Responsibility | Change here when... |
 | --- | --- | --- |
-| `app.py` | Current six-step Streamlit UI, batch state, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
-| `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic progress files for large `Tag every link` runs | Chunk size, retention or resume storage needs to change |
-| `ugc_tagger/persistent_checkpoint.py` | Supabase/Postgres object persistence, queue RPC calls and transient database retries | Shared checkpoint transport or retry behavior needs to change |
+| `app.py` | Current five-step Streamlit UI, session state, batch assembly, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
+| `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
+| `ugc_tagger/persistent_checkpoint.py` | Optional Supabase/Postgres checkpoint storage, worker-pool RPC calls and transient database retries | Shared recovery, multi-user admission or retry behavior needs to change |
 | `ugc_tagger/tagging_worker_queue.py` | Bounded multi-user worker admission with a local development fallback | Tagging concurrency or capacity behavior needs to change |
+| `ugc_tagger/direct_post_scraper.py` | Direct TikTok/Instagram post retrieval before paid fallback | Public retrieval or direct metric normalization needs to change |
+| `ugc_tagger/creator_profile_enrichment.py` | Three-month creator activity and profile-metric enrichment | Top Creator profile collection or backfill needs to change |
+| `ugc_tagger/dashboard_assistant.py` | Taggy trusted help, current-page context and grounded dashboard assistance | Taggy guidance or dashboard prompts need to change |
 | `ugc_tagger/final_update2_adapter.py` | Schema boundary between the current UI and the preserved backend | Input/output columns or shared TikTok/Instagram orchestration needs to change |
 | `ugc_tagger/final_update2_backend.py` | Import-safe loader for the preserved backend functions | The backend source boundary changes; ordinary tagging changes do not belong here |
 | `ugc_tagger/final_update2_backend_source.py` | Canonical scraping, Gemini prompt, guardrails, validation and tagging pipeline, followed by the preserved legacy UI | Classification behavior or the core pipeline needs to change |
@@ -31,6 +37,8 @@ app.py
 | `ugc_tagger/review_routing.py` | Human-review policy and deterministic QA sampling | Review escalation or audit sampling needs to change |
 | `ugc_tagger/drama_analysis.py` | Conditional drama-detail and audio enrichment | A confirmed drama post needs more detailed classification |
 | `ugc_tagger/model_comparison.py` | Approved Gemini model IDs and run-level model selection | Model options or defaults need to change |
+| `ugc_tagger/selection_metrics.py` | Metric-aware Top-N selection and missing-metric retrieval scope | Ranking or Top-N candidate behavior needs to change |
+| `ugc_tagger/manual_metrics.py` | Safe reviewer-entered metric completion and recalculation | Manual metric validation or audit fields need to change |
 | `creative_knowledge/` | Reviewed reusable creator, hashtag, market, track and keyword patterns | An approved correction should become a reusable pattern |
 | `tests/` | Regression contracts for ingestion, tagging, routing, review and export | Any behavior changes or a bug is fixed |
 
@@ -42,7 +50,9 @@ app.py
 4. Batch assembly and media preview
 5. Selection and the active `final_update2_adapter` call
 6. Export and summary helpers
-7. Six Streamlit workflow pages
+7. Five user-facing workflow pages: Add Posts, Select Posts, Run, Review and
+   Summary & Export. Their internal step IDs remain 2-6 because credentials are
+   deployment-managed instead of appearing as a marketing workflow page.
 
 `app.py` deliberately does not contain a second copy of the Gemini prompt,
 Creative KB or tagging guardrails. Those responsibilities live behind
@@ -67,8 +77,12 @@ Some helper names include historical version suffixes such as `_v43` or `_v68_15
 ## Safe change boundaries
 
 - UI copy, layout or page behavior: start in `app.py`.
+- Direct retrieval: start in `direct_post_scraper.py`.
 - TikTok/Instagram schema mapping: start in `final_update2_adapter.py` or
   `instagram_reels_adapter.py`.
+- Checkpoint persistence: start in `batch_checkpoint.py` for local run progress
+  and `persistent_checkpoint.py` for restart/redeployment recovery.
+- Creator profile enrichment: start in `creator_profile_enrichment.py`.
 - Prompt, labels or reusable guardrails: start in
   `final_update2_backend_source.py` and add a focused regression test.
 - Human-review routing: start in `review_routing.py`.

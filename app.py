@@ -9238,7 +9238,7 @@ st.markdown(
     """
 <div class='app-title hero-v37 hero-title-only'>
   <div class='hero-copy'>
-    <h1>UGC Post Tagging Tool</h1>
+    <h1>Taggy</h1>
   </div>
 </div>
 """,

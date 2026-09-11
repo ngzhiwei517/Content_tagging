@@ -115,6 +115,24 @@ python -m unittest discover -s tests
 - [Validation and limitations](docs/VALIDATION.md)
 - [Changelog](CHANGELOG.md)
 
+## Handover readiness
+
+On a new maintainer's computer, open the intended repository checkout in Codex
+and use this read-only prompt before requesting any changes:
+
+```text
+Read AGENTS.md, README.md, docs/HANDOVER.md,
+docs/PROJECT_CONTEXT.md and docs/CODE_MAP.md completely.
+
+Do not edit anything.
+
+Check the current branch, Git status, remotes, GitHub account,
+and whether local main matches origin/main.
+
+Tell me if this computer is ready. If it is not ready, list each blocker and
+the exact safe next step, then wait for my approval.
+```
+
 ## Privacy
 
 Do not commit API keys, campaign data, exports, or downloaded media. The application processes public social content and is not affiliated with TikTok, Instagram, Google, Apple, or Apify.
