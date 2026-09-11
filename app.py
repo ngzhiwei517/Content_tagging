@@ -4018,7 +4018,9 @@ def _attach_comparison_metadata_v68_43(
 
 def _is_quota_interruption_v68_43(error) -> bool:
     """Recognise provider quota failures without exposing raw error details."""
-    text = safe_str(error).upper()
+    if _apify_error_code_v68_101(error) == "APIFY_QUOTA":
+        return True
+    text = " ".join(_error_texts_v68_101(error)).upper()
     return any(
         marker in text
         for marker in (
@@ -4032,8 +4034,96 @@ def _is_quota_interruption_v68_43(error) -> bool:
     )
 
 
+def _error_chain_v68_101(error) -> List[BaseException]:
+    """Return a bounded exception chain, including wrapped provider errors."""
+    chain: List[BaseException] = []
+    pending = [error]
+    seen = set()
+    while pending and len(chain) < 8:
+        current = pending.pop(0)
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        pending.extend(
+            candidate
+            for candidate in (
+                getattr(current, "provider_error", None),
+                getattr(current, "__cause__", None),
+                getattr(current, "__context__", None),
+            )
+            if isinstance(candidate, BaseException)
+        )
+    return chain
+
+
+def _error_texts_v68_101(error) -> List[str]:
+    """Collect diagnostic text without rendering it in the user interface."""
+    values: List[str] = []
+    for current in _error_chain_v68_101(error):
+        for value in (
+            safe_str(current),
+            safe_str(getattr(current, "message", "")),
+            safe_str(getattr(current, "type", "")),
+        ):
+            if value and value not in values:
+                values.append(value)
+    return values
+
+
+def _apify_error_code_v68_101(error) -> str:
+    """Classify Apify HTTP failures using structured status where available."""
+    chain = _error_chain_v68_101(error)
+    text = " ".join(_error_texts_v68_101(error)).upper()
+    is_apify = any("APIFY" in type(current).__name__.upper() for current in chain)
+    is_apify = is_apify or "APIFY" in text
+    if not is_apify:
+        return ""
+
+    status_codes = set()
+    for current in chain:
+        try:
+            status_code = int(getattr(current, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status_code = 0
+        if status_code:
+            status_codes.add(status_code)
+
+    if status_codes.intersection({401, 403}):
+        return "APIFY_ACCESS"
+    if status_codes.intersection({402, 429}) or any(
+        marker in text
+        for marker in (
+            "QUOTA",
+            "RATE LIMIT",
+            "USAGE LIMIT",
+            "CREDIT",
+            "MONTHLY LIMIT",
+        )
+    ):
+        return "APIFY_QUOTA"
+    if status_codes.intersection({400, 404, 409, 422}):
+        return "APIFY_REQUEST"
+    if any(code == 408 or code >= 500 for code in status_codes) or any(
+        marker in text
+        for marker in (
+            "CONNECTION",
+            "DEADLINE",
+            "TIMEOUT",
+            "TEMPORARILY UNAVAILABLE",
+            "SERVICE UNAVAILABLE",
+            "DNS",
+            "SSL",
+        )
+    ):
+        return "APIFY_SERVICE"
+    return "APIFY_ERROR"
+
+
 def _large_batch_must_pause_v68_43(error) -> bool:
     """Return True for failures that cannot safely be isolated to one post."""
+    if _apify_error_code_v68_101(error):
+        return True
     if _is_quota_interruption_v68_43(error):
         return True
     if isinstance(
@@ -4048,7 +4138,7 @@ def _large_batch_must_pause_v68_43(error) -> bool:
         ),
     ):
         return True
-    text = safe_str(error).upper()
+    text = " ".join(_error_texts_v68_101(error)).upper()
     return any(
         marker in text
         for marker in (
@@ -4076,9 +4166,12 @@ def _large_batch_must_pause_v68_43(error) -> bool:
 
 def _large_batch_error_code_v68_43(error) -> str:
     """Return a non-sensitive diagnostic category for the owner."""
+    apify_code = _apify_error_code_v68_101(error)
+    if apify_code:
+        return apify_code
     if _is_quota_interruption_v68_43(error):
         return "API_QUOTA"
-    text = safe_str(error).upper()
+    text = " ".join(_error_texts_v68_101(error)).upper()
     if any(
         marker in text
         for marker in (
@@ -4421,6 +4514,8 @@ def _run_checkpointed_tag_every_link_v68_43(
             if position in scrape_positions
             and _final_update2_adapter.match_record(row, by_id, by_url) is None
         ]
+        scrape_failure = None
+        failed_scrape_links = set()
         if rows_missing_records:
             scrape_rows = rows_missing_records[
                 :MAX_APIFY_POSTS_PER_EXECUTION_V68_54
@@ -4434,10 +4529,21 @@ def _run_checkpointed_tag_every_link_v68_43(
                 f"Collecting public data for {len(links):,} post(s) using "
                 "direct retrieval first, with Apify fallback..."
             )
-            new_records = final_update2_scrape_links(links, apify_token)
+            try:
+                new_records = final_update2_scrape_links(links, apify_token)
+            except _final_update2_adapter.PartialScrapeError as exc:
+                scrape_failure = exc
+                new_records = list(exc.partial_records)
+                failed_scrape_links = {
+                    final_update2_normalize_url(link)
+                    for link in exc.failed_links
+                    if final_update2_normalize_url(link)
+                }
             new_records = list(new_records or [])
             new_by_id, new_by_url = _final_update2_adapter.index_records(new_records)
             for row in scrape_rows:
+                if final_update2_normalize_url(row.get("Link")) in failed_scrape_links:
+                    continue
                 if _final_update2_adapter.match_record(row, new_by_id, new_by_url) is None:
                     link = safe_str(row.get("Link"))
                     platform = safe_str(row.get("Platform")) or platform_for_url(link)
@@ -4463,7 +4569,7 @@ def _run_checkpointed_tag_every_link_v68_43(
             ):
                 raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
             remaining_scrape_count = len(rows_missing_records) - len(scrape_rows)
-            if remaining_scrape_count > 0:
+            if remaining_scrape_count > 0 and scrape_failure is None:
                 status.update(
                     label=(
                         f"Saved public data for {len(records):,} post(s); "
@@ -4476,6 +4582,18 @@ def _run_checkpointed_tag_every_link_v68_43(
                 return None
         else:
             status.write("Reusing the saved public post data for this chunk.")
+
+        if scrape_failure is not None:
+            by_id, by_url = _final_update2_adapter.index_records(records)
+            processable_positions = [
+                position
+                for position in remaining_positions
+                if _final_update2_adapter.match_record(
+                    chunk.iloc[position], by_id, by_url
+                ) is not None
+            ]
+            remaining_positions = processable_positions
+            remaining_chunk = chunk.iloc[remaining_positions].copy().reset_index(drop=True)
 
         def on_result(input_position: int, tagged_row: Dict, tier: str):
             chunk_position = remaining_positions[int(input_position)]
@@ -4520,6 +4638,9 @@ def _run_checkpointed_tag_every_link_v68_43(
                     manifest["job_id"],
                     next_chunk_index,
                 )
+
+        if scrape_failure is not None:
+            raise scrape_failure
 
         partial_chunk = store.load_partial_chunk_results(
             manifest["job_id"],
@@ -4636,7 +4757,32 @@ def _run_checkpointed_tag_every_link_v68_43(
         _persist_runtime_checkpoint_v68_15()
         status.update(label="Tagging paused safely", state="error", expanded=True)
         saved_count = int(manifest.get("saved_rows", len(partial)))
-        if quota_pause:
+        if error_code == "APIFY_ACCESS":
+            st.error(
+                f"Apify access is unavailable. {saved_count:,} of {total_rows:,} "
+                "completed posts are saved. Ask the app owner to verify the "
+                "server-managed Apify token, then select Resume tagging."
+            )
+        elif error_code == "APIFY_QUOTA":
+            st.error(
+                f"The Apify usage or credit limit is currently unavailable. "
+                f"{saved_count:,} of {total_rows:,} completed posts are saved. "
+                "Ask the app owner to restore capacity, then select Resume tagging."
+            )
+        elif error_code == "APIFY_SERVICE":
+            st.error(
+                f"Apify is temporarily unavailable. {saved_count:,} of "
+                f"{total_rows:,} completed posts are saved. Wait briefly, then "
+                "select Resume tagging."
+            )
+        elif error_code == "APIFY_REQUEST":
+            st.error(
+                f"Apify rejected the fallback request. {saved_count:,} of "
+                f"{total_rows:,} completed posts are saved. Ask the app owner "
+                "to check Apify actor access and diagnostic code APIFY_REQUEST "
+                "before resuming."
+            )
+        elif quota_pause:
             st.error(
                 f"API quota is currently unavailable. {saved_count:,} of "
                 f"{total_rows:,} completed posts are saved. Ask the app owner "
