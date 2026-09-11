@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 import requests
 
@@ -28,6 +29,56 @@ class PersistentCheckpointConfig:
 
 
 _TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+_DEFAULT_RETRY_DELAYS = (0.5, 1.0, 2.0)
+
+
+def _sqlstate(exc: Exception) -> str:
+    """Return a Postgres SQLSTATE without exposing the original statement."""
+    for value in (
+        getattr(exc, "sqlstate", ""),
+        getattr(exc, "pgcode", ""),
+        getattr(getattr(exc, "diag", None), "sqlstate", ""),
+    ):
+        candidate = str(value or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _response_has_sqlstate_57014(response) -> bool:
+    """Recognise PostgREST query-cancel errors even when HTTP status is 4xx."""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        values = (
+            payload.get("code"),
+            payload.get("sqlstate"),
+            payload.get("message"),
+            payload.get("details"),
+        )
+        if any("57014" in str(value or "") for value in values):
+            return True
+    return "57014" in str(getattr(response, "text", "") or "")
+
+
+def _queue_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize the JSON shape returned by PostgREST or psycopg."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = None
+    if isinstance(payload, list) and payload:
+        payload = payload[0]
+        if isinstance(payload, dict) and len(payload) == 1:
+            only_value = next(iter(payload.values()))
+            if isinstance(only_value, (dict, str)):
+                return _queue_payload(only_value)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Tagging worker queue returned an invalid response.")
+    return payload
 
 
 def checkpoint_error_code(exc: Exception) -> str:
@@ -79,6 +130,8 @@ class SupabaseCheckpointBackend:
         table: str = "batch_checkpoint_objects",
         timeout_seconds: float = 20.0,
         session: Optional[requests.Session] = None,
+        retry_delays: Sequence[float] = _DEFAULT_RETRY_DELAYS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         raw_url = str(url or "").strip().rstrip("/")
         # Supabase displays both the project URL and a Data API URL ending in
@@ -90,12 +143,18 @@ class SupabaseCheckpointBackend:
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
         self.timeout_seconds = float(timeout_seconds)
         self.session = session or requests.Session()
+        self.retry_delays = tuple(max(0.0, float(value)) for value in retry_delays)
+        self.sleep = sleep
         if not self.url.startswith(("https://", "http://")) or not self.key:
             raise ValueError("Supabase URL and server-side key are required.")
 
     @property
     def endpoint(self) -> str:
         return f"{self.url}/rest/v1/{self.table}"
+
+    def rpc_endpoint(self, function_name: str) -> str:
+        function_name = _validate_identifier(function_name, function_name)
+        return f"{self.url}/rest/v1/rpc/{function_name}"
 
     def _headers(self, *, upsert: bool = False) -> Dict[str, str]:
         headers = {
@@ -112,20 +171,27 @@ class SupabaseCheckpointBackend:
         return headers
 
     def _request(self, method: str, *args, **kwargs):
-        """Send an idempotent checkpoint request with one transient retry."""
+        """Send an idempotent request with bounded exponential backoff."""
         operation = getattr(self.session, method)
         last_error = None
-        for attempt in range(2):
+        attempts = len(self.retry_delays) + 1
+        for attempt in range(attempts):
             try:
                 response = operation(*args, timeout=self.timeout_seconds, **kwargs)
                 status_code = getattr(response, "status_code", None)
-                if attempt == 0 and status_code in _TRANSIENT_HTTP_STATUS:
+                retryable_response = (
+                    status_code in _TRANSIENT_HTTP_STATUS
+                    or _response_has_sqlstate_57014(response)
+                )
+                if retryable_response and attempt < attempts - 1:
+                    self.sleep(self.retry_delays[attempt])
                     continue
                 response.raise_for_status()
                 return response
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-                if attempt == 0:
+                if attempt < attempts - 1:
+                    self.sleep(self.retry_delays[attempt])
                     continue
                 raise
         if last_error is not None:  # pragma: no cover - defensive fallback
@@ -210,11 +276,72 @@ class SupabaseCheckpointBackend:
             headers=self._headers(),
         )
 
+    def claim_tagging_worker(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+        max_workers: int = 3,
+    ) -> Dict[str, Any]:
+        recovery_id, _ = _validate_object(recovery_id, "runtime.json")
+        job_id, _ = _validate_object(job_id, "runtime.json")
+        owner_id, _ = _validate_object(owner_id, "runtime.json")
+        response = self._request(
+            "post",
+            self.rpc_endpoint("tagging_pool_claim"),
+            headers=self._headers(),
+            json={
+                "p_recovery_id": recovery_id,
+                "p_job_id": job_id,
+                "p_owner_id": owner_id,
+                "p_lease_seconds": max(60, int(lease_seconds)),
+                "p_max_workers": max(1, min(16, int(max_workers))),
+            },
+        )
+        return _queue_payload(response.json())
+
+    def release_tagging_worker(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+    ) -> bool:
+        recovery_id, _ = _validate_object(recovery_id, "runtime.json")
+        job_id, _ = _validate_object(job_id, "runtime.json")
+        owner_id, _ = _validate_object(owner_id, "runtime.json")
+        response = self._request(
+            "post",
+            self.rpc_endpoint("tagging_pool_release"),
+            headers=self._headers(),
+            json={
+                "p_recovery_id": recovery_id,
+                "p_job_id": job_id,
+                "p_owner_id": owner_id,
+            },
+        )
+        payload = response.json()
+        if isinstance(payload, list) and payload:
+            payload = payload[0]
+            if isinstance(payload, dict) and len(payload) == 1:
+                payload = next(iter(payload.values()))
+        return bool(payload)
+
 
 class PostgresCheckpointBackend:
-    def __init__(self, database_url: str, *, table: str = "batch_checkpoint_objects") -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        table: str = "batch_checkpoint_objects",
+        retry_delays: Sequence[float] = _DEFAULT_RETRY_DELAYS,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.database_url = str(database_url or "").strip()
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
+        self.retry_delays = tuple(max(0.0, float(value)) for value in retry_delays)
+        self.sleep = sleep
         if not self.database_url:
             raise ValueError("Postgres connection URL is required.")
 
@@ -226,6 +353,19 @@ class PostgresCheckpointBackend:
             raise RuntimeError("Postgres checkpointing requires psycopg.") from exc
         return psycopg
 
+    def _run(self, operation):
+        """Retry cancelled or disconnected Postgres work from a fresh connection."""
+        attempts = len(self.retry_delays) + 1
+        for attempt in range(attempts):
+            try:
+                return operation()
+            except Exception as exc:
+                sqlstate = _sqlstate(exc)
+                retryable = sqlstate == "57014" or sqlstate.startswith("08")
+                if not retryable or attempt >= attempts - 1:
+                    raise
+                self.sleep(self.retry_delays[attempt])
+
     def save(self, recovery_id: str, object_key: str, payload: Any) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = (
@@ -234,17 +374,23 @@ class PostgresCheckpointBackend:
             "ON CONFLICT (recovery_id, object_key) DO UPDATE "
             "SET payload = EXCLUDED.payload, updated_at = NOW()"
         )
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key, json.dumps(payload)))
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key, json.dumps(payload)))
+
+        self._run(operation)
 
     def load(self, recovery_id: str, object_key: str) -> Any:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = f"SELECT payload FROM {self.table} WHERE recovery_id = %s AND object_key = %s LIMIT 1"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key))
-                row = cursor.fetchone()
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key))
+                    return cursor.fetchone()
+
+        row = self._run(operation)
         if not row:
             return None
         payload = json.loads(row[0]) if isinstance(row[0], str) else row[0]
@@ -253,10 +399,13 @@ class PostgresCheckpointBackend:
     def list_prefix(self, recovery_id: str, prefix: str) -> Dict[str, Any]:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
         statement = f"SELECT object_key, payload FROM {self.table} WHERE recovery_id = %s AND object_key LIKE %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, f"{prefix}%"))
-                rows = cursor.fetchall()
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, f"{prefix}%"))
+                    return cursor.fetchall()
+
+        rows = self._run(operation)
         output = {}
         for key, payload in rows:
             if isinstance(payload, str):
@@ -268,16 +417,74 @@ class PostgresCheckpointBackend:
     def delete(self, recovery_id: str, object_key: str) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = f"DELETE FROM {self.table} WHERE recovery_id = %s AND object_key = %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key))
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key))
+
+        self._run(operation)
 
     def delete_prefix(self, recovery_id: str, prefix: str) -> None:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
         statement = f"DELETE FROM {self.table} WHERE recovery_id = %s AND object_key LIKE %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, f"{prefix}%"))
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, f"{prefix}%"))
+
+        self._run(operation)
+
+    def claim_tagging_worker(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+        max_workers: int = 3,
+    ) -> Dict[str, Any]:
+        recovery_id, _ = _validate_object(recovery_id, "runtime.json")
+        job_id, _ = _validate_object(job_id, "runtime.json")
+        owner_id, _ = _validate_object(owner_id, "runtime.json")
+        statement = "SELECT public.tagging_pool_claim(%s, %s, %s, %s, %s)"
+
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        statement,
+                        (
+                            recovery_id,
+                            job_id,
+                            owner_id,
+                            max(60, int(lease_seconds)),
+                            max(1, min(16, int(max_workers))),
+                        ),
+                    )
+                    return cursor.fetchone()
+
+        row = self._run(operation)
+        return _queue_payload(row[0] if row else None)
+
+    def release_tagging_worker(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+    ) -> bool:
+        recovery_id, _ = _validate_object(recovery_id, "runtime.json")
+        job_id, _ = _validate_object(job_id, "runtime.json")
+        owner_id, _ = _validate_object(owner_id, "runtime.json")
+        statement = "SELECT public.tagging_pool_release(%s, %s, %s)"
+
+        def operation():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, job_id, owner_id))
+                    return cursor.fetchone()
+
+        row = self._run(operation)
+        return bool(row and row[0])
 
 
 class RecoveryCheckpointObjects:
