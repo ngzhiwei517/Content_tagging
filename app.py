@@ -1363,6 +1363,8 @@ MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 10
 # yielding and keep every completed Gemini row restart-safe.
 MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
 TAGGING_GLOBAL_LEASE_SECONDS_V68_100 = 7200
+DEFAULT_TAGGING_MAX_CONCURRENT_JOBS_V68_101 = 3
+MAX_TAGGING_MAX_CONCURRENT_JOBS_V68_101 = 16
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
 TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
 TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
@@ -1724,6 +1726,25 @@ def _persistent_checkpoint_is_configured_v68_100() -> bool:
         or _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL")
         or _checkpoint_setting_v68_44("supabase_key", "CHECKPOINT_SUPABASE_KEY")
     )
+
+
+def _tagging_max_concurrent_jobs_v68_101() -> int:
+    """Return the server-managed tagging capacity, bounded to a safe range."""
+    try:
+        worker_secrets = st.secrets.get("tagging_workers", {})
+        configured = (
+            worker_secrets.get("max_concurrent_jobs", "")
+            if worker_secrets
+            else ""
+        )
+    except Exception:
+        configured = ""
+    configured = configured or os.getenv("TAGGING_MAX_CONCURRENT_JOBS", "")
+    try:
+        requested = int(configured)
+    except (TypeError, ValueError):
+        requested = DEFAULT_TAGGING_MAX_CONCURRENT_JOBS_V68_101
+    return max(1, min(MAX_TAGGING_MAX_CONCURRENT_JOBS_V68_101, requested))
 
 
 def _checkpoint_objects_v68_44(run_id: str, *, prefix: str = ""):
@@ -3866,13 +3887,14 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 def _tagging_worker_queue_v68_100(
     store: BatchCheckpointStore,
 ) -> TaggingWorkerQueue:
-    """Create the distributed queue or its local development fallback."""
+    """Create the distributed worker pool or its local development fallback."""
     checkpoint_objects = getattr(store, "persistent_store", None)
     backend = getattr(checkpoint_objects, "backend", None)
     return TaggingWorkerQueue(
         store,
         persistent_backend=backend,
         persistent_required=_persistent_checkpoint_is_configured_v68_100(),
+        max_workers=_tagging_max_concurrent_jobs_v68_101(),
     )
 
 
@@ -4027,48 +4049,33 @@ def _render_tagging_auto_wait_v68_55(job_id: str) -> None:
         st.rerun(scope="app")
 
 
-@st.fragment(run_every="5s")
-def _render_tagging_queue_wait_v68_100(job_id: str) -> None:
-    """Poll the shared FIFO without starting provider work out of turn."""
-    runtime_id = _valid_runtime_id_v68_15(
-        st.session_state.get("runtime_run_id_v68_15")
-    )
-    owner_id = _tagging_execution_owner_v68_55()
-    try:
-        store = _large_batch_store_v68_43()
-        queue = _tagging_worker_queue_v68_100(store)
-        claim = queue.claim(
-            runtime_id,
-            job_id,
-            owner_id,
-            lease_seconds=TAGGING_GLOBAL_LEASE_SECONDS_V68_100,
+def _render_tagging_capacity_full_v68_101(
+    job_id: str,
+    capacity: int,
+    reason: str = "capacity_full",
+) -> None:
+    """Keep the batch recoverable without placing the user in a visible queue."""
+    capacity = max(1, int(capacity or 1))
+    if reason == "job_active":
+        st.warning(
+            "This batch is already tagging in another browser session. Its "
+            "saved progress will remain available from this recovery link."
         )
-    except TaggingWorkerQueueUnavailable:
-        st.error(
-            "The shared tagging queue is unavailable. Ask the app owner to "
-            "run the latest checkpoint_schema.sql, then select Resume tagging."
+    else:
+        st.warning(
+            f"All {capacity} tagging workers are currently busy. This batch is "
+            "saved and has not started another provider call. Select Try again now, "
+            "or use Continue later and reopen the recovery link."
         )
-        return
-
-    if claim.acquired:
-        _set_tagging_continue_query_v68_55(job_id)
-        st.session_state.tagging_job_active_v68_43 = True
-        st.rerun(scope="app")
-
-    queue_position = max(2, int(claim.queue_position or 0))
-    st.info(
-        f"Another batch is tagging now. This batch is queued at position "
-        f"{queue_position}. Completed posts are saved. Resume keeps this "
-        "recovery ID and skips completed posts; this page will continue "
-        "automatically when the worker is available."
-    )
     if st.button(
-        "Check queue",
+        "Try again now",
         type="primary",
         width="stretch",
-        key="tagging_queue_check_v68_100",
+        key="tagging_capacity_retry_v68_101",
     ):
-        st.rerun(scope="fragment")
+        _set_tagging_continue_query_v68_55(job_id)
+        st.session_state.tagging_job_active_v68_43 = True
+        st.rerun()
 
 
 def _attach_comparison_metadata_v68_43(
@@ -10324,6 +10331,8 @@ elif st.session_state.step == 4:
     worker_claim: Optional[TaggingWorkerClaim] = None
     worker_claim_acquired = False
     worker_queue_error = False
+    worker_capacity = _tagging_max_concurrent_jobs_v68_101()
+    worker_unavailable_reason = "capacity_full"
     if tagging_job_active and expected_large_job_id:
         execution_store = _large_batch_store_v68_43()
         execution_owner = _tagging_execution_owner_v68_55()
@@ -10349,7 +10358,14 @@ elif st.session_state.step == 4:
         elif not worker_claim_acquired:
             st.session_state.tagging_job_active_v68_43 = False
             tagging_job_active = False
-            auto_resume_action = "queue_wait"
+            auto_resume_action = "capacity_full"
+            worker_capacity = max(
+                1,
+                int((worker_claim or TaggingWorkerClaim(False)).capacity or worker_capacity),
+            )
+            worker_unavailable_reason = safe_str(
+                (worker_claim or TaggingWorkerClaim(False)).reason
+            ) or "capacity_full"
             _clear_tagging_continue_query_v68_55()
         else:
             try:
@@ -10381,7 +10397,7 @@ elif st.session_state.step == 4:
 
     if worker_queue_error:
         st.error(
-            "The shared tagging queue is unavailable, so no new tagging work "
+            "The shared tagging worker pool is unavailable, so no new tagging work "
             "was started. Ask the app owner to run the latest "
             "checkpoint_schema.sql, then select Resume tagging."
         )
@@ -10392,8 +10408,12 @@ elif st.session_state.step == 4:
             "could not be created. Select Resume tagging to try again."
         )
 
-    if auto_resume_action == "queue_wait" and not tagging_job_active:
-        _render_tagging_queue_wait_v68_100(expected_large_job_id)
+    if auto_resume_action == "capacity_full" and not tagging_job_active:
+        _render_tagging_capacity_full_v68_101(
+            expected_large_job_id,
+            worker_capacity,
+            worker_unavailable_reason,
+        )
     elif auto_resume_action == "wait" and not tagging_job_active:
         _render_tagging_auto_wait_v68_55(expected_large_job_id)
     elif tagging_job_active:
@@ -10416,8 +10436,8 @@ elif st.session_state.step == 4:
                     )
                 except Exception:
                     LOGGER.warning(
-                        "Could not release the shared tagging worker lease; "
-                        "its expiry will make the queue available again."
+                        "Could not release the shared tagging worker slot; "
+                        "its expiry will make the slot available again."
                     )
         if tagged_result is None:
             # Each bounded unit runs in a fresh Streamlit execution. This keeps

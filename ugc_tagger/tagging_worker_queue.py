@@ -1,4 +1,4 @@
-"""One-at-a-time admission control for paid tagging work."""
+"""Bounded multi-user admission control for paid tagging work."""
 
 from __future__ import annotations
 
@@ -19,12 +19,15 @@ class TaggingWorkerClaim:
     active_recovery_id: str = ""
     lease_until: str = ""
     distributed: bool = False
+    active_workers: int = 0
+    capacity: int = 1
+    reason: str = ""
 
 
 def _claim_from_payload(payload: Dict[str, Any]) -> TaggingWorkerClaim:
     if not isinstance(payload, dict) or "acquired" not in payload:
         raise TaggingWorkerQueueUnavailable(
-            "The shared tagging queue returned an invalid response."
+            "The shared tagging worker pool returned an invalid response."
         )
     try:
         position = max(0, int(payload.get("queue_position", 0) or 0))
@@ -36,11 +39,14 @@ def _claim_from_payload(payload: Dict[str, Any]) -> TaggingWorkerClaim:
         active_recovery_id=str(payload.get("active_recovery_id", "") or ""),
         lease_until=str(payload.get("lease_until", "") or ""),
         distributed=True,
+        active_workers=max(0, int(payload.get("active_workers", 0) or 0)),
+        capacity=max(1, int(payload.get("capacity", 1) or 1)),
+        reason=str(payload.get("reason", "") or ""),
     )
 
 
 class TaggingWorkerQueue:
-    """Use a database FIFO queue, with a process-local fallback for local use."""
+    """Use bounded database worker slots with a process-local fallback."""
 
     def __init__(
         self,
@@ -48,10 +54,12 @@ class TaggingWorkerQueue:
         *,
         persistent_backend=None,
         persistent_required: bool = False,
+        max_workers: int = 3,
     ) -> None:
         self.store = store
         self.persistent_backend = persistent_backend
         self.persistent_required = bool(persistent_required)
+        self.max_workers = max(1, min(16, int(max_workers)))
 
     def claim(
         self,
@@ -69,7 +77,7 @@ class TaggingWorkerQueue:
             )
             if not callable(claim):
                 raise TaggingWorkerQueueUnavailable(
-                    "The deployed checkpoint backend does not support the shared queue."
+                    "The deployed checkpoint backend does not support the shared worker pool."
                 )
             try:
                 return _claim_from_payload(
@@ -78,18 +86,19 @@ class TaggingWorkerQueue:
                         job_id,
                         owner_id,
                         lease_seconds=lease_seconds,
+                        max_workers=self.max_workers,
                     )
                 )
             except TaggingWorkerQueueUnavailable:
                 raise
             except Exception as exc:
                 raise TaggingWorkerQueueUnavailable(
-                    "The shared tagging queue could not be reached."
+                    "The shared tagging worker pool could not be reached."
                 ) from exc
 
         if self.persistent_required:
             raise TaggingWorkerQueueUnavailable(
-                "Persistent checkpoints are configured, but the shared queue is unavailable."
+                "Persistent checkpoints are configured, but the shared worker pool is unavailable."
             )
 
         try:
@@ -98,6 +107,7 @@ class TaggingWorkerQueue:
                 job_id,
                 owner_id,
                 lease_seconds=lease_seconds,
+                max_workers=self.max_workers,
             )
         except Exception as exc:
             raise TaggingWorkerQueueUnavailable(
@@ -105,8 +115,11 @@ class TaggingWorkerQueue:
             ) from exc
         return TaggingWorkerClaim(
             acquired=acquired,
-            queue_position=0 if acquired else 2,
+            queue_position=0,
             distributed=False,
+            active_workers=1 if acquired else self.max_workers,
+            capacity=self.max_workers,
+            reason="acquired" if acquired else "capacity_full",
         )
 
     def release(

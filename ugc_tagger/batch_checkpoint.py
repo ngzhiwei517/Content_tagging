@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ CHECKPOINT_VERSION = 2
 DEFAULT_CHUNK_SIZE = 50
 DEFAULT_RETENTION_HOURS = 72
 _SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
+_LOCAL_WORKER_POOL_GUARD = threading.Lock()
 
 
 def _utc_now() -> str:
@@ -184,8 +186,16 @@ class BatchCheckpointStore:
     def _execution_lock_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / ".execution_lock.json"
 
-    def _global_execution_lock_path(self) -> Path:
-        return self.root / ".global_execution_lock.json"
+    def _global_execution_lock_path(self, slot_id: int = 1) -> Path:
+        """Return one process-local worker slot path.
+
+        Slot one retains the previous filename so a rolling deployment still
+        respects a lease held by the earlier single-worker implementation.
+        """
+        slot_id = max(1, int(slot_id))
+        if slot_id == 1:
+            return self.root / ".global_execution_lock.json"
+        return self.root / f".global_execution_lock.{slot_id:03d}.json"
 
     @staticmethod
     def _write_local_json(path: Path, payload) -> None:
@@ -844,8 +854,8 @@ class BatchCheckpointStore:
         except OSError:
             pass
 
-    def _read_global_execution_lock(self) -> Dict:
-        path = self._global_execution_lock_path()
+    def _read_global_execution_lock(self, slot_id: int = 1) -> Dict:
+        path = self._global_execution_lock_path(slot_id)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -859,50 +869,76 @@ class BatchCheckpointStore:
         owner_id: str,
         *,
         lease_seconds: int = 7200,
+        max_workers: int = 3,
     ) -> bool:
-        """Allow one tagging job at a time when no shared backend is configured."""
+        """Claim one bounded local worker slot when no shared backend exists."""
         recovery_id = self._validated_job_id(recovery_id)
         job_id = self._validated_job_id(job_id)
         owner_id = self._validated_job_id(owner_id)
-        path = self._global_execution_lock_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        worker_limit = max(1, min(16, int(max_workers)))
         lease_until = int(time.time()) + max(60, int(lease_seconds))
 
-        for _attempt in range(3):
-            existing = self._read_global_execution_lock()
-            if existing:
+        with _LOCAL_WORKER_POOL_GUARD:
+            # The same recovery job must never occupy two slots after its link
+            # is opened in another tab or browser session.
+            for slot_id in range(1, 17):
+                existing = self._read_global_execution_lock(slot_id)
                 try:
                     existing_until = int(existing.get("lease_until", 0) or 0)
                 except (TypeError, ValueError):
                     existing_until = 0
-                if existing_until > int(time.time()):
-                    return False
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    return False
-            try:
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            except FileExistsError:
-                continue
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    json.dump(
-                        {
-                            "recovery_id": recovery_id,
-                            "job_id": job_id,
-                            "owner_id": owner_id,
-                            "lease_until": lease_until,
-                        },
-                        handle,
-                    )
-                return True
-            except Exception:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+                if existing_until <= int(time.time()):
+                    continue
+                if (
+                    existing.get("recovery_id") == recovery_id
+                    and existing.get("job_id") == job_id
+                ):
+                    if existing.get("owner_id") != owner_id:
+                        return False
+                    path = self._global_execution_lock_path(slot_id)
+                    existing["lease_until"] = lease_until
+                    self._write_local_json(path, existing)
+                    return True
+
+            for slot_id in range(1, worker_limit + 1):
+                path = self._global_execution_lock_path(slot_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                for _attempt in range(3):
+                    existing = self._read_global_execution_lock(slot_id)
+                    if existing:
+                        try:
+                            existing_until = int(existing.get("lease_until", 0) or 0)
+                        except (TypeError, ValueError):
+                            existing_until = 0
+                        if existing_until > int(time.time()):
+                            break
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            break
+                    try:
+                        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                    except FileExistsError:
+                        continue
+                    try:
+                        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                            json.dump(
+                                {
+                                    "slot_id": slot_id,
+                                    "recovery_id": recovery_id,
+                                    "job_id": job_id,
+                                    "owner_id": owner_id,
+                                    "lease_until": lease_until,
+                                },
+                                handle,
+                            )
+                        return True
+                    except Exception:
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        raise
         return False
 
     def release_global_execution(
@@ -911,20 +947,22 @@ class BatchCheckpointStore:
         job_id: str,
         owner_id: str,
     ) -> None:
-        """Release the process-local global lease only for its exact owner/job."""
-        path = self._global_execution_lock_path()
-        existing = self._read_global_execution_lock()
+        """Release every local slot matching this exact owner and job."""
         expected = {
             "recovery_id": self._validated_job_id(recovery_id),
             "job_id": self._validated_job_id(job_id),
             "owner_id": self._validated_job_id(owner_id),
         }
-        if any(existing.get(key) != value for key, value in expected.items()):
-            return
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        with _LOCAL_WORKER_POOL_GUARD:
+            for slot_id in range(1, 17):
+                path = self._global_execution_lock_path(slot_id)
+                existing = self._read_global_execution_lock(slot_id)
+                if any(existing.get(key) != value for key, value in expected.items()):
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
         """Pause without persisting raw provider errors or credentials."""

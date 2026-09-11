@@ -450,9 +450,12 @@ class SupabaseBackendTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "acquired": True,
-            "queue_position": 1,
+            "queue_position": 0,
             "active_recovery_id": "a" * 32,
             "lease_until": "2026-09-11T10:00:00Z",
+            "active_workers": 1,
+            "capacity": 3,
+            "reason": "acquired",
         }
         session.post.return_value = response
         backend = SupabaseCheckpointBackend(
@@ -467,15 +470,20 @@ class SupabaseBackendTests(unittest.TestCase):
             "b" * 32,
             "c" * 32,
             lease_seconds=600,
+            max_workers=3,
         )
 
         self.assertTrue(claim["acquired"])
         self.assertTrue(
-            session.post.call_args.args[0].endswith("/rpc/tagging_queue_claim")
+            session.post.call_args.args[0].endswith("/rpc/tagging_pool_claim")
         )
         self.assertEqual(
             session.post.call_args.kwargs["json"]["p_recovery_id"],
             "a" * 32,
+        )
+        self.assertEqual(
+            session.post.call_args.kwargs["json"]["p_max_workers"],
+            3,
         )
 
     def test_http_failures_map_to_safe_diagnostic_codes(self):

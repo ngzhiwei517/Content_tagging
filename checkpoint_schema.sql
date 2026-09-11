@@ -11,39 +11,38 @@ create index if not exists batch_checkpoint_objects_updated_at_idx
 
 alter table public.batch_checkpoint_objects enable row level security;
 
--- Global FIFO admission control. The app claims this singleton lease before
--- any Gemini or Apify tagging work, then releases it after one bounded unit.
-create table if not exists public.tagging_job_queue (
-    recovery_id text primary key check (recovery_id ~ '^[a-f0-9]{32}$'),
-    job_id text not null check (job_id ~ '^[a-f0-9]{32}$'),
-    enqueued_at timestamptz not null default clock_timestamp(),
-    touched_at timestamptz not null default clock_timestamp()
-);
-
-create index if not exists tagging_job_queue_order_idx
-    on public.tagging_job_queue (enqueued_at, recovery_id);
-
-create table if not exists public.tagging_worker_lease (
-    singleton boolean primary key default true check (singleton),
-    recovery_id text,
-    job_id text,
-    owner_id text,
+-- Bounded concurrent admission control. Each Streamlit session claims one
+-- worker slot before Gemini or Apify work and releases it after one bounded
+-- execution. Extra sessions are not queued; they retain their recovery link
+-- and may retry when capacity becomes available.
+create table if not exists public.tagging_worker_slots (
+    slot_id integer primary key check (slot_id between 1 and 16),
+    recovery_id text check (
+        recovery_id is null or recovery_id ~ '^[a-f0-9]{32}$'
+    ),
+    job_id text check (job_id is null or job_id ~ '^[a-f0-9]{32}$'),
+    owner_id text check (owner_id is null or owner_id ~ '^[a-f0-9]{32}$'),
     lease_until timestamptz,
-    updated_at timestamptz not null default clock_timestamp()
+    updated_at timestamptz not null default clock_timestamp(),
+    check (
+        (recovery_id is null and job_id is null and owner_id is null and lease_until is null)
+        or
+        (recovery_id is not null and job_id is not null and owner_id is not null and lease_until is not null)
+    )
 );
 
-insert into public.tagging_worker_lease (singleton)
-values (true)
-on conflict (singleton) do nothing;
+create unique index if not exists tagging_worker_slots_job_idx
+    on public.tagging_worker_slots (recovery_id, job_id)
+    where recovery_id is not null;
 
-alter table public.tagging_job_queue enable row level security;
-alter table public.tagging_worker_lease enable row level security;
+alter table public.tagging_worker_slots enable row level security;
 
-create or replace function public.tagging_queue_claim(
+create or replace function public.tagging_pool_claim(
     p_recovery_id text,
     p_job_id text,
     p_owner_id text,
-    p_lease_seconds integer default 7200
+    p_lease_seconds integer default 7200,
+    p_max_workers integer default 3
 )
 returns jsonb
 language plpgsql
@@ -52,153 +51,136 @@ set search_path = public
 as $$
 declare
     v_now timestamptz := clock_timestamp();
-    v_first_recovery_id text;
-    v_position integer := 1;
-    v_lease public.tagging_worker_lease%rowtype;
-    v_expired_recovery_id text;
-    v_expired_job_id text;
+    v_capacity integer := greatest(1, least(16, coalesce(p_max_workers, 3)));
+    v_lease_until timestamptz;
+    v_slot_id integer;
+    v_existing_owner_id text;
+    v_active_workers integer := 0;
 begin
     if p_recovery_id !~ '^[a-f0-9]{32}$'
        or p_job_id !~ '^[a-f0-9]{32}$'
        or p_owner_id !~ '^[a-f0-9]{32}$' then
-        raise exception 'Invalid tagging queue identifier';
+        raise exception 'Invalid tagging worker identifier';
     end if;
 
-    insert into public.tagging_job_queue (
-        recovery_id,
-        job_id,
-        enqueued_at,
-        touched_at
-    )
-    values (p_recovery_id, p_job_id, v_now, v_now)
-    on conflict (recovery_id) do update
-    set job_id = excluded.job_id,
-        enqueued_at = case
-            when public.tagging_job_queue.job_id <> excluded.job_id
-                then excluded.enqueued_at
-            else public.tagging_job_queue.enqueued_at
-        end,
-        touched_at = excluded.touched_at;
+    -- Serialize only the very short slot-allocation transaction. Tagging itself
+    -- remains concurrent and never holds a database lock.
+    perform pg_advisory_xact_lock(hashtext('tagging_worker_pool_v1'));
 
-    insert into public.tagging_worker_lease (singleton)
-    values (true)
-    on conflict (singleton) do nothing;
+    insert into public.tagging_worker_slots (slot_id)
+    select generate_series(1, v_capacity)
+    on conflict (slot_id) do nothing;
 
-    select * into v_lease
-    from public.tagging_worker_lease
-    where singleton = true
-    for update;
+    update public.tagging_worker_slots
+    set recovery_id = null,
+        job_id = null,
+        owner_id = null,
+        lease_until = null,
+        updated_at = v_now
+    where lease_until is not null
+      and lease_until <= v_now;
 
-    if v_lease.lease_until is not null and v_lease.lease_until <= v_now then
-        v_expired_recovery_id := v_lease.recovery_id;
-        v_expired_job_id := v_lease.job_id;
-        update public.tagging_worker_lease
-        set recovery_id = null,
-            job_id = null,
-            owner_id = null,
-            lease_until = null,
-            updated_at = v_now
-        where singleton = true;
-        v_lease.recovery_id := null;
-        v_lease.job_id := null;
-        v_lease.owner_id := null;
-        v_lease.lease_until := null;
-        if v_expired_recovery_id is distinct from p_recovery_id then
-            delete from public.tagging_job_queue
-            where recovery_id = v_expired_recovery_id
-              and job_id = v_expired_job_id;
-        end if;
-    end if;
+    v_lease_until := v_now + make_interval(
+        secs => greatest(60, least(7200, coalesce(p_lease_seconds, 7200)))
+    );
 
-    -- Remove abandoned waiters. The currently polling job and a fresh active
-    -- lease are always retained.
-    delete from public.tagging_job_queue q
-    where q.recovery_id <> p_recovery_id
-      and q.touched_at < v_now - interval '5 minutes'
-      and not (
-          v_lease.lease_until is not null
-          and v_lease.lease_until > v_now
-          and q.recovery_id = v_lease.recovery_id
-          and q.job_id = v_lease.job_id
-      );
+    select slot_id, owner_id into v_slot_id, v_existing_owner_id
+    from public.tagging_worker_slots
+    where recovery_id = p_recovery_id
+      and job_id = p_job_id
+      and lease_until > v_now
+    order by slot_id
+    limit 1;
 
-    if v_lease.lease_until is not null and v_lease.lease_until > v_now then
-        if v_lease.recovery_id = p_recovery_id
-           and v_lease.job_id = p_job_id
-           and v_lease.owner_id = p_owner_id then
-            update public.tagging_worker_lease
-            set lease_until = v_now + make_interval(
-                    secs => greatest(60, least(7200, coalesce(p_lease_seconds, 7200)))
-                ),
-                updated_at = v_now
-            where singleton = true;
+    if v_slot_id is not null then
+        if v_existing_owner_id is distinct from p_owner_id then
+            select count(*) into v_active_workers
+            from public.tagging_worker_slots
+            where lease_until > v_now;
+
             return jsonb_build_object(
-                'acquired', true,
-                'queue_position', 1,
+                'acquired', false,
+                'reason', 'job_active',
+                'queue_position', 0,
                 'active_recovery_id', p_recovery_id,
-                'lease_until', v_now + make_interval(
-                    secs => greatest(60, least(7200, coalesce(p_lease_seconds, 7200)))
-                )
+                'lease_until', null,
+                'slot_id', v_slot_id,
+                'active_workers', v_active_workers,
+                'capacity', v_capacity
             );
         end if;
 
-        select 1 + count(*) into v_position
-        from public.tagging_job_queue q
-        where (q.enqueued_at, q.recovery_id) < (
-            select mine.enqueued_at, mine.recovery_id
-            from public.tagging_job_queue mine
-            where mine.recovery_id = p_recovery_id
-        );
+        update public.tagging_worker_slots
+        set lease_until = v_lease_until,
+            updated_at = v_now
+        where slot_id = v_slot_id;
+
+        select count(*) into v_active_workers
+        from public.tagging_worker_slots
+        where lease_until > v_now;
+
         return jsonb_build_object(
-            'acquired', false,
-            'queue_position', greatest(2, v_position),
-            'active_recovery_id', coalesce(v_lease.recovery_id, ''),
-            'lease_until', v_lease.lease_until
+            'acquired', true,
+            'reason', 'acquired',
+            'queue_position', 0,
+            'active_recovery_id', p_recovery_id,
+            'lease_until', v_lease_until,
+            'slot_id', v_slot_id,
+            'active_workers', v_active_workers,
+            'capacity', v_capacity
         );
     end if;
 
-    select q.recovery_id into v_first_recovery_id
-    from public.tagging_job_queue q
-    order by q.enqueued_at, q.recovery_id
+    select slot_id into v_slot_id
+    from public.tagging_worker_slots
+    where slot_id <= v_capacity
+      and lease_until is null
+    order by slot_id
     limit 1;
 
-    if v_first_recovery_id = p_recovery_id then
-        update public.tagging_worker_lease
+    if v_slot_id is not null then
+        update public.tagging_worker_slots
         set recovery_id = p_recovery_id,
             job_id = p_job_id,
             owner_id = p_owner_id,
-            lease_until = v_now + make_interval(
-                secs => greatest(60, least(7200, coalesce(p_lease_seconds, 7200)))
-            ),
+            lease_until = v_lease_until,
             updated_at = v_now
-        where singleton = true;
+        where slot_id = v_slot_id;
+
+        select count(*) into v_active_workers
+        from public.tagging_worker_slots
+        where lease_until > v_now;
+
         return jsonb_build_object(
             'acquired', true,
-            'queue_position', 1,
+            'reason', 'acquired',
+            'queue_position', 0,
             'active_recovery_id', p_recovery_id,
-            'lease_until', v_now + make_interval(
-                secs => greatest(60, least(7200, coalesce(p_lease_seconds, 7200)))
-            )
+            'lease_until', v_lease_until,
+            'slot_id', v_slot_id,
+            'active_workers', v_active_workers,
+            'capacity', v_capacity
         );
     end if;
 
-    select 1 + count(*) into v_position
-    from public.tagging_job_queue q
-    where (q.enqueued_at, q.recovery_id) < (
-        select mine.enqueued_at, mine.recovery_id
-        from public.tagging_job_queue mine
-        where mine.recovery_id = p_recovery_id
-    );
+    select count(*) into v_active_workers
+    from public.tagging_worker_slots
+    where lease_until > v_now;
+
     return jsonb_build_object(
         'acquired', false,
-        'queue_position', greatest(1, v_position),
+        'reason', 'capacity_full',
+        'queue_position', 0,
         'active_recovery_id', '',
-        'lease_until', null
+        'lease_until', null,
+        'slot_id', null,
+        'active_workers', v_active_workers,
+        'capacity', v_capacity
     );
 end;
 $$;
 
-create or replace function public.tagging_queue_release(
+create or replace function public.tagging_pool_release(
     p_recovery_id text,
     p_job_id text,
     p_owner_id text
@@ -211,30 +193,24 @@ as $$
 declare
     v_released boolean := false;
 begin
-    update public.tagging_worker_lease
+    update public.tagging_worker_slots
     set recovery_id = null,
         job_id = null,
         owner_id = null,
         lease_until = null,
         updated_at = clock_timestamp()
-    where singleton = true
-      and recovery_id = p_recovery_id
+    where recovery_id = p_recovery_id
       and job_id = p_job_id
       and owner_id = p_owner_id;
 
     v_released := found;
-    if v_released then
-        delete from public.tagging_job_queue
-        where recovery_id = p_recovery_id
-          and job_id = p_job_id;
-    end if;
     return v_released;
 end;
 $$;
 
-revoke execute on function public.tagging_queue_claim(text, text, text, integer)
+revoke execute on function public.tagging_pool_claim(text, text, text, integer, integer)
     from public;
-revoke execute on function public.tagging_queue_release(text, text, text)
+revoke execute on function public.tagging_pool_release(text, text, text)
     from public;
 
 -- Supabase server-side secret/service-role requests may call the functions;
@@ -242,8 +218,8 @@ revoke execute on function public.tagging_queue_release(text, text, text)
 do $$
 begin
     if exists (select 1 from pg_roles where rolname = 'service_role') then
-        execute 'grant execute on function public.tagging_queue_claim(text, text, text, integer) to service_role';
-        execute 'grant execute on function public.tagging_queue_release(text, text, text) to service_role';
+        execute 'grant execute on function public.tagging_pool_claim(text, text, text, integer, integer) to service_role';
+        execute 'grant execute on function public.tagging_pool_release(text, text, text) to service_role';
     end if;
 end;
 $$;

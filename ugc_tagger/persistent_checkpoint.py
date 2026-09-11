@@ -283,19 +283,21 @@ class SupabaseCheckpointBackend:
         owner_id: str,
         *,
         lease_seconds: int = 7200,
+        max_workers: int = 3,
     ) -> Dict[str, Any]:
         recovery_id, _ = _validate_object(recovery_id, "runtime.json")
         job_id, _ = _validate_object(job_id, "runtime.json")
         owner_id, _ = _validate_object(owner_id, "runtime.json")
         response = self._request(
             "post",
-            self.rpc_endpoint("tagging_queue_claim"),
+            self.rpc_endpoint("tagging_pool_claim"),
             headers=self._headers(),
             json={
                 "p_recovery_id": recovery_id,
                 "p_job_id": job_id,
                 "p_owner_id": owner_id,
                 "p_lease_seconds": max(60, int(lease_seconds)),
+                "p_max_workers": max(1, min(16, int(max_workers))),
             },
         )
         return _queue_payload(response.json())
@@ -311,7 +313,7 @@ class SupabaseCheckpointBackend:
         owner_id, _ = _validate_object(owner_id, "runtime.json")
         response = self._request(
             "post",
-            self.rpc_endpoint("tagging_queue_release"),
+            self.rpc_endpoint("tagging_pool_release"),
             headers=self._headers(),
             json={
                 "p_recovery_id": recovery_id,
@@ -439,18 +441,25 @@ class PostgresCheckpointBackend:
         owner_id: str,
         *,
         lease_seconds: int = 7200,
+        max_workers: int = 3,
     ) -> Dict[str, Any]:
         recovery_id, _ = _validate_object(recovery_id, "runtime.json")
         job_id, _ = _validate_object(job_id, "runtime.json")
         owner_id, _ = _validate_object(owner_id, "runtime.json")
-        statement = "SELECT public.tagging_queue_claim(%s, %s, %s, %s)"
+        statement = "SELECT public.tagging_pool_claim(%s, %s, %s, %s, %s)"
 
         def operation():
             with self._driver().connect(self.database_url) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         statement,
-                        (recovery_id, job_id, owner_id, max(60, int(lease_seconds))),
+                        (
+                            recovery_id,
+                            job_id,
+                            owner_id,
+                            max(60, int(lease_seconds)),
+                            max(1, min(16, int(max_workers))),
+                        ),
                     )
                     return cursor.fetchone()
 
@@ -466,7 +475,7 @@ class PostgresCheckpointBackend:
         recovery_id, _ = _validate_object(recovery_id, "runtime.json")
         job_id, _ = _validate_object(job_id, "runtime.json")
         owner_id, _ = _validate_object(owner_id, "runtime.json")
-        statement = "SELECT public.tagging_queue_release(%s, %s, %s)"
+        statement = "SELECT public.tagging_pool_release(%s, %s, %s)"
 
         def operation():
             with self._driver().connect(self.database_url) as connection:

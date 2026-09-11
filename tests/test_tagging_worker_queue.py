@@ -19,9 +19,12 @@ class FakeQueueBackend:
     def __init__(self, payload=None):
         self.payload = payload or {
             "acquired": True,
-            "queue_position": 1,
+            "queue_position": 0,
             "active_recovery_id": "a" * 32,
             "lease_until": "2026-09-11T10:00:00Z",
+            "active_workers": 1,
+            "capacity": 3,
+            "reason": "acquired",
         }
         self.claims = []
         self.releases = []
@@ -56,33 +59,37 @@ class RecordingObjectStore:
 
 
 class TaggingWorkerQueueTests(unittest.TestCase):
-    def test_local_fallback_allows_only_one_job_at_a_time(self):
+    def test_local_fallback_allows_bounded_concurrent_jobs(self):
         with tempfile.TemporaryDirectory() as directory:
             store = BatchCheckpointStore(Path(directory))
-            queue = TaggingWorkerQueue(store)
+            queue = TaggingWorkerQueue(store, max_workers=3)
             first = queue.claim("a" * 32, "b" * 32, "c" * 32)
             second = queue.claim("d" * 32, "e" * 32, "f" * 32)
+            third = queue.claim("1" * 32, "2" * 32, "3" * 32)
+            fourth = queue.claim("4" * 32, "5" * 32, "6" * 32)
 
             self.assertTrue(first.acquired)
             self.assertFalse(first.distributed)
-            self.assertFalse(second.acquired)
+            self.assertTrue(second.acquired)
+            self.assertTrue(third.acquired)
+            self.assertFalse(fourth.acquired)
+            self.assertEqual(fourth.capacity, 3)
 
             queue.release("d" * 32, "e" * 32, "f" * 32)
-            self.assertFalse(
-                queue.claim("d" * 32, "e" * 32, "f" * 32).acquired
-            )
-            queue.release("a" * 32, "b" * 32, "c" * 32)
             self.assertTrue(
-                queue.claim("d" * 32, "e" * 32, "f" * 32).acquired
+                queue.claim("4" * 32, "5" * 32, "6" * 32).acquired
             )
 
     def test_persistent_backend_controls_admission_and_position(self):
         backend = FakeQueueBackend(
             {
                 "acquired": False,
-                "queue_position": 3,
+                "queue_position": 0,
                 "active_recovery_id": "1" * 32,
                 "lease_until": "2026-09-11T10:00:00Z",
+                "active_workers": 3,
+                "capacity": 3,
+                "reason": "capacity_full",
             }
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -95,8 +102,26 @@ class TaggingWorkerQueueTests(unittest.TestCase):
 
             self.assertFalse(claim.acquired)
             self.assertTrue(claim.distributed)
-            self.assertEqual(claim.queue_position, 3)
+            self.assertEqual(claim.queue_position, 0)
+            self.assertEqual(claim.capacity, 3)
+            self.assertEqual(claim.reason, "capacity_full")
             self.assertEqual(len(backend.claims), 1)
+            self.assertEqual(backend.claims[0][3]["max_workers"], 3)
+
+    def test_same_local_recovery_job_cannot_run_under_two_session_owners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queue = TaggingWorkerQueue(
+                BatchCheckpointStore(Path(directory)),
+                max_workers=3,
+            )
+            self.assertTrue(queue.claim("a" * 32, "b" * 32, "c" * 32).acquired)
+            self.assertFalse(queue.claim("a" * 32, "b" * 32, "d" * 32).acquired)
+
+    def test_worker_capacity_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BatchCheckpointStore(Path(directory))
+            self.assertEqual(TaggingWorkerQueue(store, max_workers=0).max_workers, 1)
+            self.assertEqual(TaggingWorkerQueue(store, max_workers=99).max_workers, 16)
 
     def test_configured_persistence_fails_closed_without_queue(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -107,7 +132,7 @@ class TaggingWorkerQueueTests(unittest.TestCase):
             with self.assertRaises(TaggingWorkerQueueUnavailable):
                 queue.claim("a" * 32, "b" * 32, "c" * 32)
 
-    def test_app_claims_global_worker_before_provider_work_and_releases_it(self):
+    def test_app_claims_worker_slot_before_provider_work_and_releases_it(self):
         step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
             "# STEP 5: Review",
             1,
@@ -118,8 +143,10 @@ class TaggingWorkerQueueTests(unittest.TestCase):
             step_four.index("worker_queue.claim("),
             step_four.index("run_real_tagging_backend(selected)"),
         )
-        self.assertIn('auto_resume_action = "queue_wait"', step_four)
-        self.assertIn("skips completed posts", APP_SOURCE)
+        self.assertIn('auto_resume_action = "capacity_full"', step_four)
+        self.assertIn("All {capacity} tagging workers are currently busy", APP_SOURCE)
+        self.assertNotIn("queued at position", APP_SOURCE)
+        self.assertIn("completed posts are saved", APP_SOURCE)
 
     def test_per_post_objects_replace_periodic_full_partial_snapshots(self):
         runner = APP_SOURCE.split(
@@ -149,13 +176,13 @@ class TaggingWorkerQueueTests(unittest.TestCase):
         self.assertTrue(all("/row_" in key for key in remote.saved_keys))
         self.assertFalse(any(key.endswith("snapshot.json") for key in remote.saved_keys))
 
-    def test_schema_defines_atomic_fifo_queue_and_expiring_lease(self):
-        self.assertIn("create table if not exists public.tagging_job_queue", SCHEMA_SOURCE)
-        self.assertIn("create table if not exists public.tagging_worker_lease", SCHEMA_SOURCE)
-        self.assertIn("create or replace function public.tagging_queue_claim", SCHEMA_SOURCE)
-        self.assertIn("for update", SCHEMA_SOURCE.lower())
+    def test_schema_defines_atomic_worker_pool_and_expiring_leases(self):
+        self.assertIn("create table if not exists public.tagging_worker_slots", SCHEMA_SOURCE)
+        self.assertIn("create or replace function public.tagging_pool_claim", SCHEMA_SOURCE)
+        self.assertIn("pg_advisory_xact_lock", SCHEMA_SOURCE.lower())
         self.assertIn("lease_until", SCHEMA_SOURCE)
-        self.assertIn("create or replace function public.tagging_queue_release", SCHEMA_SOURCE)
+        self.assertIn("create or replace function public.tagging_pool_release", SCHEMA_SOURCE)
+        self.assertIn("p_max_workers integer default 3", SCHEMA_SOURCE)
 
 
 if __name__ == "__main__":
