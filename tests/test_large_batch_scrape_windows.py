@@ -765,6 +765,124 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
             any("CHECKPOINT_STORAGE" in message for message in fake_st.errors)
         )
 
+    def test_apify_partial_failure_saves_direct_result_and_resumes_only_failed_links(self):
+        selected = pd.DataFrame(
+            [
+                {
+                    "Platform": "TikTok",
+                    "Source": "Apify recovery simulation",
+                    "Link": f"https://www.tiktok.com/@creator/video/{990000 + index}",
+                    "Market": "SG",
+                    "Track": "Recovery track",
+                    "Creator": f"creator_{index}",
+                }
+                for index in range(3)
+            ]
+        )
+        scrape_calls = []
+        tag_calls = Counter()
+        fake_st = _Streamlit()
+
+        class ApifyApiError(Exception):
+            status_code = 503
+            message = "temporary provider failure"
+            type = "platform-feature-disabled"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tagging_jobs"
+
+            def scrape(links, _token, **_kwargs):
+                scrape_calls.append(list(links))
+                if len(scrape_calls) == 1:
+                    raise adapter.PartialScrapeError(
+                        partial_records=[
+                            {
+                                "submittedVideoUrl": links[0],
+                                "webVideoUrl": links[0],
+                                "playCount": 100,
+                            }
+                        ],
+                        failed_links=links[1:],
+                        provider_error=ApifyApiError(),
+                    )
+                return [
+                    {
+                        "submittedVideoUrl": link,
+                        "webVideoUrl": link,
+                        "playCount": 100,
+                    }
+                    for link in links
+                ]
+
+            def tag_rows(
+                remaining,
+                _records,
+                _gemini_key,
+                _apify_token,
+                _model,
+                _logs,
+                _remaining_positions,
+                _saved_positions,
+                on_result,
+                on_progress,
+            ):
+                for position, (_, row) in enumerate(remaining.iterrows()):
+                    tag_calls[row["Link"]] += 1
+                    on_result(
+                        position,
+                        row.to_dict() | {"Creative Type": "Others"},
+                        "tier1_cover",
+                    )
+                    on_progress(position + 1, len(remaining), "tier1_cover")
+
+            namespace = {
+                "BatchCheckpointStore": BatchCheckpointStore,
+                "Dict": Dict,
+                "List": List,
+                "LOGGER": logging.getLogger("apify-partial-recovery-test"),
+                "MAX_APIFY_POSTS_PER_EXECUTION_V68_54": 25,
+                "MAX_LIVE_POSTS_PER_EXECUTION_V68_52": 5,
+                "Optional": Optional,
+                "REMOTE_PARTIAL_SNAPSHOT_INTERVAL_V68_52": 5,
+                "_attach_comparison_metadata_v68_43": lambda frame, _manifest: frame,
+                "_final_update2_adapter": adapter,
+                "_is_quota_interruption_v68_43": lambda _exc: False,
+                "_large_batch_error_code_v68_43": lambda _exc: "APIFY_SERVICE",
+                "_large_batch_store_v68_43": lambda: BatchCheckpointStore(root),
+                "_persist_runtime_checkpoint_v68_15": lambda: None,
+                "_render_run_log_v45": lambda *_args: None,
+                "_route_sensitive_for_selection_v56": lambda frame, _mode: (frame, 0),
+                "_tag_remaining_with_row_isolation_v68_43": tag_rows,
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "datetime": datetime,
+                "final_update2_review_cache": adapter.review_cache,
+                "final_update2_scrape_links": scrape,
+                "gemini_model_slug": lambda _model: "test-model",
+                "is_supported_link": lambda _link: True,
+                "pd": pd,
+                "platform_for_url": adapter.detect_platform,
+                "safe_str": lambda value: "" if value is None else str(value),
+                "st": fake_st,
+                "time": time,
+                "timezone": timezone,
+                "uuid": uuid,
+            }
+            runner = _load_runner(namespace)
+
+            first = runner(selected, "gemini-key", "apify-token", "test-model")
+            result = runner(selected, "gemini-key", "apify-token", "test-model")
+
+        self.assertIsInstance(first, pd.DataFrame)
+        self.assertTrue(first.empty)
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(scrape_calls, [
+            selected["Link"].tolist(),
+            selected["Link"].tolist()[1:],
+        ])
+        self.assertEqual(tag_calls, Counter({link: 1 for link in selected["Link"]}))
+        self.assertTrue(any("temporarily unavailable" in message for message in fake_st.errors))
+
 
 if __name__ == "__main__":
     unittest.main()
