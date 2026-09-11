@@ -50,6 +50,31 @@ ProgressCallback = Callable[[int, int, str], None]
 RowResultCallback = Callable[[int, Dict, str], None]
 
 
+class PartialScrapeError(RuntimeError):
+    """Carry safe partial public-data results across a failed Apify fallback.
+
+    The original provider exception is retained for server-side diagnostics,
+    while callers can checkpoint direct results and leave only the failed
+    links unfinished for a later resume.
+    """
+
+    def __init__(
+        self,
+        *,
+        partial_records: Iterable[Dict],
+        failed_links: Iterable[str],
+        provider_error: Exception,
+    ) -> None:
+        super().__init__("APIFY_FALLBACK_FAILED")
+        self.partial_records = [
+            record for record in partial_records if isinstance(record, dict)
+        ]
+        self.failed_links = [
+            _text(link) for link in failed_links if _text(link)
+        ]
+        self.provider_error = provider_error
+
+
 CAMPAIGN_MARKETS = {"PH", "MY", "ID", "KR", "SG", "VN", "TH"}
 CAMPAIGN_MARKET_ALIASES = {
     "PHILIPPINES": "PH",
@@ -920,6 +945,8 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
         )
     backend = load_backend()
     records: List[Dict] = []
+    fallback_error: Optional[Exception] = None
+    failed_fallback_links: List[str] = []
     if tiktok_links:
         short_link_count = sum(is_tiktok_short_url(link) for link in tiktok_links)
         if short_link_count > 1:
@@ -933,14 +960,26 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
         direct_records, fallback_links = scrape_tiktok_posts_direct(actor_links)
         tiktok_records = list(direct_records)
         if fallback_links:
-            apify_records = backend.run_apify_tiktok_scraper_api(
-                fallback_links, apify_token
-            )
-            tiktok_records.extend(
-                record
-                for record in list(apify_records or [])
-                if _usable_apify_tiktok_record(record)
-            )
+            try:
+                apify_records = backend.run_apify_tiktok_scraper_api(
+                    fallback_links, apify_token
+                )
+            except Exception as exc:
+                fallback_error = fallback_error or exc
+                failed_normalized = {
+                    normalize_url(link) for link in fallback_links if _text(link)
+                }
+                failed_fallback_links.extend(
+                    original
+                    for original, resolved in tiktok_requests
+                    if normalize_url(resolved) in failed_normalized
+                )
+            else:
+                tiktok_records.extend(
+                    record
+                    for record in list(apify_records or [])
+                    if _usable_apify_tiktok_record(record)
+                )
         for record in tiktok_records:
             if isinstance(record, dict):
                 record.setdefault("_platform", TIKTOK)
@@ -975,7 +1014,7 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
                     paid_fallback_links,
                     apify_token,
                 )
-            except Exception:
+            except Exception as exc:
                 fully_missing = [
                     link
                     for link in paid_fallback_links
@@ -985,7 +1024,8 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
                     )
                 ]
                 if fully_missing:
-                    raise
+                    fallback_error = fallback_error or exc
+                    failed_fallback_links.extend(fully_missing)
 
         fallback_by_id, fallback_by_url = index_records(fallback_records)
         instagram_records: List[Dict] = []
@@ -999,6 +1039,12 @@ def scrape_links(links: List[str], apify_token: str) -> List[Dict]:
             if isinstance(selected, dict):
                 instagram_records.append(selected)
         records.extend(instagram_records)
+    if fallback_error is not None:
+        raise PartialScrapeError(
+            partial_records=records,
+            failed_links=failed_fallback_links,
+            provider_error=fallback_error,
+        ) from fallback_error
     return records
 
 

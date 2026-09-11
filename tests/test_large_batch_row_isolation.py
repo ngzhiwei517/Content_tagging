@@ -43,6 +43,9 @@ class LargeBatchRowIsolationTests(unittest.TestCase):
         load_functions(
             [
                 "_failed_analysis_review_row_v68_43",
+                "_error_chain_v68_101",
+                "_error_texts_v68_101",
+                "_apify_error_code_v68_101",
                 "_is_quota_interruption_v68_43",
                 "_large_batch_must_pause_v68_43",
                 "_tag_remaining_with_row_isolation_v68_43",
