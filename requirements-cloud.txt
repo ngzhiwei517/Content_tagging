@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Optional FastAPI + Cloud Tasks service. Streamlit Cloud does not need these
+# packages unless the cloud job backend is run in the same environment.
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+# 2.19.3 remains compatible with the protobuf version used by Streamlit.
+google-cloud-tasks==2.19.3
+httpx==0.28.1

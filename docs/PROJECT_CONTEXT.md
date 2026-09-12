@@ -96,6 +96,13 @@ production system without additional authentication, shared job management,
 monitoring and governance. Remote checkpoints and live provider behavior must
 be verified in the target deployment before they are described as working.
 
+An optional FastAPI/Cloud Tasks backend is available for controlled multi-user
+beta testing. It keeps one active post per batch, permits different batches to
+run concurrently under a shared queue limit, and stores results per post in
+Supabase. It remains disabled unless explicitly configured and does not by
+itself provide individual identity, per-user billing attribution or full
+production governance.
+
 ## Knowledge Base policy
 
 - Learn only from reviewed or explicitly approved rows.

@@ -177,6 +177,13 @@ and targeted verification -> human review when needed -> export.
 - Remote persistence is best-effort and must not break the local fallback.
   Verify a real remote write/read before claiming restart or redeployment
   recovery is working.
+- The optional `taggy_cloud/` backend stores one sanitized result per post in
+  `taggy_cloud_job_posts`. Keep its schema additive, preserve the existing
+  recovery ID, and never resubmit a completed position.
+- Multi-user cloud concurrency is controlled by Cloud Tasks and Cloud Run, not
+  by a process-local Streamlit lock. Keep one active post per batch so one
+  large job cannot occupy every worker; raise the shared limit only after the
+  staged live checks in `docs/CLOUD_RUN_BACKEND.md` pass.
 
 ## Taggy assistant rules
 - Taggy first retrieves approved answers from

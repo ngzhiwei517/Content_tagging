@@ -6,6 +6,11 @@ This guide shows where each responsibility lives. It is intentionally short: use
 
 ```text
 app.py
+  -> taggy_cloud/client.py (optional cloud job submission and polling)
+  -> taggy_cloud/api.py (FastAPI control plane and one-post worker endpoint)
+    -> taggy_cloud/job_store.py (durable per-post Supabase state)
+    -> taggy_cloud/dispatcher.py (Cloud Tasks chaining and concurrency)
+    -> taggy_cloud/processor.py (headless existing tagging adapter)
   -> ugc_tagger/direct_post_scraper.py (direct public retrieval)
   -> ugc_tagger/instagram_reels_adapter.py (Instagram normalization/fallback)
   -> ugc_tagger/creator_profile_enrichment.py (Top Creators enrichment)
@@ -23,6 +28,9 @@ app.py
 | Path | Responsibility | Change here when... |
 | --- | --- | --- |
 | `app.py` | Current five-step Streamlit UI, session state, batch assembly, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
+| `taggy_cloud/` | Optional FastAPI/Cloud Tasks service, Streamlit client, per-post durable state, bounded retries and safe serialization | Multi-user beta job orchestration needs to change |
+| `cloud_job_schema.sql` | Additive Supabase tables and transactional functions for cloud jobs | The per-job/per-post persistence contract changes |
+| `Dockerfile` and `requirements-cloud.txt` | Cloud Run service build | Cloud service dependencies or container startup changes |
 | `ugc_tagger/batch_checkpoint.py` | Secret-free local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
 | `ugc_tagger/persistent_checkpoint.py` | Optional local, Supabase REST or Postgres checkpoint storage | Recovery after restart/redeployment or backend diagnostics need to change |
 | `ugc_tagger/direct_post_scraper.py` | Direct TikTok/Instagram post retrieval before paid fallback | Public retrieval or direct metric normalization needs to change |
@@ -81,6 +89,8 @@ Some helper names include historical version suffixes such as `_v43` or `_v68_15
   `instagram_reels_adapter.py`.
 - Checkpoint persistence: start in `batch_checkpoint.py` for local run progress
   and `persistent_checkpoint.py` for restart/redeployment recovery.
+- Optional multi-user job orchestration: start in `taggy_cloud/`; keep the
+  current adapter as the single tagging implementation.
 - Creator profile enrichment: start in `creator_profile_enrichment.py`.
 - Prompt, labels or reusable guardrails: start in
   `final_update2_backend_source.py` and add a focused regression test.

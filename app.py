@@ -30,6 +30,7 @@ import streamlit as st
 
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
 import ugc_tagger.dashboard_assistant as _dashboard_assistant
+from taggy_cloud.client import CloudBackendError, TaggyCloudClient
 
 # Streamlit Cloud can hot-reload ``app.py`` while an older imported helper
 # module is still cached. Reload the small, side-effect-free helper once when
@@ -1082,6 +1083,12 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
+    "cloud_tagging_job_id_v68_102": "",
+    "cloud_tagging_fingerprint_v68_102": "",
+    "cloud_tagging_results_v68_102": pd.DataFrame(),
+    "cloud_tagging_pending_v68_102": pd.DataFrame(),
+    "cloud_tagging_attempted_links_v68_102": [],
+    "cloud_tagging_started_utc_v68_102": "",
     "analysis_mode_v68_86": "AI tagging",
     "metrics_only_df_v68_86": pd.DataFrame(),
     "metrics_only_active_v68_86": False,
@@ -1428,6 +1435,12 @@ RUNTIME_CHECKPOINT_STATE_KEYS_V68_15 = (
     "comparison_run_id_v68_41_4",
     "comparison_run_started_utc_v68_41_4",
     "comparison_run_elapsed_v68_41_4",
+    "cloud_tagging_job_id_v68_102",
+    "cloud_tagging_fingerprint_v68_102",
+    "cloud_tagging_results_v68_102",
+    "cloud_tagging_pending_v68_102",
+    "cloud_tagging_attempted_links_v68_102",
+    "cloud_tagging_started_utc_v68_102",
     "analysis_mode_v68_86",
     "metrics_only_df_v68_86",
     "metrics_only_active_v68_86",
@@ -1447,6 +1460,8 @@ RUNTIME_DATAFRAME_KEYS_V68_15 = {
     "tagged_df",
     "metrics_only_df_v68_86",
     "creator_profile_metrics_v68_51",
+    "cloud_tagging_results_v68_102",
+    "cloud_tagging_pending_v68_102",
 }
 RUNTIME_BLOCKED_COLUMN_V68_44 = re.compile(
     r"api[ _-]*key|token|secret|password|authorization|database[ _-]*url|connection[ _-]*string|"
@@ -5012,6 +5027,366 @@ def _run_metrics_only_chunk_v68_86(
         return None
     st.session_state.metrics_only_active_v68_86 = False
     return combined
+
+
+def _cloud_backend_config_v68_102() -> Tuple[str, str, float]:
+    """Return optional server-managed cloud backend settings."""
+    secret_values = {}
+    try:
+        secret_values = st.secrets.get("cloud_backend", {}) or {}
+    except Exception:
+        secret_values = {}
+    url = safe_str(secret_values.get("url")) or safe_str(
+        os.getenv("TAGGY_BACKEND_URL", "")
+    )
+    api_key = clean_api_secret(secret_values.get("api_key")) or clean_api_secret(
+        os.getenv("TAGGY_BACKEND_API_KEY", "")
+    )
+    raw_poll = secret_values.get("poll_seconds") or os.getenv(
+        "TAGGY_BACKEND_POLL_SECONDS", "3"
+    )
+    try:
+        poll_seconds = float(raw_poll)
+    except (TypeError, ValueError):
+        poll_seconds = 3.0
+    return url.rstrip("/"), api_key, max(2.0, min(15.0, poll_seconds))
+
+
+def _cloud_backend_enabled_v68_102() -> bool:
+    url, api_key, _ = _cloud_backend_config_v68_102()
+    return bool(url or api_key)
+
+
+def _reset_cloud_tagging_state_v68_102() -> None:
+    st.session_state.cloud_tagging_job_id_v68_102 = ""
+    st.session_state.cloud_tagging_fingerprint_v68_102 = ""
+    st.session_state.cloud_tagging_results_v68_102 = pd.DataFrame()
+    st.session_state.cloud_tagging_pending_v68_102 = pd.DataFrame()
+    st.session_state.cloud_tagging_attempted_links_v68_102 = []
+    st.session_state.cloud_tagging_started_utc_v68_102 = ""
+
+
+def _cloud_tagging_client_v68_102() -> TaggyCloudClient:
+    url, api_key, _ = _cloud_backend_config_v68_102()
+    if not url or not api_key:
+        raise CloudBackendError(
+            "CLOUD_BACKEND_CONFIG",
+            "Cloud tagging is not fully configured. Contact the app owner.",
+        )
+    return TaggyCloudClient(url, api_key)
+
+
+def _cloud_tagging_fingerprint_v68_102(
+    selected: pd.DataFrame,
+    model: str,
+) -> str:
+    return input_fingerprint(selected.reset_index(drop=True), f"cloud:{model}")
+
+
+def _cloud_replacement_rows_v68_102(
+    selected: pd.DataFrame,
+    completed: pd.DataFrame,
+) -> pd.DataFrame:
+    replace_unavailable = bool(
+        st.session_state.get("replace_unavailable_posts", True)
+    )
+    replace_unavailable = (
+        replace_unavailable
+        and st.session_state.get("selection_mode", "Top posts") == "Top posts"
+    )
+    if not replace_unavailable or completed.empty:
+        return pd.DataFrame()
+
+    target_counts: Dict[Tuple[str, ...], int] = {}
+    for _, row in selected.iterrows():
+        key = _selection_group_key_v56(row)
+        target_counts[key] = target_counts.get(key, 0) + 1
+
+    available = completed[~_removed_mask_v56(completed)].copy()
+    available_counts: Dict[Tuple[str, ...], int] = {}
+    for _, row in available.iterrows():
+        key = _selection_group_key_v56(row)
+        available_counts[key] = available_counts.get(key, 0) + 1
+    deficits = {
+        key: max(0, target - available_counts.get(key, 0))
+        for key, target in target_counts.items()
+    }
+    if not any(deficits.values()):
+        return pd.DataFrame()
+
+    attempted = {
+        final_update2_normalize_url(link)
+        for link in st.session_state.get(
+            "cloud_tagging_attempted_links_v68_102", []
+        )
+    }
+    replacements = []
+    for _, candidate in _all_ranked_candidates_v56(
+        st.session_state.get("batch_df", pd.DataFrame())
+    ).iterrows():
+        normalized = final_update2_normalize_url(candidate.get("Link"))
+        key = _selection_group_key_v56(candidate)
+        if normalized in attempted or deficits.get(key, 0) <= 0:
+            continue
+        attempted.add(normalized)
+        deficits[key] -= 1
+        replacements.append(candidate.to_dict())
+        if not any(deficits.values()):
+            break
+    return pd.DataFrame(replacements)
+
+
+def _cloud_submit_cycle_v68_102(
+    client: TaggyCloudClient,
+    pending: pd.DataFrame,
+    model: str,
+) -> Dict:
+    if pending.empty:
+        raise CloudBackendError(
+            "CLOUD_JOB_EMPTY",
+            "No unfinished posts remain in this cloud job.",
+        )
+    recovery_id = _valid_runtime_id_v68_15(
+        st.session_state.get("runtime_run_id_v68_15")
+    )
+    if not recovery_id:
+        recovery_id = _new_runtime_recovery_id_v68_44()
+    job_id = _valid_runtime_id_v68_15(
+        st.session_state.get("cloud_tagging_job_id_v68_102")
+    )
+    if not job_id:
+        job_id = uuid.uuid4().hex
+        st.session_state.cloud_tagging_job_id_v68_102 = job_id
+        st.session_state.cloud_tagging_pending_v68_102 = pending.reset_index(
+            drop=True
+        )
+        attempted = list(
+            st.session_state.get("cloud_tagging_attempted_links_v68_102", [])
+        )
+        attempted.extend(
+            safe_str(link)
+            for link in pending.get("Link", pd.Series(dtype=str)).tolist()
+            if safe_str(link)
+        )
+        st.session_state.cloud_tagging_attempted_links_v68_102 = list(
+            dict.fromkeys(attempted)
+        )
+        _persist_runtime_checkpoint_v68_15()
+    pending_state = st.session_state.get(
+        "cloud_tagging_pending_v68_102", pending
+    )
+    if not isinstance(pending_state, pd.DataFrame) or pending_state.empty:
+        pending_state = pending.reset_index(drop=True)
+        st.session_state.cloud_tagging_pending_v68_102 = pending_state
+    return client.create_job(
+        job_id=job_id,
+        recovery_id=recovery_id,
+        model=model,
+        posts=pending_state,
+    )
+
+
+def _cloud_final_result_v68_102(
+    completed: pd.DataFrame,
+    model: str,
+) -> pd.DataFrame:
+    output = add_performance_fields(completed.reset_index(drop=True))
+    started_text = safe_str(
+        st.session_state.get("cloud_tagging_started_utc_v68_102")
+    )
+    try:
+        started = datetime.fromisoformat(started_text)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        elapsed = round(
+            (datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds(),
+            2,
+        )
+    except (TypeError, ValueError):
+        elapsed = 0.0
+    run_id = safe_str(
+        st.session_state.get("comparison_run_id_v68_41_4")
+    ) or f"cloud_{uuid.uuid4().hex[:12]}"
+    output["Gemini Model"] = model
+    output["Comparison Run ID"] = run_id
+    output["Run Started UTC"] = started_text
+    output["Run Elapsed Seconds"] = elapsed
+    st.session_state.comparison_run_elapsed_v68_41_4 = elapsed
+    return output
+
+
+def _render_cloud_tagging_v68_102(selected: pd.DataFrame) -> None:
+    """Create or poll a background job without holding the Streamlit worker."""
+    url, api_key, poll_seconds = _cloud_backend_config_v68_102()
+    if not url or not api_key:
+        st.error(
+            "Cloud tagging is only partly configured. Ask the app owner to check "
+            "the backend URL and access key."
+        )
+        if st.button("Back", width="stretch", key="cloud_config_back_v68_102"):
+            go(3)
+        st.stop()
+
+    model = normalize_gemini_model(
+        st.session_state.get("qa_gemini_model_v68_41_4", DEFAULT_GEMINI_MODEL)
+    )
+    fingerprint = _cloud_tagging_fingerprint_v68_102(selected, model)
+    saved_fingerprint = safe_str(
+        st.session_state.get("cloud_tagging_fingerprint_v68_102")
+    )
+    if saved_fingerprint and saved_fingerprint != fingerprint:
+        _reset_cloud_tagging_state_v68_102()
+        st.warning(
+            "The selected posts or model changed. Start a new cloud tagging run "
+            "with the current settings."
+        )
+        saved_fingerprint = ""
+
+    client = _cloud_tagging_client_v68_102()
+    job_id = _valid_runtime_id_v68_15(
+        st.session_state.get("cloud_tagging_job_id_v68_102")
+    )
+
+    if job_id:
+        try:
+            status_payload = client.status(job_id)
+        except CloudBackendError as exc:
+            if exc.code == "CLOUD_JOB_NOT_FOUND":
+                pending = st.session_state.get(
+                    "cloud_tagging_pending_v68_102", pd.DataFrame()
+                )
+                try:
+                    status_payload = _cloud_submit_cycle_v68_102(
+                        client,
+                        pending,
+                        model,
+                    )
+                except CloudBackendError as create_error:
+                    st.error(f"{create_error} Diagnostic code: {create_error.code}.")
+                    st.stop()
+            else:
+                st.error(f"{exc} Diagnostic code: {exc.code}.")
+                st.stop()
+
+        total = max(1, int(status_payload.get("total_posts") or len(selected)))
+        completed_count = int(status_payload.get("completed_posts") or 0)
+        st.progress(min(completed_count / total, 1.0))
+        st.info(
+            f"Cloud tagging is running independently; {completed_count:,} of "
+            f"{total:,} posts in the current group are complete. You may keep "
+            "this page open or use Continue later."
+        )
+        cloud_status = safe_str(status_payload.get("status"))
+        if cloud_status == "completed":
+            try:
+                cycle_results = pd.DataFrame(client.results(job_id))
+            except CloudBackendError as exc:
+                st.error(f"{exc} Diagnostic code: {exc.code}.")
+                st.stop()
+            cycle_results, _ = _route_sensitive_for_selection_v56(
+                cycle_results,
+                st.session_state.get("selection_mode", "Top posts"),
+            )
+            previous = st.session_state.get(
+                "cloud_tagging_results_v68_102", pd.DataFrame()
+            )
+            combined = (
+                pd.concat([previous, cycle_results], ignore_index=True)
+                if isinstance(previous, pd.DataFrame) and not previous.empty
+                else cycle_results.reset_index(drop=True)
+            )
+            st.session_state.cloud_tagging_results_v68_102 = combined
+            st.session_state.cloud_tagging_job_id_v68_102 = ""
+            st.session_state.cloud_tagging_pending_v68_102 = pd.DataFrame()
+            replacements = _cloud_replacement_rows_v68_102(selected, combined)
+            _persist_runtime_checkpoint_v68_15()
+            if not replacements.empty:
+                _cloud_submit_cycle_v68_102(client, replacements, model)
+                st.rerun()
+
+            output = _cloud_final_result_v68_102(combined, model)
+            reset_review_state_for_new_tagging_run()
+            st.session_state.tagged_df = restore_batch_input_order_v68_96(
+                output,
+                st.session_state.get("batch_df", pd.DataFrame()),
+            )
+            st.session_state.tagging_job_active_v68_43 = False
+            _persist_runtime_checkpoint_v68_15()
+            go(5)
+
+        if cloud_status == "needs_attention":
+            st.warning(
+                "Cloud tagging paused safely. Completed posts remain saved. "
+                "Check provider access or quota, then resume this job."
+            )
+            cloud_back, cloud_resume = st.columns(2)
+            with cloud_back:
+                if st.button("Back", width="stretch", key="cloud_paused_back_v68_102"):
+                    go(3)
+            with cloud_resume:
+                if st.button(
+                    "Resume tagging",
+                    type="primary",
+                    width="stretch",
+                    key="cloud_resume_v68_102",
+                ):
+                    try:
+                        client.resume(job_id)
+                    except CloudBackendError as exc:
+                        st.error(f"{exc} Diagnostic code: {exc.code}.")
+                        st.stop()
+                    st.rerun()
+            st.stop()
+
+        _persist_runtime_checkpoint_v68_15()
+        time.sleep(poll_seconds)
+        st.rerun()
+
+    completed = st.session_state.get(
+        "cloud_tagging_results_v68_102", pd.DataFrame()
+    )
+    if isinstance(completed, pd.DataFrame) and not completed.empty:
+        pending = _cloud_replacement_rows_v68_102(selected, completed)
+        if pending.empty:
+            output = _cloud_final_result_v68_102(completed, model)
+            st.session_state.tagged_df = restore_batch_input_order_v68_96(
+                output,
+                st.session_state.get("batch_df", pd.DataFrame()),
+            )
+            _persist_runtime_checkpoint_v68_15()
+            go(5)
+    else:
+        pending = selected.reset_index(drop=True)
+
+    cloud_back, cloud_start = st.columns(2)
+    with cloud_back:
+        if st.button("Back", width="stretch", key="cloud_start_back_v68_102"):
+            go(3)
+    with cloud_start:
+        if st.button(
+            "Start tagging",
+            type="primary",
+            width="stretch",
+            key="cloud_start_v68_102",
+        ):
+            if not saved_fingerprint:
+                _reset_cloud_tagging_state_v68_102()
+                st.session_state.cloud_tagging_fingerprint_v68_102 = fingerprint
+                st.session_state.cloud_tagging_started_utc_v68_102 = (
+                    datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                )
+                st.session_state.comparison_run_id_v68_41_4 = (
+                    f"cloud_{uuid.uuid4().hex[:12]}"
+                )
+                st.session_state.comparison_run_started_utc_v68_41_4 = (
+                    st.session_state.cloud_tagging_started_utc_v68_102
+                )
+            try:
+                _cloud_submit_cycle_v68_102(client, pending, model)
+            except CloudBackendError as exc:
+                st.error(f"{exc} Diagnostic code: {exc.code}.")
+                st.stop()
+            st.rerun()
 
 
 def run_real_tagging_backend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -10205,6 +10580,10 @@ elif st.session_state.step == 4:
     # backend only reaches full-video analysis when cover, 3-frame and 9-frame
     # evidence remain unresolved.
     st.session_state.enable_full_video_fallback_v46 = True
+    if _cloud_backend_enabled_v68_102():
+        _render_cloud_tagging_v68_102(selected)
+        st.stop()
+
     saved_large_batch = _large_batch_manifest_v68_43(selected)
     expected_large_job_id = _large_batch_job_id_v68_55(selected)
     if _uses_large_batch_checkpoints_v68_43(selected):
@@ -10941,6 +11320,7 @@ elif st.session_state.step == 6:
                 st.session_state.batch_df = pd.DataFrame()
                 st.session_state.selected_df = pd.DataFrame()
                 st.session_state.tagged_df = pd.DataFrame()
+                _reset_cloud_tagging_state_v68_102()
                 st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
                 st.session_state.metrics_only_active_v68_86 = False
                 st.session_state.metrics_only_next_position_v68_86 = 0
@@ -11537,6 +11917,7 @@ elif st.session_state.step == 6:
             st.session_state.batch_df = pd.DataFrame()
             st.session_state.selected_df = pd.DataFrame()
             st.session_state.tagged_df = pd.DataFrame()
+            _reset_cloud_tagging_state_v68_102()
             st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
             st.session_state.creator_profile_updated_at_v68_51 = ""
             st.session_state.creator_profile_aliases_v68_67 = {}

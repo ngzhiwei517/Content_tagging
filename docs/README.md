@@ -10,6 +10,7 @@
 - [Validation and limitations](VALIDATION.md)
 - [Link compatibility](LINK_COMPATIBILITY.md)
 - [Testing](TESTING.md)
+- [Optional Cloud Run job backend](CLOUD_RUN_BACKEND.md)
 - [Open questions](OPEN_QUESTIONS.md)
 
 ## History

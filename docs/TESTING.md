@@ -10,6 +10,12 @@ python -m compileall -q ugc_tagger
 python -m unittest discover -s tests -v
 ```
 
+For the optional FastAPI backend, install `requirements-cloud.txt` and include:
+
+```bash
+python -m unittest tests.test_cloud_job_store tests.test_cloud_api tests.test_cloud_dispatcher tests.test_cloud_sanitization tests.test_cloud_streamlit_integration -v
+```
+
 ## Manual smoke test
 
 1. Start the Streamlit app.
@@ -24,6 +30,13 @@ python -m unittest discover -s tests -v
 10. If the full-metrics actor returns Shares/Saves, confirm they survive Review, Summary, CSV, XLSX and QA export.
 11. Simulate or observe a full-metrics actor failure and confirm the broad Instagram actor fallback still produces a taggable row.
 12. Use direct post URLs for the final smoke test. Confirm unsupported redirect/share paths follow the documented behaviour in [Link compatibility](LINK_COMPATIBILITY.md).
+
+## Cloud backend smoke test
+
+When `[cloud_backend]` is enabled, also follow the controlled 1-, 3-, 5- and
+9-user procedure in [Cloud Run job backend](CLOUD_RUN_BACKEND.md). Verify live
+Supabase persistence and Cloud Tasks retry behaviour separately from mocked
+unit tests.
 
 ## Accuracy evaluation
 

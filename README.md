@@ -44,6 +44,11 @@ Large batches are processed in protected chunks and saved after each completed r
 
 Checkpoints are local by default. Supabase/Postgres can optionally provide recovery after an app restart or redeployment. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
 
+For a multi-user beta, an optional FastAPI, Cloud Tasks and Cloud Run backend
+moves AI tagging out of Streamlit. Different user batches can run concurrently,
+while each completed post is saved independently and resumed by the same
+private recovery ID. See [Cloud Run job backend](docs/CLOUD_RUN_BACKEND.md).
+
 Open the plain app URL for a new independent batch. Use a batch's private **Continue later** link to reopen that specific run.
 
 ## Creator performance
@@ -67,6 +72,9 @@ APIFY_TOKEN = "replace-with-the-deployment-token"
 ```
 
 Never commit real credentials. For local use, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the values there.
+
+The optional cloud backend has separate server-side secrets and is enabled only
+when the complete `[cloud_backend]` section is present in Streamlit Secrets.
 
 ## Run locally
 
@@ -113,6 +121,7 @@ python -m unittest discover -s tests
 - [Maintainer handover](docs/HANDOVER.md)
 - [Code map](docs/CODE_MAP.md)
 - [Validation and limitations](docs/VALIDATION.md)
+- [Optional Cloud Run job backend](docs/CLOUD_RUN_BACKEND.md)
 - [Changelog](CHANGELOG.md)
 
 ## Handover readiness
