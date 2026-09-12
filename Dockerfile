@@ -14,4 +14,4 @@ COPY . .
 RUN adduser --disabled-password --gecos "" --uid 10001 taggy
 USER taggy
 
-CMD ["sh", "-c", "exec uvicorn cloudrun_main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
+CMD ["sh", "-c", "exec python -m streamlit run app.py --server.address=0.0.0.0 --server.port=${PORT:-8080} --server.headless=true --browser.gatherUsageStats=false"]

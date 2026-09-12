@@ -31,7 +31,7 @@ app.py
 | `app.py` | Current five-step Streamlit UI, session state, batch assembly, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
 | `taggy_cloud/` | Optional FastAPI/Cloud Tasks service, Streamlit client, per-post durable state, bounded retries and safe serialization | Multi-user beta job orchestration needs to change |
 | `cloud_job_schema.sql` | Additive Supabase tables and transactional functions for cloud jobs | The per-job/per-post persistence contract changes |
-| `Dockerfile` and `requirements-cloud.txt` | Cloud Run service build | Cloud service dependencies or container startup changes |
+| `Dockerfile` and `requirements-cloud.txt` | Cloud Run Streamlit frontend test build on `agent/cloud-run-streamlit-test`; the backend branch retains the Uvicorn startup command | Cloud service dependencies or container startup changes |
 | `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
 | `ugc_tagger/persistent_checkpoint.py` | Optional Supabase/Postgres checkpoint storage, worker-pool RPC calls and transient database retries | Shared recovery, multi-user admission or retry behavior needs to change |
 | `ugc_tagger/tagging_worker_queue.py` | Bounded multi-user worker admission with a local development fallback | Tagging concurrency or capacity behavior needs to change |

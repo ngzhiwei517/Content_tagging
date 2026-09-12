@@ -11,6 +11,7 @@
 - [Link compatibility](LINK_COMPATIBILITY.md)
 - [Testing](TESTING.md)
 - [Optional Cloud Run job backend](CLOUD_RUN_BACKEND.md)
+- [Isolated Cloud Run frontend test](CLOUD_RUN_FRONTEND_TEST.md)
 - [Open questions](OPEN_QUESTIONS.md)
 
 ## History

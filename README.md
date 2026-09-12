@@ -49,6 +49,10 @@ moves AI tagging out of Streamlit. Different user batches can run concurrently,
 while each completed post is saved independently and resumed by the same
 private recovery ID. See [Cloud Run job backend](docs/CLOUD_RUN_BACKEND.md).
 
+An isolated Cloud Run Streamlit deployment can be used to test frontend
+scaling without replacing the existing Streamlit Community Cloud app. See
+[Cloud Run frontend test](docs/CLOUD_RUN_FRONTEND_TEST.md).
+
 Open the plain app URL for a new independent batch. Use a batch's private **Continue later** link to reopen that specific run.
 
 ## Creator performance
@@ -122,6 +126,7 @@ python -m unittest discover -s tests
 - [Code map](docs/CODE_MAP.md)
 - [Validation and limitations](docs/VALIDATION.md)
 - [Optional Cloud Run job backend](docs/CLOUD_RUN_BACKEND.md)
+- [Isolated Cloud Run frontend test](docs/CLOUD_RUN_FRONTEND_TEST.md)
 - [Changelog](CHANGELOG.md)
 
 ## Handover readiness

@@ -1,13 +1,16 @@
 import ast
 import inspect
 import logging
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 THEME_CONFIG = (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
+DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 REQUIREMENTS = {
     line.strip()
     for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
@@ -32,6 +35,46 @@ def load_function(name, namespace):
 
 
 class CloudDeploymentContractTests(unittest.TestCase):
+    def test_cloud_run_container_starts_the_streamlit_frontend(self):
+        self.assertIn("python -m streamlit run app.py", DOCKERFILE)
+        self.assertIn("--server.address=0.0.0.0", DOCKERFILE)
+        self.assertIn("--server.port=${PORT:-8080}", DOCKERFILE)
+        self.assertNotIn("uvicorn cloudrun_main:app", DOCKERFILE)
+
+    def test_managed_api_secret_accepts_cloud_run_environment_secret(self):
+        class EmptySecrets:
+            @staticmethod
+            def get(_name, default=""):
+                return default
+
+        class StreamlitStub:
+            secrets = EmptySecrets()
+
+        clean_secret = lambda value: str(value or "").strip()
+        managed_secret = load_function(
+            "_managed_api_secret_v68_43",
+            {"st": StreamlitStub(), "clean_api_secret": clean_secret, "os": os},
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "cloud-secret"}):
+            self.assertEqual(managed_secret("GEMINI_API_KEY"), "cloud-secret")
+
+    def test_streamlit_secret_takes_priority_over_environment(self):
+        class StreamlitSecrets:
+            @staticmethod
+            def get(_name, _default=""):
+                return "streamlit-secret"
+
+        class StreamlitStub:
+            secrets = StreamlitSecrets()
+
+        clean_secret = lambda value: str(value or "").strip()
+        managed_secret = load_function(
+            "_managed_api_secret_v68_43",
+            {"st": StreamlitStub(), "clean_api_secret": clean_secret, "os": os},
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "cloud-secret"}):
+            self.assertEqual(managed_secret("GEMINI_API_KEY"), "streamlit-secret")
+
     def test_checkpoint_store_falls_back_when_hot_reload_keeps_legacy_class(self):
         class LegacyCheckpointStore:
             def __init__(self, root, *, chunk_size):
