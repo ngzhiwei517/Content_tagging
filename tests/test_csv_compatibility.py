@@ -444,8 +444,18 @@ class CsvCompatibilityTests(unittest.TestCase):
         )
         self.assertIn("args=(combined_upload,)", upload_section)
         self.assertIn(
-            "Preparing uploaded posts… The Add button will appear below.",
+            "Upload received. Preparing uploaded posts…",
             upload_section,
+        )
+        self.assertIn(
+            "Large files may take a moment to upload and prepare.",
+            upload_section,
+        )
+        self.assertLess(
+            upload_section.index("preparation_status = st.status("),
+            upload_section.index(
+                'with st.expander("Confirm details for uploaded files"'
+            ),
         )
         self.assertIn("The Add button is ready below.", upload_section)
         self.assertNotIn(
