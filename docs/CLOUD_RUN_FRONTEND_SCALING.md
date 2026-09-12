@@ -6,7 +6,10 @@ test deploys the current, working Taggy branch to Cloud Run without changing or
 removing the existing Community Cloud app.
 
 The container deliberately limits native numerical and video libraries to one
-CPU thread per session. Cloud Run then scales separate sessions across up to ten
+CPU thread per session. Cloud Run concurrency is set to three because one
+Streamlit browser session uses a long-lived connection and separate HTTP
+requests for features such as file upload. This is a per-instance request
+allowance, not a three-user limit. Cloud Run can still scale across up to ten
 instances instead of making nine users compete for one Streamlit process.
 
 ## Deploy the isolated test
@@ -15,7 +18,7 @@ Run these commands from this branch's worktree in Windows Command Prompt:
 
 ```bat
 gcloud config set project taggy-508408
-gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=1 --max-instances=10 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_TABLE=batch_checkpoint_objects" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
+gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=3 --max-instances=10 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_TABLE=batch_checkpoint_objects" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
 gcloud run services describe taggy-web-latest-test --region=asia-southeast1 --format="value(status.url)"
 ```
 
