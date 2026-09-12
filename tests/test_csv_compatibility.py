@@ -1,9 +1,11 @@
 import ast
 import csv
+import hashlib
 import io
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -58,6 +60,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.markets = ast.literal_eval(markets_node)
         namespace = {
             "csv": csv,
+            "hashlib": hashlib,
             "io": io,
             "re": re,
             "pd": pd,
@@ -73,6 +76,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "is_instagram_post_url": is_instagram_post_url,
             "is_supported_post_url": is_supported_post_url,
             "final_update2_normalize_url": final_update2_normalize_url,
+            "st": SimpleNamespace(session_state={}),
         }
         for name in [
             "safe_str",
@@ -89,6 +93,7 @@ class CsvCompatibilityTests(unittest.TestCase):
             "infer_market_from_filename",
             "unique_columns",
             "detect_csv_delimiter",
+            "read_uploaded_table_bytes_v68_107",
             "read_any_table",
             "norm_col",
             "detect_col",
@@ -113,6 +118,7 @@ class CsvCompatibilityTests(unittest.TestCase):
         ]:
             namespace[name] = load_function(name, namespace)
         namespace["standardize_file_rows"] = load_function("standardize_file_rows", namespace)
+        cls.table_namespace = namespace
         cls.read_any_table = staticmethod(namespace["read_any_table"])
         cls.standardize_file_rows = staticmethod(namespace["standardize_file_rows"])
         cls.parse_links = staticmethod(namespace["parse_links"])
@@ -128,6 +134,35 @@ class CsvCompatibilityTests(unittest.TestCase):
         cls.add_performance_fields = staticmethod(namespace["add_performance_fields"])
         cls.format_display_value = staticmethod(namespace["format_display_value"])
         cls.aggregate_summary_performance = staticmethod(namespace["aggregate_summary_performance_v68_15"])
+
+    def setUp(self):
+        self.table_namespace["st"].session_state.clear()
+
+    def test_uploaded_table_parse_is_reused_within_one_session(self):
+        original_parser = self.table_namespace["read_uploaded_table_bytes_v68_107"]
+        parse_calls = []
+
+        def counted_parser(raw, file_name):
+            parse_calls.append(file_name)
+            return original_parser(raw, file_name)
+
+        self.table_namespace["read_uploaded_table_bytes_v68_107"] = counted_parser
+        try:
+            upload = UploadedFile(
+                "campaign.csv",
+                b"post_url,track\nhttps://www.tiktok.com/@demo/video/123,Song\n",
+            )
+            first = self.read_any_table(upload)
+            first.loc[0, "track"] = "Changed only in returned copy"
+            second = self.read_any_table(upload)
+            self.table_namespace["st"].session_state.clear()
+            third = self.read_any_table(upload)
+        finally:
+            self.table_namespace["read_uploaded_table_bytes_v68_107"] = original_parser
+
+        self.assertEqual(parse_calls, ["campaign.csv", "campaign.csv"])
+        self.assertEqual(second.loc[0, "track"], "Song")
+        self.assertEqual(third.loc[0, "track"], "Song")
 
     def parse(
         self,
@@ -385,7 +420,10 @@ class CsvCompatibilityTests(unittest.TestCase):
         self.assertNotIn('"Track name (optional)"', APP_SOURCE)
         self.assertIn("missing_track_files = []", APP_SOURCE)
         self.assertIn("uploaded_rows_missing_track_v68_82(std)", APP_SOURCE)
-        self.assertIn("disabled=bool(missing_track_files)", APP_SOURCE)
+        self.assertIn(
+            "disabled=bool(missing_track_files) or combined_upload.empty",
+            APP_SOURCE,
+        )
         self.assertIn(
             "Enter a track name for each uploaded file before adding it to the batch.",
             APP_SOURCE,
@@ -405,6 +443,11 @@ class CsvCompatibilityTests(unittest.TestCase):
             upload_section,
         )
         self.assertIn("args=(combined_upload,)", upload_section)
+        self.assertIn(
+            "Preparing uploaded posts… The Add button will appear below.",
+            upload_section,
+        )
+        self.assertIn("The Add button is ready below.", upload_section)
         self.assertNotIn(
             'if st.button(\n                    "Add uploaded rows to batch"',
             upload_section,
