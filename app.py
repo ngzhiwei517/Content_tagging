@@ -1087,6 +1087,7 @@ DEFAULT_STATE = {
     "comparison_run_started_utc_v68_41_4": "",
     "comparison_run_elapsed_v68_41_4": 0.0,
     "tagging_job_active_v68_43": False,
+    "runtime_opened_from_recovery_v68_104": False,
     "analysis_mode_v68_86": "AI tagging",
     "metrics_only_df_v68_86": pd.DataFrame(),
     "metrics_only_active_v68_86": False,
@@ -1355,9 +1356,10 @@ TAGGING_CHECKPOINT_DIR_V68_43 = RUNTIME_CHECKPOINT_DIR_V68_15 / "tagging_jobs"
 # Keep each live Streamlit execution deliberately short. The durable manifest
 # still uses 50-row chunks for backward-compatible recovery, while only this
 # many unfinished rows are analysed before yielding to a fresh script run.
-# Ten halves the rerun overhead without returning to the longer execution
-# window that previously exposed Streamlit Cloud sessions to restarts.
-MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 10
+# Two keeps each independent user session responsive under shared Streamlit
+# load. Completed rows remain checkpointed, so the extra reruns do not repeat
+# Gemini work and give other sessions regular opportunities to update the UI.
+MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 2
 # Apify media collection can exceed Streamlit Cloud's execution window when a
 # whole campaign is submitted at once. Save each smaller scrape window before
 # yielding and keep every completed Gemini row restart-safe.
@@ -2123,6 +2125,10 @@ def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
     if requested_id and not restored:
         st.session_state.runtime_checkpoint_restore_failed_v68_96 = True
 
+    st.session_state.runtime_opened_from_recovery_v68_104 = bool(
+        requested_id and restored
+    )
+
     # A bookmarked run with no restored rows may have hit a transient remote
     # read failure. Keep retrying on later reruns instead of permanently
     # accepting an empty replacement session.
@@ -2130,6 +2136,31 @@ def _restore_runtime_checkpoint_v68_15(*, persist: bool = True) -> None:
     _sync_runtime_query_v68_15()
     if persist:
         _persist_runtime_checkpoint_v68_15()
+
+
+def _start_separate_batch_v68_104() -> None:
+    """Detach this browser session from a recovery batch without deleting it."""
+    st.session_state.batch_df = pd.DataFrame()
+    st.session_state.selected_df = pd.DataFrame()
+    st.session_state.tagged_df = pd.DataFrame()
+    st.session_state.metrics_only_df_v68_86 = pd.DataFrame()
+    st.session_state.metrics_only_active_v68_86 = False
+    st.session_state.metrics_only_next_position_v68_86 = 0
+    st.session_state.metrics_only_fingerprint_v68_86 = ""
+    st.session_state.metrics_only_purpose_v68_95 = METRICS_ONLY_PURPOSE_EXPORT_V68_95
+    st.session_state.metrics_only_previous_analysis_mode_v68_95 = "AI tagging"
+    st.session_state.tagging_job_active_v68_43 = False
+    st.session_state.creator_profile_metrics_v68_51 = pd.DataFrame()
+    st.session_state.creator_profile_updated_at_v68_51 = ""
+    st.session_state.creator_profile_aliases_v68_67 = {}
+    st.session_state.tiktok_follower_attempted_keys_v68_65 = []
+    st.session_state.last_message = ""
+    st.session_state.runtime_opened_from_recovery_v68_104 = False
+    reset_review_state_for_new_tagging_run()
+    reset_date_filter_state_v68()
+    _new_runtime_recovery_id_v68_44()
+    st.session_state.step = 2
+    _persist_runtime_checkpoint_v68_15()
 
 
 # Display values and engagement metrics
@@ -9246,6 +9277,21 @@ st.markdown(
 )
 step_strip(st.session_state.step)
 _render_continue_later_v68_85()
+if st.session_state.get("runtime_opened_from_recovery_v68_104", False):
+    recovery_note_v68_104, recovery_action_v68_104 = st.columns([4, 1])
+    with recovery_note_v68_104:
+        st.info(
+            "This recovery link opens one saved batch. Do not share it between "
+            "people who need separate tagging runs."
+        )
+    with recovery_action_v68_104:
+        if st.button(
+            "Start a separate batch",
+            key="start_separate_recovery_batch_v68_104",
+            width="stretch",
+        ):
+            _start_separate_batch_v68_104()
+            st.rerun()
 if st.session_state.pop("runtime_resume_notice_v68_15", False):
     st.markdown(
         "<div class='good-note'>Your previous batch was restored after reconnecting.</div>",
