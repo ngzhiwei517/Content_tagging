@@ -1203,8 +1203,10 @@ def campaign_track_catalog_status_v68_36(track_value: str) -> Dict[str, str]:
 def render_uploaded_track_catalog_feedback_v68_62(
     track: str,
     artist: str = "",
+    *,
+    key: str = "",
 ) -> str:
-    """Confirm an uploaded track and return the manual or matched artist."""
+    """Optionally confirm a track without blocking normal upload reruns."""
     track = safe_str(track)
     artist = safe_str(artist)
     if not track:
@@ -1212,8 +1214,38 @@ def render_uploaded_track_catalog_feedback_v68_62(
     lookup_value = " - ".join(
         part for part in [artist, track] if part
     )
-    with st.spinner("Checking the track name..."):
-        track_status = campaign_track_catalog_status_v68_36(lookup_value)
+    key_suffix = safe_str(key) or hashlib.sha1(
+        lookup_value.encode("utf-8")
+    ).hexdigest()[:12]
+    status_key = f"track_catalog_status_v68_105_{key_suffix}"
+    lookup_key = f"track_catalog_lookup_v68_105_{key_suffix}"
+    if st.button(
+        "Confirm track now (optional)",
+        key=f"track_catalog_check_v68_105_{key_suffix}",
+        help=(
+            "Confirms the title and may fill the artist before upload. "
+            "Drama audio comparison still checks the official reference "
+            "automatically during tagging."
+        ),
+        width="stretch",
+    ):
+        with st.spinner("Checking the track name..."):
+            st.session_state[status_key] = campaign_track_catalog_status_v68_36(
+                lookup_value
+            )
+            st.session_state[lookup_key] = lookup_value
+
+    track_status = (
+        st.session_state.get(status_key, {})
+        if safe_str(st.session_state.get(lookup_key)) == lookup_value
+        else {}
+    )
+    if not isinstance(track_status, dict) or not track_status:
+        st.caption(
+            "You can add the file immediately. For drama posts, Taggy will "
+            "still check the official audio automatically during tagging."
+        )
+        return artist
     if track_status.get("status") == "matched":
         matched_title = " — ".join(
             part for part in [
@@ -9434,6 +9466,7 @@ if st.session_state.step == 2:
                     shared_artist = render_uploaded_track_catalog_feedback_v68_62(
                         shared_track,
                         shared_artist,
+                        key="shared_upload",
                     )
                 for f in files:
                     file_key = hashlib.sha1(
@@ -9465,6 +9498,7 @@ if st.session_state.step == 2:
                         fallback_artist = render_uploaded_track_catalog_feedback_v68_62(
                             fallback_track,
                             fallback_artist,
+                            key=f"uploaded_file_{file_key}",
                         )
                     fallback_track = safe_str(fallback_track)
                     try:
@@ -9572,34 +9606,12 @@ if st.session_state.step == 2:
                 help="Add the artist only when songs share the same title or the catalogue match is incorrect.",
                 key="pasted_campaign_artist_v68_39",
             )
-        campaign_track_lookup = " - ".join(
-            part for part in [safe_str(paste_artist), safe_str(paste_track)] if part
-        )
-        track_status: Dict[str, str] = {}
         with c1:
-            if safe_str(paste_track):
-                with st.spinner("Checking the track name..."):
-                    track_status = campaign_track_catalog_status_v68_36(campaign_track_lookup)
-                if track_status.get("status") == "matched":
-                    matched_title = " — ".join(
-                        part for part in [
-                            safe_str(track_status.get("artist_name")),
-                            safe_str(track_status.get("track_name")),
-                        ] if part
-                    )
-                    st.success(
-                        f"Track confirmed in Apple Music/iTunes: {matched_title}. "
-                        "If this is not the intended artist, fill in the optional Artist field."
-                    )
-                else:
-                    st.warning(
-                        f"Could not confirm ‘{campaign_track_lookup}’ in Apple Music/iTunes. "
-                        "Check the spelling. You can still continue because regional, niche, "
-                        "or unreleased tracks may not be listed."
-                    )
-        resolved_paste_artist = safe_str(paste_artist)
-        if not resolved_paste_artist and track_status.get("status") == "matched":
-            resolved_paste_artist = safe_str(track_status.get("artist_name"))
+            resolved_paste_artist = render_uploaded_track_catalog_feedback_v68_62(
+                paste_track,
+                paste_artist,
+                key="pasted_links",
+            )
         with c3:
             market_choice = st.selectbox("Market", MARKET_OPTIONS, index=0)
             paste_market = "" if market_choice == "Other / no market" else market_choice

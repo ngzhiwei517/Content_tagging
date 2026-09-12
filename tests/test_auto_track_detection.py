@@ -51,11 +51,11 @@ class AutoTrackDetectionTests(unittest.TestCase):
         self.assertIn("disabled=not safe_str(paste_track)", app_source)
         self.assertIn("Enter a track name before adding links to the batch.", app_source)
         self.assertIn('"Track": safe_str(paste_track)', app_source)
-        self.assertIn('resolved_paste_artist = safe_str(paste_artist)', app_source)
         self.assertIn(
-            'not resolved_paste_artist and track_status.get("status") == "matched"',
+            "resolved_paste_artist = render_uploaded_track_catalog_feedback_v68_62(",
             app_source,
         )
+        self.assertIn('key="pasted_links"', app_source)
         self.assertIn('"Campaign Artist": resolved_paste_artist', app_source)
 
     def test_pasted_track_input_keeps_artist_disambiguation_without_drama_audio_banner(self):
@@ -68,8 +68,13 @@ class AutoTrackDetectionTests(unittest.TestCase):
             'paste_track = st.text_input(\n                "Track name"',
             paste_section,
         )
-        self.assertIn("fill in the optional Artist field", paste_section)
-        self.assertIn("campaign_track_lookup", paste_section)
+        self.assertIn("songs share the same title", paste_section)
+        self.assertIn('"Confirm track now (optional)"', app_source)
+        self.assertIn(
+            '"still check the official audio automatically during tagging."',
+            app_source,
+        )
+        self.assertNotIn("campaign_track_lookup", paste_section)
 
 
 if __name__ == "__main__":
