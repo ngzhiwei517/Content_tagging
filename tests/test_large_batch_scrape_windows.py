@@ -85,9 +85,19 @@ class _MemoryCheckpointObjects:
 
 
 class _FailPartialCheckpointObjects(_MemoryCheckpointObjects):
+    def __init__(self):
+        super().__init__()
+        self.database_restarting = True
+
     def save(self, key, payload):
-        if "/partial_" in key and key.endswith("/snapshot.json"):
-            raise RuntimeError("synthetic remote checkpoint failure")
+        if (
+            self.database_restarting
+            and "/partial_" in key
+            and key.endswith("/snapshot.json")
+        ):
+            raise RuntimeError(
+                "57P03: the database system is not accepting connections"
+            )
         super().save(key, payload)
 
 
@@ -653,7 +663,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         self.assertEqual(len(tag_calls), 12)
         self.assertTrue(all(count == 1 for count in tag_calls.values()))
 
-    def test_remote_snapshot_failure_pauses_after_one_bounded_tagging_unit(self):
+    def test_database_restart_preserves_rows_and_resume_skips_paid_work(self):
         selected = pd.DataFrame(
             [
                 {
@@ -753,12 +763,28 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
                 "test-model",
             )
 
-        self.assertIsInstance(result, pd.DataFrame)
-        self.assertTrue(result.empty)
-        self.assertEqual(len(tag_calls), 5)
-        self.assertTrue(
-            any("CHECKPOINT_STORAGE" in message for message in fake_st.errors)
-        )
+            self.assertIsInstance(result, pd.DataFrame)
+            self.assertTrue(result.empty)
+            self.assertEqual(len(tag_calls), 5)
+            self.assertEqual(len(fake_st.session_state.tagged_df), 5)
+            self.assertTrue(
+                any("CHECKPOINT_STORAGE" in message for message in fake_st.errors)
+            )
+
+            # Supabase accepts writes again. Resume from the same recovery ID;
+            # the five locally completed rows must be skipped rather than sent
+            # to the paid tagging provider for a second time.
+            remote.database_restarting = False
+            resumed = runner(
+                selected,
+                "gemini-key",
+                "apify-token",
+                "test-model",
+            )
+
+        self.assertIsNone(resumed)
+        self.assertEqual(len(tag_calls), 10)
+        self.assertEqual(len(set(tag_calls)), 10)
 
     def test_apify_partial_failure_saves_direct_result_and_resumes_only_failed_links(self):
         selected = pd.DataFrame(
