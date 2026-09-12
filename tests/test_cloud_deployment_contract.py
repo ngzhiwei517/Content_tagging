@@ -103,8 +103,8 @@ class CloudDeploymentContractTests(unittest.TestCase):
             with self.subTest(setting=setting):
                 self.assertIn(setting, DOCKERFILE)
 
-    def test_cloud_run_scaling_uses_one_session_per_instance(self):
-        self.assertIn("--concurrency=1", CLOUD_RUN_FRONTEND_GUIDE)
+    def test_cloud_run_scaling_allows_streamlit_auxiliary_requests(self):
+        self.assertIn("--concurrency=3", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("--max-instances=10", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("--session-affinity", CLOUD_RUN_FRONTEND_GUIDE)
 
