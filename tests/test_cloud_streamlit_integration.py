@@ -25,6 +25,30 @@ class CloudStreamlitIntegrationTests(unittest.TestCase):
         ):
             self.assertGreaterEqual(self.app_source.count(f'"{key}"'), 2)
 
+    def test_cloud_progress_polling_does_not_rerun_the_full_app(self):
+        poll_start = self.app_source.index(
+            "def _render_cloud_tagging_status_v68_103("
+        )
+        poll_end = self.app_source.index(
+            "def _render_cloud_tagging_poll_fragment_v68_103("
+        )
+        poll_source = self.app_source[poll_start:poll_end]
+        self.assertNotIn("time.sleep", poll_source)
+        self.assertNotIn("_persist_runtime_checkpoint_v68_15()\n        time.sleep", poll_source)
+        self.assertIn("st.fragment(run_every=poll_seconds)", self.app_source)
+
+    def test_cloud_progress_polling_does_not_checkpoint_unchanged_status(self):
+        poll_start = self.app_source.index(
+            "def _render_cloud_tagging_status_v68_103("
+        )
+        poll_end = self.app_source.index(
+            "def _render_cloud_tagging_poll_fragment_v68_103("
+        )
+        poll_source = self.app_source[poll_start:poll_end]
+        completed_start = poll_source.index('if cloud_status == "completed":')
+        before_completion = poll_source[:completed_start]
+        self.assertNotIn("_persist_runtime_checkpoint_v68_15", before_completion)
+
     def test_deployment_contract_is_additive_and_secret_managed(self):
         schema = (ROOT / "cloud_job_schema.sql").read_text(encoding="utf-8")
         self.assertIn("create table if not exists public.taggy_cloud_jobs", schema)

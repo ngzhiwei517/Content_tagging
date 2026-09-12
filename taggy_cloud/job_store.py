@@ -508,8 +508,25 @@ class SupabaseCloudJobStore:
             raise RuntimeError("Cloud job storage returned invalid post rows.")
         return [dict(row) for row in rows if isinstance(row, dict)]
 
+    def list_post_statuses(self, job_id: str) -> List[Dict[str, Any]]:
+        """Load only the small fields needed by frequent progress polling."""
+        job_id = validate_id(job_id)
+        response = self._request(
+            "get",
+            f"{self.url}/rest/v1/taggy_cloud_job_posts",
+            headers=self._headers(),
+            params={
+                "job_id": f"eq.{job_id}",
+                "select": "status",
+            },
+        )
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise RuntimeError("Cloud job storage returned invalid post statuses.")
+        return [dict(row) for row in rows if isinstance(row, dict)]
+
     def summary(self, job_id: str) -> Dict[str, Any]:
-        return summarize_job(self.get_job(job_id), self.list_posts(job_id))
+        return summarize_job(self.get_job(job_id), self.list_post_statuses(job_id))
 
     def next_pending_position(self, job_id: str) -> Optional[int]:
         job_id = validate_id(job_id)

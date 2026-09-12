@@ -29,11 +29,14 @@ def response(status, payload):
 class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
+        self.calls = []
 
-    def get(self, *_args, **_kwargs):
+    def get(self, *args, **kwargs):
+        self.calls.append(("get", args, kwargs))
         return self.responses.pop(0)
 
-    def post(self, *_args, **_kwargs):
+    def post(self, *args, **kwargs):
+        self.calls.append(("post", args, kwargs))
         return self.responses.pop(0)
 
 
@@ -179,6 +182,36 @@ class CloudJobStoreTests(unittest.TestCase):
                 "gemini-3.1-flash-lite",
                 [post(1)],
             )
+
+    def test_supabase_summary_fetches_status_without_post_payloads(self):
+        session = FakeSession(
+            [
+                response(
+                    200,
+                    [
+                        {
+                            "job_id": self.job_id,
+                            "recovery_id": self.recovery_id,
+                            "model": "gemini-3.1-flash-lite",
+                            "total_posts": 2,
+                        }
+                    ],
+                ),
+                response(200, [{"status": "completed"}, {"status": "running"}]),
+            ]
+        )
+        store = SupabaseCloudJobStore(
+            "https://example.supabase.co",
+            "server-key",
+            session=session,
+            retry_delays=(),
+        )
+
+        summary = store.summary(self.job_id)
+
+        self.assertEqual(1, summary["completed_posts"])
+        self.assertEqual(1, summary["running_posts"])
+        self.assertEqual("status", session.calls[1][2]["params"]["select"])
 
 
 if __name__ == "__main__":
