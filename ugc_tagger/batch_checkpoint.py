@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ CHECKPOINT_VERSION = 2
 DEFAULT_CHUNK_SIZE = 50
 DEFAULT_RETENTION_HOURS = 72
 _SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
+_LOCAL_WORKER_POOL_GUARD = threading.Lock()
 
 
 def _utc_now() -> str:
@@ -183,6 +185,17 @@ class BatchCheckpointStore:
 
     def _execution_lock_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / ".execution_lock.json"
+
+    def _global_execution_lock_path(self, slot_id: int = 1) -> Path:
+        """Return one process-local worker slot path.
+
+        Slot one retains the previous filename so a rolling deployment still
+        respects a lease held by the earlier single-worker implementation.
+        """
+        slot_id = max(1, int(slot_id))
+        if slot_id == 1:
+            return self.root / ".global_execution_lock.json"
+        return self.root / f".global_execution_lock.{slot_id:03d}.json"
 
     @staticmethod
     def _write_local_json(path: Path, payload) -> None:
@@ -498,7 +511,7 @@ class BatchCheckpointStore:
             reconciled["pause_reason"] = ""
         elif reconciled.get("status") == "completed":
             reconciled["status"] = "running"
-        # Partial snapshots already carry their row positions. Keep frequent
+        # Per-post objects already carry their row positions. Keep frequent
         # reconciliation local; completed chunks and explicit pause states
         # still update the remote manifest.
         return (
@@ -585,17 +598,6 @@ class BatchCheckpointStore:
             return self._atomic_write_json(path, payload)
         self._write_local_json(path, payload)
         return False
-
-    def save_partial_snapshot(self, job_id: str, chunk_index: int) -> bool:
-        """Persist one compact snapshot for the current unfinished chunk."""
-        partial = self.load_partial_chunk_results(job_id, chunk_index)
-        if partial.empty:
-            return False
-        payload = _json_safe(dataframe_to_payload(partial.reset_index(drop=True)))
-        return self._atomic_write_json(
-            self._partial_snapshot_path(job_id, chunk_index),
-            payload,
-        )
 
     def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
         """Return saved row positions for one incomplete chunk."""
@@ -851,6 +853,116 @@ class BatchCheckpointStore:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _read_global_execution_lock(self, slot_id: int = 1) -> Dict:
+        path = self._global_execution_lock_path(slot_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def try_acquire_global_execution(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 7200,
+        max_workers: int = 3,
+    ) -> bool:
+        """Claim one bounded local worker slot when no shared backend exists."""
+        recovery_id = self._validated_job_id(recovery_id)
+        job_id = self._validated_job_id(job_id)
+        owner_id = self._validated_job_id(owner_id)
+        worker_limit = max(1, min(16, int(max_workers)))
+        lease_until = int(time.time()) + max(60, int(lease_seconds))
+
+        with _LOCAL_WORKER_POOL_GUARD:
+            # The same recovery job must never occupy two slots after its link
+            # is opened in another tab or browser session.
+            for slot_id in range(1, 17):
+                existing = self._read_global_execution_lock(slot_id)
+                try:
+                    existing_until = int(existing.get("lease_until", 0) or 0)
+                except (TypeError, ValueError):
+                    existing_until = 0
+                if existing_until <= int(time.time()):
+                    continue
+                if (
+                    existing.get("recovery_id") == recovery_id
+                    and existing.get("job_id") == job_id
+                ):
+                    if existing.get("owner_id") != owner_id:
+                        return False
+                    path = self._global_execution_lock_path(slot_id)
+                    existing["lease_until"] = lease_until
+                    self._write_local_json(path, existing)
+                    return True
+
+            for slot_id in range(1, worker_limit + 1):
+                path = self._global_execution_lock_path(slot_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                for _attempt in range(3):
+                    existing = self._read_global_execution_lock(slot_id)
+                    if existing:
+                        try:
+                            existing_until = int(existing.get("lease_until", 0) or 0)
+                        except (TypeError, ValueError):
+                            existing_until = 0
+                        if existing_until > int(time.time()):
+                            break
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            break
+                    try:
+                        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                    except FileExistsError:
+                        continue
+                    try:
+                        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                            json.dump(
+                                {
+                                    "slot_id": slot_id,
+                                    "recovery_id": recovery_id,
+                                    "job_id": job_id,
+                                    "owner_id": owner_id,
+                                    "lease_until": lease_until,
+                                },
+                                handle,
+                            )
+                        return True
+                    except Exception:
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        raise
+        return False
+
+    def release_global_execution(
+        self,
+        recovery_id: str,
+        job_id: str,
+        owner_id: str,
+    ) -> None:
+        """Release every local slot matching this exact owner and job."""
+        expected = {
+            "recovery_id": self._validated_job_id(recovery_id),
+            "job_id": self._validated_job_id(job_id),
+            "owner_id": self._validated_job_id(owner_id),
+        }
+        with _LOCAL_WORKER_POOL_GUARD:
+            for slot_id in range(1, 17):
+                path = self._global_execution_lock_path(slot_id)
+                existing = self._read_global_execution_lock(slot_id)
+                if any(existing.get(key) != value for key, value in expected.items()):
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def mark_paused(self, manifest: Dict, *, quota: bool = False) -> Dict:
         """Pause without persisting raw provider errors or credentials."""

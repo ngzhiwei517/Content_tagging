@@ -6,6 +6,7 @@ This guide shows where each responsibility lives. It is intentionally short: use
 
 ```text
 app.py
+  -> ugc_tagger/tagging_worker_queue.py (bounded local/Streamlit worker admission)
   -> taggy_cloud/client.py (optional cloud job submission and polling)
   -> taggy_cloud/api.py (FastAPI control plane and one-post worker endpoint)
     -> taggy_cloud/job_store.py (durable per-post Supabase state)
@@ -31,8 +32,9 @@ app.py
 | `taggy_cloud/` | Optional FastAPI/Cloud Tasks service, Streamlit client, per-post durable state, bounded retries and safe serialization | Multi-user beta job orchestration needs to change |
 | `cloud_job_schema.sql` | Additive Supabase tables and transactional functions for cloud jobs | The per-job/per-post persistence contract changes |
 | `Dockerfile` and `requirements-cloud.txt` | Cloud Run service build | Cloud service dependencies or container startup changes |
-| `ugc_tagger/batch_checkpoint.py` | Secret-free local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
-| `ugc_tagger/persistent_checkpoint.py` | Optional local, Supabase REST or Postgres checkpoint storage | Recovery after restart/redeployment or backend diagnostics need to change |
+| `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
+| `ugc_tagger/persistent_checkpoint.py` | Optional Supabase/Postgres checkpoint storage, worker-pool RPC calls and transient database retries | Shared recovery, multi-user admission or retry behavior needs to change |
+| `ugc_tagger/tagging_worker_queue.py` | Bounded multi-user worker admission with a local development fallback | Tagging concurrency or capacity behavior needs to change |
 | `ugc_tagger/direct_post_scraper.py` | Direct TikTok/Instagram post retrieval before paid fallback | Public retrieval or direct metric normalization needs to change |
 | `ugc_tagger/creator_profile_enrichment.py` | Three-month creator activity and profile-metric enrichment | Top Creator profile collection or backfill needs to change |
 | `ugc_tagger/dashboard_assistant.py` | Taggy trusted help, current-page context and grounded dashboard assistance | Taggy guidance or dashboard prompts need to change |

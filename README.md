@@ -42,7 +42,7 @@ The default model is **Gemini 3.1 Flash-Lite**. The app starts with metadata and
 
 Large batches are processed in protected chunks and saved after each completed result. Interrupted jobs resume from the first unfinished post without repeating completed Gemini analysis.
 
-Checkpoints are local by default. Supabase/Postgres can optionally provide recovery after an app restart or redeployment. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
+Checkpoints are local by default. Supabase/Postgres can optionally provide recovery after an app restart or redeployment and coordinate a bounded multi-user tagging pool. Three tagging batches may run concurrently by default; excess starts are declined without entering a visible queue and remain recoverable. Each completed post is stored separately, and transient Postgres `57014` cancellations are retried with bounded backoff. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
 
 For a multi-user beta, an optional FastAPI, Cloud Tasks and Cloud Run backend
 moves AI tagging out of Streamlit. Different user batches can run concurrently,
