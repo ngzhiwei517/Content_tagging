@@ -1745,6 +1745,9 @@ def _checkpoint_setting_v68_44(secret_name: str, environment_name: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def _persistent_checkpoint_backend_v68_44(
+    gcs_bucket: str,
+    gcs_project: str,
+    gcs_prefix: str,
     database_url: str,
     supabase_url: str,
     supabase_key: str,
@@ -1752,6 +1755,9 @@ def _persistent_checkpoint_backend_v68_44(
 ):
     return create_persistent_checkpoint_backend(
         PersistentCheckpointConfig(
+            gcs_bucket=gcs_bucket,
+            gcs_project=gcs_project,
+            gcs_prefix=gcs_prefix or "taggy-checkpoints",
             database_url=database_url,
             supabase_url=supabase_url,
             supabase_key=supabase_key,
@@ -1804,6 +1810,10 @@ def _save_runtime_checkpoint_remote_v68_106(
 def _configured_checkpoint_backend_v68_44():
     try:
         return _persistent_checkpoint_backend_v68_44(
+            _checkpoint_setting_v68_44("gcs_bucket", "CHECKPOINT_GCS_BUCKET"),
+            _checkpoint_setting_v68_44("gcs_project", "CHECKPOINT_GCS_PROJECT"),
+            _checkpoint_setting_v68_44("gcs_prefix", "CHECKPOINT_GCS_PREFIX")
+            or "taggy-checkpoints",
             _checkpoint_setting_v68_44("database_url", "CHECKPOINT_DATABASE_URL"),
             _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL"),
             _checkpoint_setting_v68_44("supabase_key", "CHECKPOINT_SUPABASE_KEY"),
@@ -1986,36 +1996,38 @@ def _show_runtime_save_dialog_v68_44() -> None:
         st.session_state.get("runtime_checkpoint_remote_status_v68_96")
     )
     if remote_status == "verified":
-        st.success("Saved to the recovery database. This link will work after an app restart.")
+        st.success(
+            "Saved to private recovery storage. This link will work after an app restart."
+        )
     elif remote_status == "auth_failed":
         st.error(
-            "Supabase rejected the checkpoint key. In Streamlit Secrets, use a current server-side "
-            "secret key (sb_secret_...) and reboot the app."
+            "Recovery storage authentication failed. Ask the app owner to check the service "
+            "account or server-side checkpoint credentials."
         )
     elif remote_status == "table_missing":
         st.error(
-            "The Supabase checkpoint table was not found. Run checkpoint_schema.sql once in the "
-            "project's SQL Editor, then try again."
+            "The configured recovery database table was not found. Ask the app owner to check "
+            "the checkpoint setup, then try again."
         )
     elif remote_status == "permission_denied":
         st.error(
-            "Supabase denied access to the checkpoint table. Use a server-side secret key rather "
-            "than a publishable or anon key."
+            "Recovery storage denied access. Ask the app owner to check the service account or "
+            "server-side checkpoint permissions."
         )
     elif remote_status in {"timeout", "network_failed", "rate_limited", "service_unavailable"}:
         st.error(
-            "Supabase was temporarily unavailable or the save took too long. Wait a moment and "
-            "click Continue later again."
+            "Recovery storage was temporarily unavailable or the save took too long. "
+            "Wait a moment and click Continue later again."
         )
     elif remote_status in {"save_failed", "http_failed", "verify_failed", "read_failed"}:
         st.error(
-            "The database save could not be verified. This link may stop working after an app restart. "
-            "Ask the app owner to check the Supabase checkpoint settings."
+            "The recovery save could not be verified. This link may stop working after an "
+            "app restart. Ask the app owner to check the checkpoint storage settings."
         )
     else:
         st.warning(
-            "This batch is saved only on the current app server. Configure Supabase/Postgres before "
-            "relying on this link after an app restart."
+            "This batch is saved only on the current app server. Configure durable recovery "
+            "storage before relying on this link after an app restart."
         )
     st.caption("Copy and keep this private recovery link.")
     if recovery_url:
@@ -10754,7 +10766,8 @@ elif st.session_state.step == 5:
         if st.session_state.get("runtime_checkpoint_restore_failed_v68_96"):
             st.error(
                 "This recovery link was recognised, but its saved batch could not be loaded from the "
-                "recovery database. Ask the app owner to check the Supabase checkpoint settings before rerunning."
+                "private recovery storage. Ask the app owner to check the checkpoint settings "
+                "before rerunning."
             )
         else:
             st.markdown("<div class='warn-note'>No tagged rows yet.</div>", unsafe_allow_html=True)

@@ -42,7 +42,7 @@ The default model is **Gemini 3.1 Flash-Lite**. The app starts with metadata and
 
 Large batches are processed in protected chunks and saved after each completed result. Interrupted jobs resume from the first unfinished post without repeating completed Gemini analysis.
 
-Checkpoints are local by default. Supabase/Postgres can optionally provide recovery after an app restart or redeployment and coordinate a bounded multi-user tagging pool. Three tagging batches may run concurrently by default; excess starts are declined without entering a visible queue and remain recoverable. Each completed post is stored separately, and transient Postgres `57014` cancellations are retried with bounded backoff. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
+Checkpoints are local by default. Google Cloud Storage, Supabase, or Postgres can optionally provide recovery after an app restart or redeployment. Supabase/Postgres can also coordinate a bounded multi-user tagging pool: three tagging batches may run concurrently by default, while excess starts are declined without entering a visible queue and remain recoverable. Each completed post is stored separately, and transient Postgres `57014` cancellations are retried with bounded backoff. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
 
 Open the plain app URL for a new independent batch. Use a batch's private **Continue later** link to reopen that specific run.
 

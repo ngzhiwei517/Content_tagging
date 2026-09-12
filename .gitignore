@@ -32,6 +32,7 @@ outputs/
 !package.json
 !tsconfig.json
 !ugc_tagger/taggy_knowledge.json
+!docs/gcs-checkpoint-lifecycle.json
 !creative_knowledge/hashtag_rules.json
 !creative_knowledge/keyword_rules.json
 !creative_knowledge/market_rules.json

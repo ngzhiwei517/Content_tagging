@@ -1,8 +1,32 @@
 # Persistent batch checkpoints
 
 Local JSON checkpoints remain enabled with no configuration. To retain batches
-when Streamlit replaces or redeploys the app container, configure either
-Supabase REST or a direct Postgres connection.
+when Streamlit or Cloud Run replaces or redeploys the app container, configure
+Google Cloud Storage, Supabase REST, or a direct Postgres connection.
+
+## Google Cloud Storage (recommended for Cloud Run)
+
+Cloud Run can use its service account automatically, so no storage credential
+needs to be added to Streamlit Secrets. Configure the bucket name:
+
+```toml
+[checkpoint]
+gcs_bucket = "taggy-508408-checkpoints"
+gcs_project = "taggy-508408"
+gcs_prefix = "taggy-checkpoints"
+```
+
+The equivalent environment variables are `CHECKPOINT_GCS_BUCKET`, optional
+`CHECKPOINT_GCS_PROJECT`, and optional `CHECKPOINT_GCS_PREFIX`. When a GCS
+bucket is configured, it takes precedence over the database settings. Existing
+Supabase settings may remain attached as a rollback option.
+
+Give the Cloud Run service account `roles/storage.objectUser` on this bucket
+only. Keep uniform bucket-level access and public access prevention enabled.
+The included `docs/gcs-checkpoint-lifecycle.json` deletes checkpoint objects
+after 30 days.
+
+## Database alternatives
 
 1. Run the current `checkpoint_schema.sql` in Supabase SQL Editor or Postgres.
    Existing deployments must run it again after this update because it also
@@ -53,7 +77,7 @@ state and sanitized tagging objects. Gemini/Apify/database credentials,
 downloaded media, binary media fields and local media paths are excluded.
 Recovery IDs are private bearer identifiers and should not be shared publicly.
 
-Progress is saved locally immediately. Normal Supabase/Postgres autosaves run
+Progress is saved locally immediately. Normal remote autosaves run
 in bounded background workers so a slow recovery database cannot block uploads,
 filters or another user's Streamlit session. Rapid reruns for the same recovery
 ID are coalesced to the newest pending state. During tagging, completed rows are
@@ -77,7 +101,7 @@ Opening the plain app URL starts a new independent batch, so separate tabs can
 run separate jobs without being redirected to the last unfinished batch.
 
 Remote checkpointing starts only after the current workflow contains at least
-one post. Opening an empty app session does not create a Supabase/Postgres row;
+one post. Opening an empty app session does not create a remote object or row;
 the local fallback remains available from the first render.
 
 ## Shared tagging worker pool and write pattern

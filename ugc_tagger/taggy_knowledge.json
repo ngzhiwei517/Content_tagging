@@ -348,7 +348,7 @@
       "Will progress survive if I turn off my computer?"
     ],
     "keywords": ["close website", "close browser", "reopen", "continue tomorrow", "turn off computer", "resume tagging"],
-    "answer": "Yes, after the current protected chunk has saved. Choose Continue later and bookmark the private recovery link, then reopen that exact link. Local recovery works while the local checkpoint remains; recovery after a cloud restart or redeployment requires the optional Supabase/Postgres checkpoint backend to be configured."
+    "answer": "Yes, after the current protected chunk has saved. Choose Continue later and bookmark the private recovery link, then reopen that exact link. Local recovery works while the local checkpoint remains; recovery after a cloud restart or redeployment requires durable recovery storage such as Google Cloud Storage, Supabase, or Postgres."
   },
   {
     "id": "recovery_link",
@@ -410,9 +410,9 @@
     "questions": [
       "Does recovery save my API keys?",
       "Are downloaded videos stored?",
-      "What data is saved to Supabase?"
+      "What data is saved to recovery storage?"
     ],
-    "keywords": ["what is saved", "store api keys", "downloaded media", "privacy", "supabase data", "recovery payload"],
+    "keywords": ["what is saved", "store api keys", "downloaded media", "privacy", "cloud storage", "supabase data", "recovery payload"],
     "answer": "Recovery stores only allowlisted workflow state and sanitized tagging results needed to continue. It excludes provider and database credentials, downloaded or binary media, and local media paths. Media may be handled temporarily for analysis, but it must not be persisted in recovery or committed to the repository."
   },
   {

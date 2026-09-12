@@ -18,6 +18,7 @@ import requests
 
 from ugc_tagger.batch_checkpoint import BatchCheckpointStore
 from ugc_tagger.persistent_checkpoint import (
+    GoogleCloudStorageCheckpointBackend,
     PersistentCheckpointConfig,
     PostgresCheckpointBackend,
     RecoveryCheckpointObjects,
@@ -96,6 +97,57 @@ class ChunkWriteFailureObjectStore(MemoryObjectStore):
         if "/chunk_" in key or key.startswith("chunk_"):
             raise RuntimeError("simulated remote chunk failure")
         super().save(key, payload)
+
+
+class FakeGcsError(RuntimeError):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+class FakeGcsBlob:
+    def __init__(self, objects, name):
+        self.objects = objects
+        self.name = name
+
+    def upload_from_string(self, value, **_kwargs):
+        self.objects[self.name] = value.encode("utf-8")
+
+    def download_as_bytes(self, **_kwargs):
+        if self.name not in self.objects:
+            raise FakeGcsError("missing", 404)
+        return self.objects[self.name]
+
+    def delete(self, **_kwargs):
+        if self.name not in self.objects:
+            raise FakeGcsError("missing", 404)
+        self.objects.pop(self.name)
+
+
+class FakeGcsBucket:
+    def __init__(self, objects):
+        self.objects = objects
+
+    def blob(self, name):
+        return FakeGcsBlob(self.objects, name)
+
+
+class FakeGcsClient:
+    def __init__(self):
+        self.objects = {}
+        self.bucket_names = []
+
+    def bucket(self, name):
+        self.bucket_names.append(name)
+        return FakeGcsBucket(self.objects)
+
+    def list_blobs(self, bucket_name, *, prefix, **_kwargs):
+        self.bucket_names.append(bucket_name)
+        return [
+            FakeGcsBlob(self.objects, name)
+            for name in sorted(self.objects)
+            if name.startswith(prefix)
+        ]
 
 
 class PersistentLargeBatchTests(unittest.TestCase):
@@ -564,6 +616,79 @@ class SupabaseBackendTests(unittest.TestCase):
         self.assertIsNone(create_persistent_checkpoint_backend(PersistentCheckpointConfig()))
 
 
+class GoogleCloudStorageBackendTests(unittest.TestCase):
+    def test_round_trip_list_and_delete_use_namespaced_private_objects(self):
+        client = FakeGcsClient()
+        backend = GoogleCloudStorageCheckpointBackend(
+            "gs://taggy-test-checkpoints",
+            prefix="taggy-checkpoints",
+            client=client,
+        )
+        recovery_id = "a" * 32
+        backend.save(recovery_id, "runtime.json", {"state": {"step": 3}})
+        backend.save(recovery_id, "jobs/one/manifest.json", {"saved_rows": 2})
+
+        self.assertEqual(
+            backend.load(recovery_id, "runtime.json"),
+            {"state": {"step": 3}},
+        )
+        self.assertEqual(
+            backend.list_prefix(recovery_id, "jobs/one/"),
+            {"jobs/one/manifest.json": {"saved_rows": 2}},
+        )
+        self.assertEqual(
+            sorted(client.objects),
+            [
+                f"taggy-checkpoints/{recovery_id}/jobs/one/manifest.json",
+                f"taggy-checkpoints/{recovery_id}/runtime.json",
+            ],
+        )
+
+        backend.delete(recovery_id, "runtime.json")
+        self.assertIsNone(backend.load(recovery_id, "runtime.json"))
+        backend.delete_prefix(recovery_id, "jobs/one/")
+        self.assertEqual(client.objects, {})
+
+    def test_missing_delete_is_idempotent(self):
+        backend = GoogleCloudStorageCheckpointBackend(
+            "taggy-test-checkpoints",
+            client=FakeGcsClient(),
+        )
+        backend.delete("b" * 32, "runtime.json")
+
+    def test_gcs_takes_precedence_over_database_backends(self):
+        sentinel = object()
+        config = PersistentCheckpointConfig(
+            gcs_bucket="taggy-test-checkpoints",
+            database_url="postgresql://should-not-be-used",
+            supabase_url="https://should-not-be-used.supabase.co",
+            supabase_key="should-not-be-used",
+        )
+        with patch(
+            "ugc_tagger.persistent_checkpoint.GoogleCloudStorageCheckpointBackend",
+            return_value=sentinel,
+        ) as backend_class:
+            result = create_persistent_checkpoint_backend(config)
+
+        self.assertIs(result, sentinel)
+        backend_class.assert_called_once_with(
+            "taggy-test-checkpoints",
+            project="",
+            prefix="taggy-checkpoints",
+            timeout_seconds=20.0,
+        )
+
+    def test_gcs_http_errors_map_to_safe_statuses(self):
+        self.assertEqual(
+            checkpoint_error_code(FakeGcsError("forbidden", 403)),
+            "permission_denied",
+        )
+        self.assertEqual(
+            checkpoint_error_code(FakeGcsError("missing", 404)),
+            "object_missing",
+        )
+
+
 class PostgresBackendTests(unittest.TestCase):
     def test_recovery_id_and_object_key_are_parameterized(self):
         cursor = Mock()
@@ -664,6 +789,42 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         self.assertIn(
             "if not has_posts:",
             APP_SOURCE,
+        )
+
+    def test_app_wires_cloud_storage_before_existing_database_settings(self):
+        settings = {
+            "gcs_bucket": "taggy-test-checkpoints",
+            "gcs_project": "taggy-test-project",
+            "gcs_prefix": "taggy-test-prefix",
+            "database_url": "postgresql://rollback",
+            "supabase_url": "https://rollback.supabase.co",
+            "supabase_key": "rollback-key",
+            "table": "batch_checkpoint_objects",
+        }
+        calls = []
+        configured = load_function(
+            "_configured_checkpoint_backend_v68_44",
+            {
+                "_checkpoint_setting_v68_44": lambda name, _environment: settings[name],
+                "_persistent_checkpoint_backend_v68_44": lambda *args: calls.append(args)
+                or "backend",
+            },
+        )
+
+        self.assertEqual(configured(), "backend")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "taggy-test-checkpoints",
+                    "taggy-test-project",
+                    "taggy-test-prefix",
+                    "postgresql://rollback",
+                    "https://rollback.supabase.co",
+                    "rollback-key",
+                    "batch_checkpoint_objects",
+                )
+            ],
         )
 
     def test_reconnect_prefers_populated_checkpoint_over_newer_empty_shell(self):
