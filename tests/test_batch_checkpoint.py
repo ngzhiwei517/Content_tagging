@@ -388,10 +388,11 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
         )
         self.assertIn("store.save_completed_chunk(", self.source)
         self.assertIn("store.save_partial_row(", self.source)
-        self.assertIn("remote_row_saved is False", self.source)
+        self.assertIn("persist_remote=False", self.source)
+        self.assertIn("store.save_partial_snapshot(", self.source)
+        self.assertIn("remote_snapshot_saved is False", self.source)
         self.assertIn('getattr(store, "persistent_store", None)', self.source)
         self.assertIn("REMOTE_CHECKPOINT_WRITE_FAILED", self.source)
-        self.assertNotIn("store.save_partial_snapshot(", self.source)
         self.assertIn("on_result=on_result", self.source)
         self.assertIn("st.rerun()", self.source)
 

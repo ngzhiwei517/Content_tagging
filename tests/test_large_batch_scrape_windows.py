@@ -86,7 +86,7 @@ class _MemoryCheckpointObjects:
 
 class _FailPartialCheckpointObjects(_MemoryCheckpointObjects):
     def save(self, key, payload):
-        if "/partial_" in key and "/row_" in key:
+        if "/partial_" in key and key.endswith("/snapshot.json"):
             raise RuntimeError("synthetic remote checkpoint failure")
         super().save(key, payload)
 
@@ -657,7 +657,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
         self.assertEqual(len(tag_calls), 12)
         self.assertTrue(all(count == 1 for count in tag_calls.values()))
 
-    def test_remote_checkpoint_failure_pauses_before_second_paid_tag(self):
+    def test_remote_snapshot_failure_pauses_after_one_bounded_tagging_unit(self):
         selected = pd.DataFrame(
             [
                 {
@@ -760,7 +760,7 @@ class LargeBatchScrapeWindowTests(unittest.TestCase):
 
         self.assertIsInstance(result, pd.DataFrame)
         self.assertTrue(result.empty)
-        self.assertEqual(len(tag_calls), 1)
+        self.assertEqual(len(tag_calls), 5)
         self.assertTrue(
             any("CHECKPOINT_STORAGE" in message for message in fake_st.errors)
         )

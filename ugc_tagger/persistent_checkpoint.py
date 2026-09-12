@@ -126,7 +126,11 @@ class SupabaseCheckpointBackend:
         self.key = str(key or "").strip()
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
         self.timeout_seconds = float(timeout_seconds)
-        self.session = session or requests.Session()
+        # ``requests.Session`` is not guaranteed to be thread-safe. Keep an
+        # injected test session as-is, but give each Streamlit/background
+        # thread its own connection pool in production.
+        self.session = session
+        self._thread_local = threading.local()
         self._circuit_lock = threading.Lock()
         self._circuit_open_until = 0.0
         if not self.url.startswith(("https://", "http://")) or not self.key:
@@ -158,7 +162,13 @@ class SupabaseCheckpointBackend:
             raise CheckpointServiceUnavailable(
                 "Checkpoint storage is temporarily cooling down."
             )
-        operation = getattr(self.session, method)
+        request_session = self.session
+        if request_session is None:
+            request_session = getattr(self._thread_local, "session", None)
+            if request_session is None:
+                request_session = requests.Session()
+                self._thread_local.session = request_session
+        operation = getattr(request_session, method)
         last_error = None
         total_attempts = len(_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(total_attempts):

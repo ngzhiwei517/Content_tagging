@@ -55,8 +55,8 @@ class RuntimeCheckpointTests(unittest.TestCase):
         self.assertIn('"creator_profile_metrics_v68_51"', checkpoint_block)
         self.assertIn('"creator_profile_aliases_v68_67"', checkpoint_block)
 
-    def test_url_tracks_batch_and_step_for_reconnect(self):
-        self.assertIn('st.query_params["run"] = run_id', APP_SOURCE)
+    def test_private_recovery_url_tracks_batch_and_step_for_reconnect(self):
+        self.assertIn('urlencode({"run": run_id, "step": step})', APP_SOURCE)
         self.assertIn('st.query_params["step"]', APP_SOURCE)
         self.assertIn("Your previous batch was restored after reconnecting.", APP_SOURCE)
 
