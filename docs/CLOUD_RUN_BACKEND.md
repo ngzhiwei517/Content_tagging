@@ -80,7 +80,7 @@ The first deployment creates the service URL. `TAGGY_CLOUD_WORKER_URL` is added
 in the following update after that URL exists.
 
 ```bash
-gcloud run deploy taggy-job-backend --source=. --region=asia-southeast1 --allow-unauthenticated --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=1 --max-instances=3 --min-instances=0 --timeout=1800 --memory=2Gi --cpu=2 --set-env-vars="GOOGLE_CLOUD_PROJECT=taggy-508408,GOOGLE_CLOUD_LOCATION=asia-southeast1,TAGGY_CLOUD_TASKS_QUEUE=taggy-posts,TAGGY_MAX_POSTS_PER_JOB=100,TAGGY_MAX_POST_ATTEMPTS=5,TAGGY_TASK_DEADLINE_SECONDS=1800,TAGGY_POST_LEASE_SECONDS=2100" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest,TAGGY_BACKEND_API_KEY=taggy-backend-api-key:latest,TAGGY_TASK_API_KEY=taggy-task-api-key:latest"
+gcloud run deploy taggy-job-backend --source=. --region=asia-southeast1 --no-invoker-iam-check --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=1 --max-instances=3 --min-instances=0 --timeout=1800 --memory=2Gi --cpu=2 --set-env-vars="GOOGLE_CLOUD_PROJECT=taggy-508408,GOOGLE_CLOUD_LOCATION=asia-southeast1,TAGGY_CLOUD_TASKS_QUEUE=taggy-posts,TAGGY_MAX_POSTS_PER_JOB=100,TAGGY_MAX_POST_ATTEMPTS=5,TAGGY_TASK_DEADLINE_SECONDS=1800,TAGGY_POST_LEASE_SECONDS=2100" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest,TAGGY_BACKEND_API_KEY=taggy-backend-api-key:latest,TAGGY_TASK_API_KEY=taggy-task-api-key:latest"
 
 BACKEND_URL="$(gcloud run services describe taggy-job-backend --region=asia-southeast1 --format='value(status.url)')"
 gcloud run services update taggy-job-backend --region=asia-southeast1 --update-env-vars="TAGGY_CLOUD_WORKER_URL=${BACKEND_URL}"
@@ -108,7 +108,9 @@ Streamlit.
 
 ## Verification before raising concurrency
 
-1. Open the Cloud Run URL followed by `/healthz`; confirm `ready` is `true`.
+1. Open the Cloud Run URL followed by `/v1/health`; confirm `ready` is `true`.
+   (`/healthz` remains available locally, but some Google frontends reserve that
+   path before forwarding requests to the container.)
 2. Submit a one-post job in Taggy and complete Review and Export.
 3. Start three separate recovery links at the same time. Confirm all progress
    independently and completed posts are present in `taggy_cloud_job_posts`.

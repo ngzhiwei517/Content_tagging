@@ -79,6 +79,14 @@ class CloudApiTests(unittest.TestCase):
     def task_headers(self):
         return {"X-Taggy-Task-Key": "task-secret"}
 
+    def test_health_alias_reports_ready_without_credentials(self):
+        for path in ("/healthz", "/v1/health"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(200, response.status_code)
+                self.assertEqual("ok", response.json()["status"])
+                self.assertTrue(response.json()["ready"])
+
     def create_job(self):
         return self.client.post(
             "/v1/jobs",

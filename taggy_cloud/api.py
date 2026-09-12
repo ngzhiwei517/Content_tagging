@@ -144,6 +144,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     @app.get("/healthz")
+    @app.get("/v1/health")
     def health() -> Dict[str, Any]:
         return {
             "status": "ok",
