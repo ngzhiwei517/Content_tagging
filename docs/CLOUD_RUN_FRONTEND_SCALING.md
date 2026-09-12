@@ -18,7 +18,7 @@ Run these commands from this branch's worktree in Windows Command Prompt:
 
 ```bat
 gcloud config set project taggy-508408
-gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=3 --max-instances=10 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_TABLE=batch_checkpoint_objects" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
+gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=3 --max-instances=10 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_TABLE=batch_checkpoint_objects" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
 gcloud run services describe taggy-web-latest-test --region=asia-southeast1 --format="value(status.url)"
 ```
 
@@ -42,7 +42,24 @@ to the Google Cloud console:
 4. Under the IAP policy, add only the Google accounts allowed to use Taggy.
 
 Each approved user signs in with their own Google account. Gemini, Apify, and
-Supabase credentials stay in Secret Manager and are never shared with users.
+Supabase rollback credentials stay in Secret Manager and are never shared with
+users.
+
+## Configure private recovery storage
+
+Run these commands once before deploying the revision above:
+
+```bat
+gcloud storage buckets create gs://taggy-508408-checkpoints --project=taggy-508408 --location=asia-southeast1 --default-storage-class=STANDARD --uniform-bucket-level-access
+gcloud storage buckets update gs://taggy-508408-checkpoints --public-access-prevention
+gcloud storage buckets update gs://taggy-508408-checkpoints --lifecycle-file=docs/gcs-checkpoint-lifecycle.json
+gcloud storage buckets add-iam-policy-binding gs://taggy-508408-checkpoints --member="serviceAccount:taggy-worker@taggy-508408.iam.gserviceaccount.com" --role="roles/storage.objectUser"
+```
+
+The bucket is private and in the same Singapore region as the app. GCS becomes
+the primary recovery backend when `CHECKPOINT_GCS_BUCKET` is present; the
+existing Supabase configuration remains available for rollback if that
+environment variable is removed.
 
 ## Test safely
 
@@ -51,7 +68,7 @@ Use separate browsers or devices so each test represents a separate user.
 1. Complete one small three-post batch through Review and Export.
 2. Run two separate three-post batches at the same time.
 3. Run four separate three-post batches at the same time.
-4. If Cloud Run, Supabase, Gemini, and Apify show no errors, run nine batches.
+4. If Cloud Run, Cloud Storage, Gemini, and Apify show no errors, run nine batches.
 5. Reopen one private recovery link and confirm completed work is restored.
 
 Record time to first result, total time, and any retries at each stage. A

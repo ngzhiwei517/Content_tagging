@@ -1,4 +1,4 @@
-"""Optional Supabase/Postgres persistence for secret-free checkpoint objects."""
+"""Optional durable persistence for secret-free checkpoint objects."""
 
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ _SAFE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 @dataclass(frozen=True)
 class PersistentCheckpointConfig:
+    gcs_bucket: str = ""
+    gcs_project: str = ""
+    gcs_prefix: str = "taggy-checkpoints"
     database_url: str = ""
     supabase_url: str = ""
     supabase_key: str = ""
@@ -87,6 +90,30 @@ def checkpoint_error_code(exc: Exception) -> str:
         if isinstance(status_code, int) and status_code >= 500:
             return "service_unavailable"
         return "http_failed"
+    status_code = getattr(exc, "code", None)
+    if callable(status_code):
+        try:
+            status_code = status_code()
+        except TypeError:
+            status_code = None
+    status_code = getattr(status_code, "value", status_code)
+    if not isinstance(status_code, int):
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code == 401:
+        return "auth_failed"
+    if status_code == 403:
+        return "permission_denied"
+    if status_code == 404:
+        return "object_missing"
+    if status_code == 429:
+        return "rate_limited"
+    if isinstance(status_code, int) and status_code >= 500:
+        return "service_unavailable"
+    error_name = type(exc).__name__.lower()
+    if "timeout" in error_name or "deadline" in error_name:
+        return "timeout"
+    if "connection" in error_name:
+        return "network_failed"
     return "save_failed"
 
 
@@ -105,6 +132,124 @@ def _validate_object(recovery_id: str, object_key: str) -> tuple[str, str]:
     if not _SAFE_OBJECT_KEY.fullmatch(object_key) or ".." in object_key.split("/"):
         raise ValueError("Invalid checkpoint object key.")
     return recovery_id, object_key
+
+
+def _validate_storage_prefix(value: str) -> str:
+    prefix = str(value or "").strip().strip("/").replace("\\", "/")
+    if not prefix:
+        return ""
+    if not _SAFE_OBJECT_KEY.fullmatch(prefix) or ".." in prefix.split("/"):
+        raise ValueError("Invalid checkpoint storage prefix.")
+    return prefix
+
+
+class GoogleCloudStorageCheckpointBackend:
+    """Store each checkpoint object as private JSON in one Cloud Storage bucket."""
+
+    def __init__(
+        self,
+        bucket_name: str,
+        *,
+        project: str = "",
+        prefix: str = "taggy-checkpoints",
+        timeout_seconds: float = 20.0,
+        client=None,
+    ) -> None:
+        bucket_name = str(bucket_name or "").strip()
+        if bucket_name.lower().startswith("gs://"):
+            bucket_name = bucket_name[5:]
+        bucket_name = bucket_name.strip("/")
+        if not bucket_name or "/" in bucket_name:
+            raise ValueError("A Cloud Storage bucket name is required.")
+        self.bucket_name = bucket_name
+        self.project = str(project or "").strip()
+        self.prefix = _validate_storage_prefix(prefix)
+        self.timeout_seconds = float(timeout_seconds)
+        if client is None:
+            try:
+                from google.cloud import storage
+            except ImportError as exc:  # pragma: no cover - deployment dependency
+                raise RuntimeError(
+                    "Cloud Storage checkpointing requires google-cloud-storage."
+                ) from exc
+            client = storage.Client(project=self.project or None)
+        self.client = client
+        self.bucket = client.bucket(self.bucket_name)
+
+    def _object_name(self, recovery_id: str, object_key: str) -> tuple[str, str]:
+        recovery_id, object_key = _validate_object(recovery_id, object_key)
+        base = f"{self.prefix}/" if self.prefix else ""
+        return f"{base}{recovery_id}/{object_key}", object_key
+
+    @staticmethod
+    def _is_not_found(exc: Exception) -> bool:
+        return checkpoint_error_code(exc) == "object_missing"
+
+    def save(self, recovery_id: str, object_key: str, payload: Any) -> None:
+        object_name, _ = self._object_name(recovery_id, object_key)
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        self.bucket.blob(object_name).upload_from_string(
+            serialized,
+            content_type="application/json",
+            timeout=self.timeout_seconds,
+        )
+
+    def load(self, recovery_id: str, object_key: str) -> Any:
+        object_name, _ = self._object_name(recovery_id, object_key)
+        try:
+            data = self.bucket.blob(object_name).download_as_bytes(
+                timeout=self.timeout_seconds
+            )
+        except Exception as exc:
+            if self._is_not_found(exc):
+                return None
+            raise
+        payload = json.loads(data.decode("utf-8"))
+        return payload if isinstance(payload, (dict, list)) else None
+
+    def list_prefix(self, recovery_id: str, prefix: str) -> Dict[str, Any]:
+        recovery_id, prefix = _validate_object(recovery_id, prefix)
+        root = f"{self.prefix}/" if self.prefix else ""
+        recovery_root = f"{root}{recovery_id}/"
+        rows: Dict[str, Any] = {}
+        for blob in self.client.list_blobs(
+            self.bucket_name,
+            prefix=f"{recovery_root}{prefix}",
+            timeout=self.timeout_seconds,
+        ):
+            name = str(getattr(blob, "name", ""))
+            if not name.startswith(recovery_root):
+                continue
+            object_key = name[len(recovery_root):]
+            data = blob.download_as_bytes(timeout=self.timeout_seconds)
+            payload = json.loads(data.decode("utf-8"))
+            if isinstance(payload, (dict, list)):
+                rows[object_key] = payload
+        return rows
+
+    def delete(self, recovery_id: str, object_key: str) -> None:
+        object_name, _ = self._object_name(recovery_id, object_key)
+        try:
+            self.bucket.blob(object_name).delete(timeout=self.timeout_seconds)
+        except Exception as exc:
+            if not self._is_not_found(exc):
+                raise
+
+    def delete_prefix(self, recovery_id: str, prefix: str) -> None:
+        recovery_id, prefix = _validate_object(recovery_id, prefix)
+        root = f"{self.prefix}/" if self.prefix else ""
+        recovery_root = f"{root}{recovery_id}/"
+        for blob in self.client.list_blobs(
+            self.bucket_name,
+            prefix=f"{recovery_root}{prefix}",
+            timeout=self.timeout_seconds,
+        ):
+            blob.delete(timeout=self.timeout_seconds)
 
 
 class SupabaseCheckpointBackend:
@@ -424,6 +569,13 @@ class RecoveryCheckpointObjects:
 
 
 def create_persistent_checkpoint_backend(config: PersistentCheckpointConfig):
+    if str(config.gcs_bucket or "").strip():
+        return GoogleCloudStorageCheckpointBackend(
+            config.gcs_bucket,
+            project=config.gcs_project,
+            prefix=config.gcs_prefix,
+            timeout_seconds=config.timeout_seconds,
+        )
     table = _validate_identifier(config.table, "batch_checkpoint_objects")
     if str(config.database_url or "").strip():
         return PostgresCheckpointBackend(config.database_url, table=table)

@@ -1,6 +1,7 @@
 import ast
 import inspect
 import logging
+import json
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,9 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 CLOUD_RUN_FRONTEND_GUIDE = (
     ROOT / "docs" / "CLOUD_RUN_FRONTEND_SCALING.md"
 ).read_text(encoding="utf-8")
+GCS_LIFECYCLE = json.loads(
+    (ROOT / "docs" / "gcs-checkpoint-lifecycle.json").read_text(encoding="utf-8")
+)
 REQUIREMENTS = {
     line.strip()
     for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
@@ -107,6 +111,23 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("--concurrency=3", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("--max-instances=10", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("--session-affinity", CLOUD_RUN_FRONTEND_GUIDE)
+
+    def test_cloud_run_uses_private_gcs_recovery_with_30_day_cleanup(self):
+        self.assertIn("google-cloud-storage", REQUIREMENT_NAMES)
+        self.assertIn("CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("roles/storage.objectUser", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("--public-access-prevention", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertEqual(
+            GCS_LIFECYCLE,
+            {
+                "rule": [
+                    {
+                        "action": {"type": "Delete"},
+                        "condition": {"age": 30},
+                    }
+                ]
+            },
+        )
 
     def test_cloud_run_frontend_requires_iap_authentication(self):
         self.assertIn("--no-allow-unauthenticated", CLOUD_RUN_FRONTEND_GUIDE)
