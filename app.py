@@ -2926,9 +2926,10 @@ def detect_csv_delimiter(text: str) -> str:
         return ","
 
 
-def read_any_table(uploaded_file) -> pd.DataFrame:
-    raw = uploaded_file.getvalue()
-    name = uploaded_file.name.lower()
+def read_uploaded_table_bytes_v68_107(raw: bytes, file_name: str) -> pd.DataFrame:
+    """Parse immutable upload bytes into a normalized table."""
+    raw = bytes(raw or b"")
+    name = str(file_name or "").lower()
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(io.BytesIO(raw), engine="openpyxl")
     else:
@@ -2946,6 +2947,23 @@ def read_any_table(uploaded_file) -> pd.DataFrame:
     df = df.copy()
     df.columns = unique_columns(list(df.columns))
     return df
+
+
+def read_any_table(uploaded_file) -> pd.DataFrame:
+    """Read an upload once per user session and return an isolated copy."""
+    raw = uploaded_file.getvalue()
+    file_name = safe_str(uploaded_file.name)
+    cache_key = "uploaded_table_cache_v68_107"
+    fingerprint = hashlib.sha256(
+        file_name.encode("utf-8", errors="replace") + b"\0" + raw
+    ).hexdigest()
+    table_cache = st.session_state.setdefault(cache_key, {})
+    cached = table_cache.get(fingerprint)
+    if isinstance(cached, pd.DataFrame):
+        return cached.copy()
+    parsed = read_uploaded_table_bytes_v68_107(raw, file_name)
+    table_cache[fingerprint] = parsed.copy()
+    return parsed.copy()
 
 
 def norm_col(c: str) -> str:
@@ -9518,6 +9536,15 @@ if st.session_state.step == 2:
                     )
                     for uploaded_file in files
                 )
+                table_cache_signature_key = "uploaded_table_cache_signature_v68_107"
+                if (
+                    st.session_state.get(table_cache_signature_key)
+                    != uploaded_files_signature
+                ):
+                    # Keep parsed uploads private to this browser session and
+                    # retain only the currently selected file set.
+                    st.session_state[table_cache_signature_key] = uploaded_files_signature
+                    st.session_state["uploaded_table_cache_v68_107"] = {}
                 inferred_tracks = [
                     infer_track_from_filename(uploaded_file.name)
                     for uploaded_file in files
@@ -9580,7 +9607,18 @@ if st.session_state.step == 2:
                         shared_artist,
                         key="shared_upload",
                     )
-                for f in files:
+                preparation_status = st.status(
+                    "Preparing uploaded posts… The Add button will appear below.",
+                    expanded=False,
+                )
+                for file_position, f in enumerate(files, start=1):
+                    preparation_status.update(
+                        label=(
+                            f"Preparing uploaded posts ({file_position}/{len(files)}): "
+                            f"{safe_str(f.name)}"
+                        ),
+                        state="running",
+                    )
                     file_key = hashlib.sha1(
                         f"{f.name}:{len(f.getvalue())}".encode("utf-8")
                     ).hexdigest()[:12]
@@ -9682,17 +9720,39 @@ if st.session_state.step == 2:
                 st.markdown("<div class='warn-note'>" + "<br>".join(map(esc, errors)) + "</div>", unsafe_allow_html=True)
             combined_upload = pd.concat(parsed_frames, ignore_index=True) if parsed_frames else pd.DataFrame()
             if not combined_upload.empty:
-                if missing_track_files:
-                    st.caption("Enter a track name for each uploaded file before adding it to the batch.")
-                st.button(
-                    "Add uploaded rows to batch",
-                    type="primary",
-                    width="stretch",
-                    disabled=bool(missing_track_files),
-                    key="add_uploaded_rows_to_batch_v68_96",
-                    on_click=add_uploaded_rows_to_batch_v68_96,
-                    args=(combined_upload,),
+                preparation_status.update(
+                    label=(
+                        f"Prepared {len(combined_upload):,} uploaded post"
+                        f"{'s' if len(combined_upload) != 1 else ''}. "
+                        "The Add button is ready below."
+                    ),
+                    state="complete",
                 )
+            elif errors:
+                preparation_status.update(
+                    label="The uploaded files could not be prepared. Check the message below.",
+                    state="error",
+                )
+            else:
+                preparation_status.update(
+                    label="No supported TikTok or Instagram post links were found in the upload.",
+                    state="error",
+                )
+            if missing_track_files:
+                st.caption("Enter a track name for each uploaded file before adding it to the batch.")
+            elif combined_upload.empty:
+                st.caption(
+                    "The Add button is unavailable until the file contains at least one supported post link."
+                )
+            st.button(
+                "Add uploaded rows to batch",
+                type="primary",
+                width="stretch",
+                disabled=bool(missing_track_files) or combined_upload.empty,
+                key="add_uploaded_rows_to_batch_v68_96",
+                on_click=add_uploaded_rows_to_batch_v68_96,
+                args=(combined_upload,),
+            )
         else:
             st.markdown("<p class='sub'>No file selected yet.</p>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)

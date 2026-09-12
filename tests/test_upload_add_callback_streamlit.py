@@ -27,7 +27,17 @@ class UploadedAddCallbackStreamlitTests(unittest.TestCase):
             for button in app.button
             if button.label == "Add uploaded rows to batch"
         )
+        upload_status = app.get("status")
+        self.assertEqual(len(upload_status), 1)
+        self.assertEqual(
+            upload_status[0].label,
+            "Prepared 1 uploaded post. The Add button is ready below.",
+        )
         self.assertFalse(add_button.disabled)
+        self.assertEqual(
+            len(app.session_state["uploaded_table_cache_v68_107"]),
+            1,
+        )
 
         # Queue another uploader change with the click. The button callback
         # must commit the rows prepared on the rendered page before the rerun
