@@ -2313,11 +2313,12 @@ def clean_api_secret(v) -> str:
 def _managed_api_secret_v68_43(name: str) -> str:
     """Read a server-managed key without copying it into durable checkpoints."""
     try:
-        return clean_api_secret(st.secrets.get(name, ""))
+        streamlit_value = clean_api_secret(st.secrets.get(name, ""))
     except Exception:
-        # Local installs without .streamlit/secrets.toml keep the existing
-        # session-input flow.
-        return ""
+        streamlit_value = ""
+    # Streamlit Community Cloud exposes managed values through st.secrets,
+    # while Cloud Run Secret Manager injections are environment variables.
+    return streamlit_value or clean_api_secret(os.getenv(name, ""))
 
 
 def display_empty(v: str, fallback: str = "Not specified") -> str:
