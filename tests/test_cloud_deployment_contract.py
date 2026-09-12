@@ -8,6 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 THEME_CONFIG = (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
+DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+CLOUD_RUN_FRONTEND_GUIDE = (
+    ROOT / "docs" / "CLOUD_RUN_FRONTEND_SCALING.md"
+).read_text(encoding="utf-8")
 REQUIREMENTS = {
     line.strip()
     for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
@@ -83,6 +87,31 @@ class CloudDeploymentContractTests(unittest.TestCase):
     def test_cloud_uses_headless_opencv_only(self):
         self.assertIn("opencv-python-headless", REQUIREMENT_NAMES)
         self.assertNotIn("opencv-python", REQUIREMENT_NAMES)
+
+    def test_cloud_run_frontend_starts_streamlit_without_file_watching(self):
+        self.assertIn("python -m streamlit run app.py", DOCKERFILE)
+        self.assertIn("STREAMLIT_SERVER_FILE_WATCHER_TYPE=none", DOCKERFILE)
+        self.assertIn("chown -R taggy:taggy /app", DOCKERFILE)
+
+    def test_cloud_run_frontend_caps_native_cpu_threads(self):
+        for setting in [
+            "OMP_NUM_THREADS=1",
+            "OPENBLAS_NUM_THREADS=1",
+            "MKL_NUM_THREADS=1",
+            "NUMEXPR_NUM_THREADS=1",
+        ]:
+            with self.subTest(setting=setting):
+                self.assertIn(setting, DOCKERFILE)
+
+    def test_cloud_run_scaling_uses_one_session_per_instance(self):
+        self.assertIn("--concurrency=1", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("--max-instances=10", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("--session-affinity", CLOUD_RUN_FRONTEND_GUIDE)
+
+    def test_cloud_run_frontend_requires_iap_authentication(self):
+        self.assertIn("--no-allow-unauthenticated", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("--iap", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertNotIn("--no-invoker-iam-check", CLOUD_RUN_FRONTEND_GUIDE)
 
     def test_css_does_not_force_dark_text_on_every_element(self):
         self.assertNotIn("html, body, p, span, label, div { color:", APP_SOURCE)
