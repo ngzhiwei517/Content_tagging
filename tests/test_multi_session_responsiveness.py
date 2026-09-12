@@ -7,6 +7,14 @@ APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 
 
 class MultiSessionResponsivenessTests(unittest.TestCase):
+    def test_local_tagging_has_no_process_wide_worker_queue(self):
+        step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
+            "# STEP 5: Review",
+            1,
+        )[0]
+        self.assertNotIn("TaggingWorkerQueue", step_four)
+        self.assertNotIn("Semaphore", step_four)
+
     def test_local_tagging_yields_after_two_completed_posts(self):
         self.assertIn(
             "MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 2",
@@ -27,6 +35,14 @@ class MultiSessionResponsivenessTests(unittest.TestCase):
             1,
         )[1].split("# Display values and engagement metrics", 1)[0]
         self.assertIn("_new_runtime_recovery_id_v68_44()", helper)
+
+    def test_plain_app_url_is_not_changed_into_a_shared_recovery_link(self):
+        helper = APP_SOURCE.split(
+            "def _sync_runtime_query_v68_15()",
+            1,
+        )[1].split("def _checkpoint_setting_v68_44", 1)[0]
+        self.assertIn("explicit_run_id != run_id", helper)
+        self.assertNotIn('st.query_params["run"] = run_id', helper)
 
     def test_track_catalog_lookup_is_explicit_instead_of_running_on_upload(self):
         helper = APP_SOURCE.split(
@@ -51,6 +67,25 @@ class MultiSessionResponsivenessTests(unittest.TestCase):
             "resolved_paste_artist = render_uploaded_track_catalog_feedback_v68_62(",
             paste_section,
         )
+
+    def test_normal_reruns_queue_remote_runtime_saves(self):
+        helper = APP_SOURCE.split(
+            "def _persist_runtime_checkpoint_v68_15(",
+            1,
+        )[1].split("def _render_continue_later_v68_85", 1)[0]
+        self.assertIn("_save_runtime_checkpoint_remote_v68_106(", helper)
+        self.assertIn("wait=verify_remote", helper)
+        self.assertIn('save_status == "queued"', helper)
+        self.assertNotIn('remote_store.save("runtime.json", payload)', helper)
+
+    def test_tagging_batches_remote_partial_results(self):
+        runner = APP_SOURCE.split(
+            "def _run_checkpointed_tag_every_link_v68_43(",
+            1,
+        )[1].split("def run_real_tagging_backend", 1)[0]
+        self.assertIn("persist_remote=False", runner)
+        self.assertIn("def flush_partial_snapshot()", runner)
+        self.assertIn("store.save_partial_snapshot(", runner)
 
 
 if __name__ == "__main__":

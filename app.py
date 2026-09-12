@@ -30,6 +30,7 @@ import streamlit as st
 
 import ugc_tagger.final_update2_adapter as _final_update2_adapter
 import ugc_tagger.dashboard_assistant as _dashboard_assistant
+from ugc_tagger.async_checkpoint import AsyncCheckpointWriter
 
 # Streamlit Cloud can hot-reload ``app.py`` while an older imported helper
 # module is still cached. Reload the small, side-effect-free helper once when
@@ -1402,6 +1403,11 @@ MAX_TAGGING_MAX_CONCURRENT_JOBS_V68_101 = 16
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
 TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
 TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
+RUNTIME_CHECKPOINT_REMOTE_WORKERS_V68_106 = 4
+# An explicit Continue later can arrive behind one already-running autosave.
+# Allow both bounded three-attempt requests to finish; ordinary reruns never
+# wait on this timeout because their writes stay in the background.
+RUNTIME_CHECKPOINT_VERIFY_TIMEOUT_SECONDS_V68_106 = 135.0
 BROWSER_RECOVERY_POINTER_KEY_V68_80 = "ugc_tagger_latest_recovery_id_v1"
 _BROWSER_RECOVERY_POINTER_V68_80 = st.components.v2.component(
     "ugc_tagger_browser_recovery_pointer_v68_81",
@@ -1703,12 +1709,18 @@ def _tagging_continue_job_v68_55() -> str:
 
 
 def _sync_runtime_query_v68_15() -> None:
-    """Keep the active batch id and workflow step in the browser URL."""
+    """Update an explicit recovery URL without turning a plain URL into one.
+
+    Keeping ``run=...`` out of an ordinary app URL matters for multi-user
+    operation: duplicating or copying that plain URL must start a separate
+    batch.  A URL that was already opened as a private recovery link retains
+    its recovery ID and follows the current workflow step.
+    """
     run_id = _valid_runtime_id_v68_15(st.session_state.get("runtime_run_id_v68_15"))
-    if not run_id:
+    explicit_run_id = _valid_runtime_id_v68_15(_runtime_query_value_v68_15("run"))
+    if not run_id or explicit_run_id != run_id:
         return
     try:
-        st.query_params["run"] = run_id
         st.query_params["step"] = str(max(1, min(6, int(st.session_state.get("step", 1)))))
     except Exception:
         pass
@@ -1739,6 +1751,47 @@ def _persistent_checkpoint_backend_v68_44(
             table=table or "batch_checkpoint_objects",
         )
     )
+
+
+@st.cache_resource(show_spinner=False)
+def _runtime_checkpoint_writer_v68_106() -> AsyncCheckpointWriter:
+    """Share bounded remote-save workers without blocking user sessions."""
+    return AsyncCheckpointWriter(
+        max_workers=RUNTIME_CHECKPOINT_REMOTE_WORKERS_V68_106
+    )
+
+
+def _save_runtime_checkpoint_remote_v68_106(
+    run_id: str,
+    state_digest: str,
+    remote_store,
+    payload: Dict,
+    *,
+    wait: bool,
+) -> Tuple[str, Optional[Exception]]:
+    """Queue an autosave or wait for an explicitly requested verified save."""
+    writer = _runtime_checkpoint_writer_v68_106()
+    future = writer.submit(
+        run_id,
+        state_digest,
+        lambda: remote_store.save("runtime.json", payload),
+    )
+    if not wait and not future.done():
+        return "queued", None
+    try:
+        outcome = future.result(
+            timeout=(
+                RUNTIME_CHECKPOINT_VERIFY_TIMEOUT_SECONDS_V68_106
+                if wait
+                else 0
+            )
+        )
+    except Exception as exc:
+        return "failed", exc
+    if outcome == "saved":
+        return "saved", None
+    # A newer state for the same recovery ID replaced this pending payload.
+    return "queued", None
 
 
 def _configured_checkpoint_backend_v68_44():
@@ -1859,6 +1912,14 @@ def _runtime_checkpoint_candidate_rank_v68_79(payload) -> Tuple[int, datetime]:
 
 def _new_runtime_recovery_id_v68_44() -> str:
     _clear_tagging_continue_query_v68_55()
+    # A deliberately new batch must not keep an old private recovery ID in the
+    # address bar. Otherwise the next refresh (or a duplicated tab) would
+    # reopen and contend for the previous batch's execution lock.
+    try:
+        st.query_params.pop("run", None)
+        st.query_params.pop("step", None)
+    except Exception:
+        pass
     run_id = uuid.uuid4().hex
     st.session_state.runtime_run_id_v68_15 = run_id
     st.session_state.runtime_restore_checked_v68_15 = True
@@ -2008,10 +2069,39 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
     if remote_store is None:
         st.session_state.runtime_checkpoint_remote_status_v68_96 = "local_only"
         return "local_only"
-    try:
-        remote_store.save("runtime.json", payload)
-        status = "saved"
-        if verify_remote:
+    if (
+        not verify_remote
+        and safe_str(
+            st.session_state.get("runtime_checkpoint_remote_digest_v68_97")
+        )
+        == state_digest
+    ):
+        return "unchanged"
+    save_status, save_error = _save_runtime_checkpoint_remote_v68_106(
+        run_id,
+        state_digest,
+        remote_store,
+        payload,
+        wait=verify_remote,
+    )
+    if save_status == "queued":
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = "saving"
+        return "queued"
+    if save_status != "saved":
+        failure_status = checkpoint_error_code(
+            save_error or RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
+        )
+        st.session_state.runtime_checkpoint_remote_status_v68_96 = failure_status
+        LOGGER.warning(
+            "Persistent recovery checkpoint save failed (%s; %s).",
+            type(save_error).__name__ if save_error is not None else "RuntimeError",
+            failure_status,
+        )
+        return failure_status
+
+    status = "saved"
+    if verify_remote:
+        try:
             saved_payload = remote_store.load("runtime.json")
             saved_state = (
                 saved_payload.get("state", {})
@@ -2026,17 +2116,17 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
                 status = "verify_failed"
             else:
                 status = "verified"
-        st.session_state.runtime_checkpoint_remote_status_v68_96 = status
-        return status
-    except Exception as exc:
-        failure_status = checkpoint_error_code(exc)
-        st.session_state.runtime_checkpoint_remote_status_v68_96 = failure_status
-        LOGGER.warning(
-            "Persistent recovery checkpoint save failed (%s; %s).",
-            type(exc).__name__,
-            failure_status,
-        )
-        return failure_status
+        except Exception as exc:
+            status = checkpoint_error_code(exc)
+            LOGGER.warning(
+                "Persistent recovery checkpoint verification failed (%s; %s).",
+                type(exc).__name__,
+                status,
+            )
+    if status in {"saved", "verified"}:
+        st.session_state.runtime_checkpoint_remote_digest_v68_97 = state_digest
+    st.session_state.runtime_checkpoint_remote_status_v68_96 = status
+    return status
 
 
 def _render_continue_later_v68_85() -> None:
@@ -4571,20 +4661,34 @@ def _run_checkpointed_tag_every_link_v68_43(
             if position not in existing_positions
         ]
         saved_positions = set(existing_positions)
+        partial_snapshot_dirty = False
 
         def save_checkpoint_row(chunk_position: int, tagged_row: Dict) -> None:
-            remote_row_saved = store.save_partial_row(
+            nonlocal partial_snapshot_dirty
+            store.save_partial_row(
                 manifest["job_id"],
                 next_chunk_index,
                 chunk_position,
                 pd.Series(tagged_row),
+                persist_remote=False,
+            )
+            saved_positions.add(chunk_position)
+            partial_snapshot_dirty = True
+
+        def flush_partial_snapshot() -> None:
+            nonlocal partial_snapshot_dirty
+            if not partial_snapshot_dirty:
+                return
+            remote_snapshot_saved = store.save_partial_snapshot(
+                manifest["job_id"],
+                next_chunk_index,
             )
             if (
                 getattr(store, "persistent_store", None) is not None
-                and remote_row_saved is False
+                and remote_snapshot_saved is False
             ):
                 raise RuntimeError("REMOTE_CHECKPOINT_WRITE_FAILED")
-            saved_positions.add(chunk_position)
+            partial_snapshot_dirty = False
 
         required_links = {
             final_update2_normalize_url(value)
@@ -4755,18 +4859,26 @@ def _run_checkpointed_tag_every_link_v68_43(
             status.write(
                 f"Analysing {len(remaining_chunk):,} unfinished post(s) with Gemini..."
             )
-            _tag_remaining_with_row_isolation_v68_43(
-                remaining_chunk,
-                records,
-                gemini_key,
-                apify_token,
-                comparison_model,
-                logs,
-                remaining_positions,
-                saved_positions,
-                on_result,
-                on_progress,
-            )
+            try:
+                _tag_remaining_with_row_isolation_v68_43(
+                    remaining_chunk,
+                    records,
+                    gemini_key,
+                    apify_token,
+                    comparison_model,
+                    logs,
+                    remaining_positions,
+                    saved_positions,
+                    on_result,
+                    on_progress,
+                )
+            finally:
+                # Keep completed rows local immediately, then upload one compact
+                # recovery object for this bounded execution instead of making
+                # every post wait on a separate Supabase request.
+                flush_partial_snapshot()
+        else:
+            flush_partial_snapshot()
 
         if scrape_failure is not None:
             raise scrape_failure

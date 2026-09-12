@@ -53,10 +53,22 @@ state and sanitized tagging objects. Gemini/Apify/database credentials,
 downloaded media, binary media fields and local media paths are excluded.
 Recovery IDs are private bearer identifiers and should not be shared publicly.
 
-Progress is saved automatically. Click **Continue later** to verify the current
-batch was written to the recovery database before closing the app. A green
-confirmation means the private link is safe to use after an app restart; a
-warning means only the temporary local fallback is available.
+Progress is saved locally immediately. Normal Supabase/Postgres autosaves run
+in bounded background workers so a slow recovery database cannot block uploads,
+filters or another user's Streamlit session. Rapid reruns for the same recovery
+ID are coalesced to the newest pending state. During tagging, completed rows are
+written locally per post and uploaded as one compact partial snapshot per
+bounded execution instead of one remote request per post.
+
+Click **Continue later** to wait for and verify the current batch in the
+recovery database before closing the app. A green confirmation means the
+private link is safe to use after an app restart; a warning means only the
+temporary local fallback is available.
+
+The normal app URL stays plain so opening or copying it into another tab starts
+an independent batch. Only a private **Continue later** recovery link contains
+`run=...`; opening the same recovery link in several tabs intentionally refers
+to the same batch and therefore uses the same paid-work execution safeguard.
 
 The private `run` value in the current browser
 URL identifies the batch and lets the app restore it after a reconnect or

@@ -1,14 +1,17 @@
 import ast
 import copy
+import hashlib
 import json
 import shutil
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict
 from urllib.parse import urlencode
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import requests
@@ -36,6 +39,28 @@ def load_function(name, namespace):
     exec(compile(module, str(APP_PATH), "exec"), namespace)
     return namespace[name]
 
+
+def load_runtime_persist_helpers(namespace):
+    namespace.setdefault("hashlib", hashlib)
+    namespace.setdefault(
+        "safe_str",
+        lambda value: str(value or "").strip(),
+    )
+    namespace["_runtime_checkpoint_state_digest_v68_97"] = load_function(
+        "_runtime_checkpoint_state_digest_v68_97",
+        namespace,
+    )
+    namespace["_defer_runtime_tagged_df_v68_97"] = load_function(
+        "_defer_runtime_tagged_df_v68_97",
+        namespace,
+    )
+    namespace.setdefault(
+        "_save_runtime_checkpoint_remote_v68_106",
+        lambda _run_id, _digest, remote_store, payload, wait: (
+            remote_store.save("runtime.json", payload) or "saved",
+            None,
+        ),
+    )
 
 class MemoryObjectStore:
     def __init__(self):
@@ -359,6 +384,47 @@ class PersistentLargeBatchTests(unittest.TestCase):
 
 
 class SupabaseBackendTests(unittest.TestCase):
+    def test_production_http_sessions_are_isolated_per_worker_thread(self):
+        barrier = threading.Barrier(2)
+        created_sessions = []
+
+        def make_session():
+            session = Mock()
+            response = Mock(status_code=201)
+            response.raise_for_status.return_value = None
+
+            def post(*_args, **_kwargs):
+                barrier.wait(timeout=2)
+                return response
+
+            session.post.side_effect = post
+            created_sessions.append(session)
+            return session
+
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+        )
+        with patch(
+            "ugc_tagger.persistent_checkpoint.requests.Session",
+            side_effect=make_session,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        backend.save,
+                        value * 32,
+                        "runtime.json",
+                        {"state": {"step": 2}},
+                    )
+                    for value in ("a", "b")
+                ]
+                for future in futures:
+                    future.result(timeout=3)
+
+        self.assertEqual(len(created_sessions), 2)
+        self.assertIsNot(created_sessions[0], created_sessions[1])
+
     def test_data_api_url_is_normalized_to_project_url(self):
         backend = SupabaseCheckpointBackend(
             "https://project.supabase.co/rest/v1/",
@@ -961,6 +1027,55 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
 
         self.assertEqual(browser_pointer_calls, [])
         self.assertEqual(FakeStreamlit.query_params, {})
+
+    def test_plain_url_is_not_rewritten_to_share_the_active_batch(self):
+        recovery_id = "d" * 32
+
+        class FakeStreamlit:
+            query_params = {}
+            session_state = {
+                "runtime_run_id_v68_15": recovery_id,
+                "step": 4,
+            }
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_valid_runtime_id_v68_15": lambda value: (
+                value if value == recovery_id else ""
+            ),
+            "_runtime_query_value_v68_15": lambda name: "",
+        }
+        sync = load_function("_sync_runtime_query_v68_15", namespace)
+
+        sync()
+
+        self.assertEqual(FakeStreamlit.query_params, {})
+
+    def test_explicit_recovery_url_keeps_id_and_updates_step(self):
+        recovery_id = "a" * 32
+
+        class FakeStreamlit:
+            query_params = {"run": recovery_id, "step": "2"}
+            session_state = {
+                "runtime_run_id_v68_15": recovery_id,
+                "step": 5,
+            }
+
+        namespace = {
+            "st": FakeStreamlit(),
+            "_valid_runtime_id_v68_15": lambda value: (
+                value if value == recovery_id else ""
+            ),
+            "_runtime_query_value_v68_15": lambda name: str(
+                FakeStreamlit.query_params.get(name, "")
+            ),
+        }
+        sync = load_function("_sync_runtime_query_v68_15", namespace)
+
+        sync()
+
+        self.assertEqual(FakeStreamlit.query_params["run"], recovery_id)
+        self.assertEqual(FakeStreamlit.query_params["step"], "5")
 
     def test_explicit_recovery_url_wins_over_browser_pointer(self):
         explicit_id = "a" * 32

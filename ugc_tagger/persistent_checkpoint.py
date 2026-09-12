@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence
@@ -142,7 +143,11 @@ class SupabaseCheckpointBackend:
         self.key = str(key or "").strip()
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
         self.timeout_seconds = float(timeout_seconds)
-        self.session = session or requests.Session()
+        # ``requests.Session`` is not guaranteed to be thread-safe. Keep an
+        # injected test session as-is, but give each Streamlit/background
+        # thread its own connection pool in production.
+        self.session = session
+        self._thread_local = threading.local()
         self.retry_delays = tuple(max(0.0, float(value)) for value in retry_delays)
         self.sleep = sleep
         if not self.url.startswith(("https://", "http://")) or not self.key:
@@ -172,7 +177,13 @@ class SupabaseCheckpointBackend:
 
     def _request(self, method: str, *args, **kwargs):
         """Send an idempotent request with bounded exponential backoff."""
-        operation = getattr(self.session, method)
+        request_session = self.session
+        if request_session is None:
+            request_session = getattr(self._thread_local, "session", None)
+            if request_session is None:
+                request_session = requests.Session()
+                self._thread_local.session = request_session
+        operation = getattr(request_session, method)
         last_error = None
         attempts = len(self.retry_delays) + 1
         for attempt in range(attempts):
