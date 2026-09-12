@@ -1,5 +1,6 @@
 import ast
 import copy
+import hashlib
 import json
 import shutil
 import tempfile
@@ -8,13 +9,14 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict
 from urllib.parse import urlencode
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import requests
 
 from ugc_tagger.batch_checkpoint import BatchCheckpointStore
 from ugc_tagger.persistent_checkpoint import (
+    CheckpointServiceUnavailable,
     PersistentCheckpointConfig,
     PostgresCheckpointBackend,
     RecoveryCheckpointObjects,
@@ -37,12 +39,30 @@ def load_function(name, namespace):
     return namespace[name]
 
 
+def load_runtime_persist_helpers(namespace):
+    namespace.setdefault("hashlib", hashlib)
+    namespace.setdefault(
+        "safe_str",
+        lambda value: str(value or "").strip(),
+    )
+    namespace["_runtime_checkpoint_state_digest_v68_97"] = load_function(
+        "_runtime_checkpoint_state_digest_v68_97",
+        namespace,
+    )
+    namespace["_defer_runtime_tagged_df_v68_97"] = load_function(
+        "_defer_runtime_tagged_df_v68_97",
+        namespace,
+    )
+
+
 class MemoryObjectStore:
     def __init__(self):
         self.objects = {}
         self.list_prefix_calls = 0
+        self.save_calls = 0
 
     def save(self, key, payload):
+        self.save_calls += 1
         self.objects[key] = copy.deepcopy(payload)
 
     def load(self, key):
@@ -420,6 +440,53 @@ class SupabaseBackendTests(unittest.TestCase):
 
         self.assertEqual(session.post.call_count, 2)
 
+    def test_postgres_statement_timeout_retries_with_exponential_backoff(self):
+        session = Mock()
+        timed_out = Mock(status_code=500)
+        timed_out.json.return_value = {"code": "57014"}
+        timed_out.raise_for_status.side_effect = requests.HTTPError(
+            response=timed_out
+        )
+        success = Mock(status_code=201)
+        success.json.return_value = {}
+        success.raise_for_status.return_value = None
+        session.post.side_effect = [timed_out, success]
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            session=session,
+        )
+
+        with patch("ugc_tagger.persistent_checkpoint.time.sleep") as sleep:
+            backend.save("f" * 32, "runtime.json", {"state": {"step": 3}})
+
+        self.assertEqual(session.post.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_database_restart_opens_short_circuit_after_bounded_retries(self):
+        session = Mock()
+        restarting = Mock(status_code=503)
+        restarting.json.return_value = {"code": "57P03"}
+        restarting.raise_for_status.side_effect = requests.HTTPError(
+            response=restarting
+        )
+        session.post.return_value = restarting
+        backend = SupabaseCheckpointBackend(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            session=session,
+        )
+
+        with patch("ugc_tagger.persistent_checkpoint.time.sleep"):
+            with self.assertRaises(requests.HTTPError) as raised:
+                backend.save("a" * 32, "runtime.json", {"state": {"step": 3}})
+            self.assertEqual(checkpoint_error_code(raised.exception), "service_unavailable")
+            with self.assertRaises(CheckpointServiceUnavailable) as cooled_down:
+                backend.save("a" * 32, "runtime.json", {"state": {"step": 3}})
+
+        self.assertEqual(checkpoint_error_code(cooled_down.exception), "service_unavailable")
+        self.assertEqual(session.post.call_count, 3)
+
     def test_http_failures_map_to_safe_diagnostic_codes(self):
         response = Mock(status_code=401)
         error = requests.HTTPError(response=response)
@@ -450,6 +517,28 @@ class PostgresBackendTests(unittest.TestCase):
         self.assertNotIn("d" * 32, statement)
         self.assertNotIn("runtime.json", statement)
         self.assertEqual(params[:2], ("d" * 32, "runtime.json"))
+
+    def test_direct_postgres_statement_timeout_is_retried(self):
+        class StatementTimeout(RuntimeError):
+            sqlstate = "57014"
+
+        cursor = Mock()
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        connection = Mock()
+        connection.__enter__ = Mock(return_value=connection)
+        connection.__exit__ = Mock(return_value=False)
+        connection.cursor.return_value = cursor
+        driver = Mock()
+        driver.connect.side_effect = [StatementTimeout("slow"), connection]
+        backend = PostgresCheckpointBackend("postgresql://server/database")
+        backend._driver = Mock(return_value=driver)
+
+        with patch("ugc_tagger.persistent_checkpoint.time.sleep") as sleep:
+            backend.save("d" * 32, "runtime.json", {"state": {"step": 4}})
+
+        self.assertEqual(driver.connect.call_count, 2)
+        sleep.assert_called_once_with(0.5)
 
 
 class WorkflowCheckpointSafetyTests(unittest.TestCase):
@@ -596,6 +685,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             persist()
@@ -645,11 +735,15 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             status = persist(verify_remote=True)
+            unchanged_status = persist()
 
         self.assertEqual(status, "verified")
+        self.assertEqual(unchanged_status, "unchanged")
+        self.assertEqual(remote.save_calls, 1)
         self.assertEqual(
             FakeStreamlit.session_state.runtime_checkpoint_remote_status_v68_96,
             "verified",
@@ -719,6 +813,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             status = persist(verify_remote=True)
@@ -738,6 +833,72 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
             saved["state"]["rank_metrics"],
             ["Views", "Total Engagement"],
         )
+
+    def test_active_tagging_does_not_duplicate_completed_rows_in_runtime_json(self):
+        recovery_id = "9" * 32
+        remote = MemoryObjectStore()
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState({
+                "runtime_run_id_v68_15": recovery_id,
+                "analysis_mode_v68_86": "AI tagging",
+                "tagging_checkpoint_incomplete_v68_97": True,
+                "batch_df": pd.DataFrame([{"Link": "https://example.com/post"}]),
+                "selected_df": pd.DataFrame([{"Link": "https://example.com/post"}]),
+                "tagged_df": pd.DataFrame([{
+                    "Link": "https://example.com/post",
+                    "Creative Type": "Performance",
+                }]),
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "datetime": datetime,
+                "timezone": timezone,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "LOGGER": Mock(),
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": (
+                    "analysis_mode_v68_86",
+                    "batch_df",
+                    "selected_df",
+                    "tagged_df",
+                ),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {
+                    "batch_df",
+                    "selected_df",
+                    "tagged_df",
+                },
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_checkpoint_dataframe_to_payload_v68_15": self.to_payload,
+                "_checkpoint_json_safe_value_v68_96": lambda value: value,
+                "_runtime_checkpoint_path_v68_15": lambda run_id: checkpoint_dir / f"{run_id}.json",
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: None,
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: remote,
+            }
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            load_runtime_persist_helpers(namespace)
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            self.assertEqual(persist(verify_remote=True), "verified")
+
+        saved_state = remote.objects["runtime.json"]["state"]
+        self.assertIn("batch_df", saved_state)
+        self.assertIn("selected_df", saved_state)
+        self.assertNotIn("tagged_df", saved_state)
 
     def test_managed_secrets_and_private_continue_later_recovery_remain_available(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', APP_SOURCE)

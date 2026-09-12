@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -28,10 +30,45 @@ class PersistentCheckpointConfig:
 
 
 _TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+_TRANSIENT_POSTGRES_CODES = {"57014", "57P03"}
+_RETRY_DELAYS_SECONDS = (0.5, 1.0)
+_CIRCUIT_BREAKER_SECONDS = 30.0
+
+
+class CheckpointServiceUnavailable(RuntimeError):
+    """Raised while remote checkpoint traffic is cooling down after an outage."""
+
+
+def _postgres_error_code(value) -> str:
+    """Extract a Postgres SQLSTATE from an exception or HTTP response."""
+    for attribute in ("sqlstate", "pgcode"):
+        candidate = str(getattr(value, attribute, "") or "").strip().upper()
+        if candidate:
+            return candidate
+    diagnostic = getattr(value, "diag", None)
+    candidate = str(getattr(diagnostic, "sqlstate", "") or "").strip().upper()
+    if candidate:
+        return candidate
+    response = getattr(value, "response", value)
+    try:
+        body = response.json()
+    except (AttributeError, TypeError, ValueError):
+        body = None
+    if isinstance(body, dict):
+        for key in ("code", "sqlstate"):
+            candidate = str(body.get(key, "") or "").strip().upper()
+            if candidate:
+                return candidate
+    return ""
 
 
 def checkpoint_error_code(exc: Exception) -> str:
     """Return a safe diagnostic code without exposing request data or keys."""
+    postgres_code = _postgres_error_code(exc)
+    if postgres_code == "57014":
+        return "timeout"
+    if postgres_code == "57P03" or isinstance(exc, CheckpointServiceUnavailable):
+        return "service_unavailable"
     if isinstance(exc, requests.Timeout):
         return "timeout"
     if isinstance(exc, requests.ConnectionError):
@@ -90,6 +127,8 @@ class SupabaseCheckpointBackend:
         self.table = _validate_identifier(table, "batch_checkpoint_objects")
         self.timeout_seconds = float(timeout_seconds)
         self.session = session or requests.Session()
+        self._circuit_lock = threading.Lock()
+        self._circuit_open_until = 0.0
         if not self.url.startswith(("https://", "http://")) or not self.key:
             raise ValueError("Supabase URL and server-side key are required.")
 
@@ -112,21 +151,51 @@ class SupabaseCheckpointBackend:
         return headers
 
     def _request(self, method: str, *args, **kwargs):
-        """Send an idempotent checkpoint request with one transient retry."""
+        """Send an idempotent request with bounded exponential backoff."""
+        with self._circuit_lock:
+            circuit_open_until = self._circuit_open_until
+        if time.monotonic() < circuit_open_until:
+            raise CheckpointServiceUnavailable(
+                "Checkpoint storage is temporarily cooling down."
+            )
         operation = getattr(self.session, method)
         last_error = None
-        for attempt in range(2):
+        total_attempts = len(_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(total_attempts):
             try:
                 response = operation(*args, timeout=self.timeout_seconds, **kwargs)
                 status_code = getattr(response, "status_code", None)
-                if attempt == 0 and status_code in _TRANSIENT_HTTP_STATUS:
+                transient_response = (
+                    status_code in _TRANSIENT_HTTP_STATUS
+                    or _postgres_error_code(response) in _TRANSIENT_POSTGRES_CODES
+                )
+                if transient_response and attempt < total_attempts - 1:
+                    time.sleep(_RETRY_DELAYS_SECONDS[attempt])
                     continue
                 response.raise_for_status()
+                with self._circuit_lock:
+                    self._circuit_open_until = 0.0
                 return response
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-                if attempt == 0:
+                if attempt < total_attempts - 1:
+                    time.sleep(_RETRY_DELAYS_SECONDS[attempt])
                     continue
+                with self._circuit_lock:
+                    self._circuit_open_until = (
+                        time.monotonic() + _CIRCUIT_BREAKER_SECONDS
+                    )
+                raise
+            except requests.HTTPError as exc:
+                if (
+                    getattr(getattr(exc, "response", None), "status_code", None)
+                    in _TRANSIENT_HTTP_STATUS
+                    or _postgres_error_code(exc) in _TRANSIENT_POSTGRES_CODES
+                ):
+                    with self._circuit_lock:
+                        self._circuit_open_until = (
+                            time.monotonic() + _CIRCUIT_BREAKER_SECONDS
+                        )
                 raise
         if last_error is not None:  # pragma: no cover - defensive fallback
             raise last_error
@@ -226,6 +295,21 @@ class PostgresCheckpointBackend:
             raise RuntimeError("Postgres checkpointing requires psycopg.") from exc
         return psycopg
 
+    @staticmethod
+    def _retry(operation):
+        """Retry transient Postgres cancellation/recovery errors safely."""
+        total_attempts = len(_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(total_attempts):
+            try:
+                return operation()
+            except Exception as exc:
+                if (
+                    _postgres_error_code(exc) not in _TRANSIENT_POSTGRES_CODES
+                    or attempt >= total_attempts - 1
+                ):
+                    raise
+                time.sleep(_RETRY_DELAYS_SECONDS[attempt])
+
     def save(self, recovery_id: str, object_key: str, payload: Any) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = (
@@ -234,17 +318,23 @@ class PostgresCheckpointBackend:
             "ON CONFLICT (recovery_id, object_key) DO UPDATE "
             "SET payload = EXCLUDED.payload, updated_at = NOW()"
         )
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key, json.dumps(payload)))
+        def execute():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key, json.dumps(payload)))
+
+        self._retry(execute)
 
     def load(self, recovery_id: str, object_key: str) -> Any:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = f"SELECT payload FROM {self.table} WHERE recovery_id = %s AND object_key = %s LIMIT 1"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key))
-                row = cursor.fetchone()
+        def execute():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key))
+                    return cursor.fetchone()
+
+        row = self._retry(execute)
         if not row:
             return None
         payload = json.loads(row[0]) if isinstance(row[0], str) else row[0]
@@ -253,10 +343,13 @@ class PostgresCheckpointBackend:
     def list_prefix(self, recovery_id: str, prefix: str) -> Dict[str, Any]:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
         statement = f"SELECT object_key, payload FROM {self.table} WHERE recovery_id = %s AND object_key LIKE %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, f"{prefix}%"))
-                rows = cursor.fetchall()
+        def execute():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, f"{prefix}%"))
+                    return cursor.fetchall()
+
+        rows = self._retry(execute)
         output = {}
         for key, payload in rows:
             if isinstance(payload, str):
@@ -268,16 +361,22 @@ class PostgresCheckpointBackend:
     def delete(self, recovery_id: str, object_key: str) -> None:
         recovery_id, object_key = _validate_object(recovery_id, object_key)
         statement = f"DELETE FROM {self.table} WHERE recovery_id = %s AND object_key = %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, object_key))
+        def execute():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, object_key))
+
+        self._retry(execute)
 
     def delete_prefix(self, recovery_id: str, prefix: str) -> None:
         recovery_id, prefix = _validate_object(recovery_id, prefix)
         statement = f"DELETE FROM {self.table} WHERE recovery_id = %s AND object_key LIKE %s"
-        with self._driver().connect(self.database_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, (recovery_id, f"{prefix}%"))
+        def execute():
+            with self._driver().connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(statement, (recovery_id, f"{prefix}%"))
+
+        self._retry(execute)
 
 
 class RecoveryCheckpointObjects:
