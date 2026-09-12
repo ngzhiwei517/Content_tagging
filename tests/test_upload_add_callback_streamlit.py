@@ -56,6 +56,13 @@ class UploadedAddCallbackStreamlitTests(unittest.TestCase):
             "Added 1 uploaded rows. Skipped 0 duplicate rows.",
         )
 
+        continue_button = next(
+            button for button in app.button if button.label == "Continue"
+        )
+        continue_button.click().run(timeout=60)
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.session_state["step"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

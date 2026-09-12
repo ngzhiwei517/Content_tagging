@@ -78,6 +78,33 @@ class MultiSessionResponsivenessTests(unittest.TestCase):
         self.assertIn('save_status == "queued"', helper)
         self.assertNotIn('remote_store.save("runtime.json", payload)', helper)
 
+    def test_add_posts_continue_navigates_before_checkpoint_autosave(self):
+        helper = APP_SOURCE.split(
+            "def _continue_to_select_posts_v68_108()",
+            1,
+        )[1].split("def safe_str", 1)[0]
+        self.assertIn("st.session_state.step = 3", helper)
+        self.assertIn(
+            "st.session_state.defer_pre_render_checkpoint_once_v68_108 = True",
+            helper,
+        )
+        self.assertNotIn("_persist_runtime_checkpoint_v68_15", helper)
+
+        shell = APP_SOURCE.split(
+            "defer_pre_render_checkpoint_v68_108 = bool(",
+            1,
+        )[1].split("managed_gemini_key_v68_43", 1)[0]
+        self.assertIn(
+            "if not defer_pre_render_checkpoint_v68_108:",
+            shell,
+        )
+
+        add_posts = APP_SOURCE.split("# STEP 2: Add posts", 1)[1].split(
+            "# STEP 3: Select posts",
+            1,
+        )[0]
+        self.assertIn("on_click=_continue_to_select_posts_v68_108", add_posts)
+
     def test_tagging_batches_remote_partial_results(self):
         runner = APP_SOURCE.split(
             "def _run_checkpointed_tag_every_link_v68_43(",

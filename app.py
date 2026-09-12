@@ -1129,6 +1129,13 @@ def go(step: int):
     st.rerun()
 
 
+def _continue_to_select_posts_v68_108() -> None:
+    """Open Select Posts before running the ordinary end-of-rerun autosave."""
+    _clear_tagging_continue_query_v68_55()
+    st.session_state.step = 3
+    st.session_state.defer_pre_render_checkpoint_once_v68_108 = True
+
+
 def safe_str(v) -> str:
     try:
         if pd.isna(v):
@@ -9386,8 +9393,12 @@ _restore_runtime_checkpoint_v68_15(persist=not taggy_companion_session_v68_87)
 # checkpoints should reopen on Add Posts instead of rendering an empty route.
 if st.session_state.get("step") == 1:
     st.session_state.step = 2
+defer_pre_render_checkpoint_v68_108 = bool(
+    st.session_state.pop("defer_pre_render_checkpoint_once_v68_108", False)
+)
 if not taggy_companion_session_v68_87:
-    _persist_runtime_checkpoint_v68_15()
+    if not defer_pre_render_checkpoint_v68_108:
+        _persist_runtime_checkpoint_v68_15()
 managed_gemini_key_v68_43 = _managed_api_secret_v68_43("GEMINI_API_KEY")
 managed_apify_token_v68_43 = _managed_api_secret_v68_43("APIFY_TOKEN")
 if managed_gemini_key_v68_43:
@@ -9522,10 +9533,18 @@ if st.session_state.step == 2:
             label_visibility="collapsed",
             key="files_upload_v24",
         )
+        st.caption(
+            "Large files may take a moment to upload and prepare. "
+            "Keep this tab open until the Add button is ready."
+        )
         parsed_frames = []
         summary_rows = []
         errors = []
         if files:
+            preparation_status = st.status(
+                "Upload received. Preparing uploaded posts…",
+                expanded=True,
+            )
             missing_track_files = []
             with st.expander("Confirm details for uploaded files", expanded=True):
                 uploaded_files_signature = tuple(
@@ -9607,10 +9626,6 @@ if st.session_state.step == 2:
                         shared_artist,
                         key="shared_upload",
                     )
-                preparation_status = st.status(
-                    "Preparing uploaded posts… The Add button will appear below.",
-                    expanded=False,
-                )
                 for file_position, f in enumerate(files, start=1):
                     preparation_status.update(
                         label=(
@@ -9866,8 +9881,13 @@ if st.session_state.step == 2:
                 reset_date_filter_state_v68()
                 st.rerun()
         with c2:
-            if st.button("Continue", type="primary", width="stretch"):
-                go(3)
+            st.button(
+                "Continue",
+                type="primary",
+                width="stretch",
+                key="continue_to_select_posts_v68_108",
+                on_click=_continue_to_select_posts_v68_108,
+            )
     st.markdown("</div>", unsafe_allow_html=True)
 
 # STEP 3: Select posts
