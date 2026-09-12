@@ -451,6 +451,7 @@ class StreamlitLargeBatchContractTests(unittest.TestCase):
     def test_server_managed_secrets_open_directly_on_add_posts(self):
         self.assertIn('_managed_api_secret_v68_43("GEMINI_API_KEY")', self.source)
         self.assertIn('_managed_api_secret_v68_43("APIFY_TOKEN")', self.source)
+        self.assertIn('clean_api_secret(os.getenv(name, ""))', self.source)
         self.assertIn('"step": 2', self.source)
         self.assertIn('(2, "01", "Add Posts", "Files or links")', self.source)
         self.assertNotIn('(1, "01", "API Keys", "Setup")', self.source)
