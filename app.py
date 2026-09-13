@@ -2329,12 +2329,23 @@ def clean_api_secret(v) -> str:
 
 def _managed_api_secret_v68_43(name: str) -> str:
     """Read a server-managed key without copying it into durable checkpoints."""
+    secret_file = safe_str(os.getenv(f"{name}_FILE", ""))
+    if secret_file:
+        try:
+            mounted_value = clean_api_secret(
+                Path(secret_file).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError):
+            mounted_value = ""
+        if mounted_value:
+            return mounted_value
     try:
         streamlit_value = clean_api_secret(st.secrets.get(name, ""))
     except Exception:
         streamlit_value = ""
-    # Streamlit Community Cloud exposes managed values through st.secrets,
-    # while Cloud Run Secret Manager injections are environment variables.
+    # Streamlit Community Cloud exposes managed values through st.secrets.
+    # Cloud Run can use an environment variable as a startup-time fallback,
+    # while a mounted Secret Manager file permits rotation without redeploying.
     return streamlit_value or clean_api_secret(os.getenv(name, ""))
 
 

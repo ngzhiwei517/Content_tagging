@@ -23,6 +23,7 @@ def load_managed_secret_helper(secrets):
     namespace = {
         "os": os,
         "pd": pd,
+        "Path": Path,
         "st": SimpleNamespace(secrets=secrets),
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), APP_PATH, "exec"), namespace)
@@ -30,6 +31,32 @@ def load_managed_secret_helper(secrets):
 
 
 class ManagedApiSecretTests(unittest.TestCase):
+    def test_mounted_secret_file_has_precedence_for_hot_rotation(self):
+        helper = load_managed_secret_helper({"APIFY_TOKEN": "streamlit-value"})
+        secret_path = APP_PATH.parent / ".tmp" / "test-apify-secret.txt"
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        secret_path.write_text("Bearer mounted-value\n", encoding="utf-8")
+        self.addCleanup(secret_path.unlink, missing_ok=True)
+
+        with patch.dict(
+            os.environ,
+            {
+                "APIFY_TOKEN_FILE": str(secret_path),
+                "APIFY_TOKEN": "cloud-value",
+            },
+        ):
+            self.assertEqual(helper("APIFY_TOKEN"), "mounted-value")
+
+    def test_unavailable_mounted_secret_file_uses_existing_fallback(self):
+        helper = load_managed_secret_helper({"APIFY_TOKEN": "streamlit-value"})
+        missing_path = APP_PATH.parent / ".tmp" / "missing-apify-secret.txt"
+
+        with patch.dict(
+            os.environ,
+            {"APIFY_TOKEN_FILE": str(missing_path), "APIFY_TOKEN": "cloud-value"},
+        ):
+            self.assertEqual(helper("APIFY_TOKEN"), "streamlit-value")
+
     def test_cloud_run_environment_value_is_used(self):
         helper = load_managed_secret_helper({})
         with patch.dict(os.environ, {"GEMINI_API_KEY": "Bearer cloud-value"}):
