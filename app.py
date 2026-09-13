@@ -2130,10 +2130,15 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
                 if isinstance(saved_payload, dict)
                 else {}
             )
+            saved_state_digest = (
+                _runtime_checkpoint_state_digest_v68_97(saved_state)
+                if isinstance(saved_state, dict)
+                else ""
+            )
             if (
                 not isinstance(saved_payload, dict)
-                or safe_str(saved_payload.get("saved_at")) != payload["saved_at"]
                 or not _runtime_checkpoint_has_posts_v68_44(saved_state)
+                or saved_state_digest != state_digest
             ):
                 status = "verify_failed"
             else:

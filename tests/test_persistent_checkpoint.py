@@ -961,6 +961,66 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
         )
         self.assertTrue(remote.objects["runtime.json"]["state"]["batch_df"]["data"])
 
+    def test_continue_later_accepts_matching_state_from_prior_autosave(self):
+        recovery_id = "6" * 32
+        remote = MemoryObjectStore()
+
+        class SessionState(dict):
+            __getattr__ = dict.get
+            __setattr__ = dict.__setitem__
+
+        class FakeStreamlit:
+            session_state = SessionState({
+                "runtime_run_id_v68_15": recovery_id,
+                "batch_df": pd.DataFrame([
+                    {"Link": "https://www.tiktok.com/@creator/video/1"}
+                ]),
+            })
+
+        def deduplicating_save(_run_id, _digest, _remote_store, payload, *, wait):
+            if "runtime.json" not in remote.objects:
+                remote.save("runtime.json", payload)
+            return "saved", None
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            namespace = {
+                "st": FakeStreamlit(),
+                "pd": pd,
+                "datetime": datetime,
+                "timezone": timezone,
+                "json": json,
+                "os": __import__("os"),
+                "APP_VERSION": "test",
+                "LOGGER": Mock(),
+                "safe_str": lambda value: str(value or "").strip(),
+                "RUNTIME_CHECKPOINT_DIR_V68_15": checkpoint_dir,
+                "RUNTIME_CHECKPOINT_STATE_KEYS_V68_15": ("batch_df",),
+                "RUNTIME_DATAFRAME_KEYS_V68_15": {"batch_df"},
+                "_valid_runtime_id_v68_15": lambda value: value,
+                "_checkpoint_dataframe_to_payload_v68_15": self.to_payload,
+                "_runtime_checkpoint_path_v68_15": lambda run_id: checkpoint_dir / f"{run_id}.json",
+                "_load_local_runtime_checkpoint_v68_44": lambda run_id: None,
+                "_sync_runtime_query_v68_15": lambda: None,
+                "_checkpoint_objects_v68_44": lambda run_id: remote,
+                "_save_runtime_checkpoint_remote_v68_106": deduplicating_save,
+            }
+            namespace["_runtime_checkpoint_has_posts_v68_44"] = load_function(
+                "_runtime_checkpoint_has_posts_v68_44",
+                namespace,
+            )
+            load_runtime_persist_helpers(namespace)
+            persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
+
+            first_status = persist()
+            first_saved_at = remote.objects["runtime.json"]["saved_at"]
+            verified_status = persist(verify_remote=True)
+
+        self.assertEqual(first_status, "saved")
+        self.assertEqual(verified_status, "verified")
+        self.assertEqual(remote.save_calls, 1)
+        self.assertEqual(remote.objects["runtime.json"]["saved_at"], first_saved_at)
+
     def test_runtime_checkpoint_converts_non_dataframe_state_to_strict_json(self):
         recovery_id = "8" * 32
         remote = MemoryObjectStore()
