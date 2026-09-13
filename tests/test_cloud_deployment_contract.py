@@ -107,10 +107,21 @@ class CloudDeploymentContractTests(unittest.TestCase):
             with self.subTest(setting=setting):
                 self.assertIn(setting, DOCKERFILE)
 
-    def test_cloud_run_scaling_allows_streamlit_auxiliary_requests(self):
-        self.assertIn("--concurrency=3", CLOUD_RUN_FRONTEND_GUIDE)
-        self.assertIn("--max-instances=10", CLOUD_RUN_FRONTEND_GUIDE)
+    def test_cloud_run_single_instance_keeps_streamlit_sessions_together(self):
+        self.assertIn("--concurrency=80", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("--max-instances=1", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("--session-affinity", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("400 Invalid session_id", CLOUD_RUN_FRONTEND_GUIDE)
+
+    def test_apify_secret_is_mounted_for_rotation_without_redeploy(self):
+        self.assertIn(
+            "APIFY_TOKEN_FILE=/var/secrets/taggy/apify-token",
+            CLOUD_RUN_FRONTEND_GUIDE,
+        )
+        self.assertIn(
+            "/var/secrets/taggy/apify-token=taggy-apify-token:latest",
+            CLOUD_RUN_FRONTEND_GUIDE,
+        )
 
     def test_cloud_run_uses_private_gcs_recovery_with_30_day_cleanup(self):
         self.assertIn("google-cloud-storage", REQUIREMENT_NAMES)

@@ -1,86 +1,126 @@
-# Cloud Run frontend concurrency test
+# Cloud Run pilot configuration
 
-Streamlit Community Cloud gives one app a shared compute allowance. Running
-several tagging sessions in that one process can trigger CPU throttling. This
-test deploys the current, working Taggy branch to Cloud Run without changing or
-removing the existing Community Cloud app.
+Taggy is still a Streamlit application. Cloud Run replaces Streamlit Community
+Cloud as the host, and private Google Cloud Storage (GCS) replaces Supabase as
+the primary recovery store. Supabase remains configured only as a rollback
+option while the Cloud Run pilot is being accepted.
 
-The container deliberately limits native numerical and video libraries to one
-CPU thread per session. Cloud Run concurrency is set to three because one
-Streamlit browser session uses a long-lived connection and separate HTTP
-requests for features such as file upload. This is a per-instance request
-allowance, not a three-user limit. Cloud Run can still scale across up to ten
-instances instead of making nine users compete for one Streamlit process.
+## Current validated service shape
 
-## Deploy the isolated test
+The `taggy-web-latest-test` service in `asia-southeast1` currently uses:
 
-Run these commands from this branch's worktree in Windows Command Prompt:
+- one maximum instance and zero minimum instances;
+- 2 vCPU and 2 GiB memory;
+- container concurrency 80;
+- a 3,600-second request timeout; and
+- session affinity.
+
+The one-instance maximum is intentional. Streamlit keeps upload sessions and
+generated media downloads in the frontend process. Live multi-instance testing
+showed an upload could be created on one instance and sent to another, causing
+`400 Invalid session_id`. Session affinity alone did not prevent this. Keep the
+service at one instance until those assets move to shared storage or a separate
+job architecture.
+
+Concurrency 80 is a simultaneous HTTP/WebSocket request allowance for the one
+container. It is not 80 users, 80 posts, or 80 actions per second. One browser
+can hold a WebSocket and make additional upload/download requests.
+
+## Deploy the private service
+
+Run from the intended feature-branch worktree. The Apify secret is mounted as a
+file so its `latest` version can rotate without another app deployment.
 
 ```bat
 gcloud config set project taggy-508408
-gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=3 --max-instances=10 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_TABLE=batch_checkpoint_objects" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,APIFY_TOKEN=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
+gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=80 --max-instances=1 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_TABLE=batch_checkpoint_objects,APIFY_TOKEN_FILE=/var/secrets/taggy/apify-token" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,/var/secrets/taggy/apify-token=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
 gcloud run services describe taggy-web-latest-test --region=asia-southeast1 --format="value(status.url)"
 ```
 
-This deployment processes tagging inside each autoscaled frontend instance. It
-does not use the older three-worker queue and does not change the existing
-`taggy-web-test`, `taggy-job-backend-test`, or Streamlit Community Cloud app.
-The service remains private and uses Google Identity-Aware Proxy (IAP); do not
-replace these flags with public or unauthenticated access while provider
-secrets are attached.
+For a zero-traffic rehearsal, add `--no-traffic --tag=hot-secrets-test` to the
+deploy command. Do not move traffic away from a revision while users have active
+tagging runs.
 
-## First IAP setup
+## Rotate the Apify key without redeploying
 
-For a personal Google Cloud project, the first IAP setup may require one visit
-to the Google Cloud console:
+1. Open **Security > Secret Manager > `taggy-apify-token`**.
+2. Add the replacement as a new secret version. Do not paste it into source,
+   logs, screenshots, or deployment commands.
+3. Start one small new metrics/tagging run and confirm Apify succeeds.
+4. Disable the prior secret version only after that check passes.
 
-1. Open Cloud Run and select `taggy-web-latest-test`.
-2. Open **Security**, choose **Require authentication**, and select
-   **Identity-Aware Proxy (IAP)**.
-3. If prompted, configure the consent screen as **External** and choose
-   **Auto generate credentials**.
-4. Under the IAP policy, add only the Google accounts allowed to use Taggy.
+Cloud Run resolves the `latest` version whenever the mounted file is read. The
+app reads this file at the beginning of each new metrics/tagging action. A job
+already in progress keeps the credential it started with; the next action uses
+the replacement.
 
-Each approved user signs in with their own Google account. Gemini, Apify, and
-Supabase rollback credentials stay in Secret Manager and are never shared with
-users.
+The same code supports a mounted Gemini key through `GEMINI_API_KEY_FILE` if it
+is configured later.
 
-## Configure private recovery storage
+## Private recovery storage
 
-Run these commands once before deploying the revision above:
+The bucket is `gs://taggy-508408-checkpoints`. Runtime state is stored under:
 
-```bat
-gcloud storage buckets create gs://taggy-508408-checkpoints --project=taggy-508408 --location=asia-southeast1 --default-storage-class=STANDARD --uniform-bucket-level-access
-gcloud storage buckets update gs://taggy-508408-checkpoints --public-access-prevention
-gcloud storage buckets update gs://taggy-508408-checkpoints --lifecycle-file=docs/gcs-checkpoint-lifecycle.json
-gcloud storage buckets add-iam-policy-binding gs://taggy-508408-checkpoints --member="serviceAccount:taggy-worker@taggy-508408.iam.gserviceaccount.com" --role="roles/storage.objectUser"
+```text
+taggy-checkpoints/<private-recovery-id>/runtime.json
 ```
 
-The bucket is private and in the same Singapore region as the app. GCS becomes
-the primary recovery backend when `CHECKPOINT_GCS_BUCKET` is present; the
-existing Supabase configuration remains available for rollback if that
-environment variable is removed.
+Related large-batch manifests and completed-row objects are stored below the
+same private recovery-ID folder. The recovery URL is not stored as a separate
+record; its `?run=` value identifies that folder. Treat the URL like a password.
 
-## Test safely
+Inspect the bucket in the Google Cloud console:
 
-Use separate browsers or devices so each test represents a separate user.
+https://console.cloud.google.com/storage/browser/taggy-508408-checkpoints?project=taggy-508408
 
-1. Complete one small three-post batch through Review and Export.
-2. Run two separate three-post batches at the same time.
-3. Run four separate three-post batches at the same time.
-4. If Cloud Run, Cloud Storage, Gemini, and Apify show no errors, run nine batches.
-5. Reopen one private recovery link and confirm completed work is restored.
+Public access prevention and uniform bucket-level access must remain enabled.
+The service account must retain only the required bucket role,
+`roles/storage.objectUser`. The one-time bucket hardening command is
+`gcloud storage buckets update gs://taggy-508408-checkpoints --public-access-prevention`.
+The bucket lifecycle deletes checkpoint objects after 30 days. Temporary media
+inside a Cloud Run container is ephemeral and is not part of the recovery
+checkpoint.
 
-Record time to first result, total time, and any retries at each stage. A
-successful nine-user test means the sessions make progress independently; it
-does not mean all nine jobs will finish at exactly the same time.
+## Public access decision
+
+Making the app public removes the Google sign-in requirement but does not make
+the GCS bucket public. Provider secrets remain server-side. However, anyone who
+can reach the app can trigger Cloud Run, Gemini, and Apify usage, so public
+access also creates a cost-abuse risk. Before broad distribution, configure
+budget alerts, retain provider quotas, and complete the staged load test below.
+
+Do not make the service public while a live tagging run is still in progress.
+Changing security or deploying a revision should happen only after current
+users have saved a recovery link and completed or paused their run.
+
+## Load-test and operating limits
+
+Use separate browsers or devices and increase load gradually:
+
+1. two users with 25 posts each;
+2. two users with 50 posts each; and
+3. only if healthy, two users with 100 posts each.
+
+Record completion time, failed posts, retries, Cloud Run 5xx responses, instance
+restarts, CPU, memory, and in-memory filesystem usage. Long request-latency
+lines can represent an open Streamlit WebSocket; they do not by themselves mean
+an action took that long.
+
+The September 13 five-tab run reached roughly 50-65% CPU, 75-82% memory,
+0.73-0.76 GB p95/p99 in-memory filesystem usage, and about 8-14 concurrent
+requests. No 5xx, memory-limit, or checkpoint failures appeared. One stale
+generated CSV media URL returned 404. This is promising for the pilot, but
+memory is the current constraint. Confirm memory falls after runs finish and
+tabs close before approving the two-by-100 test. If memory remains near 80%,
+investigate cleanup or increase the service to 4 GiB before heavier use.
 
 ## Cost and rollback
 
-Cloud Run can start up to ten 2-vCPU instances, so simultaneous tagging can
-incur compute plus Gemini and Apify charges. `min-instances=0` lets the test
-scale to zero when idle.
+`min-instances=0` allows the service to scale to zero when no sessions are
+connected. An open Streamlit tab can keep the one instance billable. Cloud Run,
+Gemini, Apify, Secret Manager, logging, and GCS have separate quotas or charges.
 
-Rollback is immediate: stop sharing the `taggy-web-latest-test` URL and keep
-using the existing Streamlit URL. No production traffic is switched by these
-commands.
+Rollback remains straightforward: keep the last known-good Cloud Run revision,
+do not delete the Supabase fallback until the GCS pilot is accepted, and do not
+route traffic to a new revision until its health and recovery path have been
+verified.
