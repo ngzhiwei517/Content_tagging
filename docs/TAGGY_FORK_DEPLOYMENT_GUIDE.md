@@ -39,6 +39,11 @@ Do not put API keys in GitHub, source code, screenshots, or command history.
    merged into `main`.
 4. Create the fork in the new owner's GitHub account.
 
+If the owner must test before this release is merged, clear **Copy the DEFAULT
+branch only** so the feature branches are included, then check out
+`agent/cloud-run-fork-ready`. Waiting for the approved `main` release is the
+simpler option.
+
 ## Step 2: Create or choose a Google Cloud project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
@@ -179,6 +184,45 @@ Keep `--max-instances=1` for this pilot configuration. Google Cloud Storage
 keeps Continue later data durable, while the three-job tagging guard coordinates
 browser sessions inside that one instance. Raising the instance limit requires
 a database-backed shared worker queue first.
+
+### Three AI-tagging jobs does not mean three tabs
+
+People can open more than three browser tabs. The five-tab test is still valid.
+
+The limit means that at most three separate batches may actively process an AI
+tagging chunk at the same moment. A fourth AI-tagging batch is kept saved and
+is asked to try again; it does not lose its posts or Continue later link.
+
+Opening the app, uploading, selecting posts, reviewing, and viewing a dashboard
+do not use one of those three AI-tagging slots. Metrics-only work follows a
+separate path. Keep the default at three until load testing shows that 2 CPU and
+2 GiB memory can safely handle more.
+
+## Choose or rename the link
+
+### Simple option: choose the Cloud Run service name
+
+The word after `gcloud run deploy` is the service name. For example:
+
+```bash
+gcloud run deploy taggy-mycompany ...
+```
+
+The generated address will include `taggy-mycompany`, but Google also adds a
+unique suffix and `.run.app`. An existing Cloud Run service cannot be renamed
+in place; deploy a new service with the preferred name instead.
+
+### Clean option: use a domain you own
+
+For a fully branded address such as `taggy.mycompany.com`, buy or use an
+existing domain and map it to the Cloud Run service. Google recommends placing
+a global external Application Load Balancer in front of Cloud Run. Direct
+Cloud Run domain mapping is simpler but is still a limited Preview feature and
+is not Google's recommended production option.
+
+Keep the generated `run.app` address during the pilot. Add the custom domain
+after the app and expected costs are stable. When Taggy is opened through the
+custom domain, new Continue later links use that domain too.
 
 ## Step 10: Test before sharing the link
 
