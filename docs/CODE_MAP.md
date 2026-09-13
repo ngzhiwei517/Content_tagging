@@ -24,8 +24,8 @@ app.py
 | --- | --- | --- |
 | `app.py` | Current five-step Streamlit UI, session state, batch assembly, selection, review, summary and export presentation | The user-facing workflow or presentation needs to change |
 | `ugc_tagger/batch_checkpoint.py` | Secret-free, atomic local progress files for large `Tag every link` runs | Chunk size, retention or local resume behavior needs to change |
-| `ugc_tagger/persistent_checkpoint.py` | Optional Supabase/Postgres checkpoint storage, worker-pool RPC calls and transient database retries | Shared recovery, multi-user admission or retry behavior needs to change |
-| `ugc_tagger/tagging_worker_queue.py` | Bounded multi-user worker admission with a local development fallback | Tagging concurrency or capacity behavior needs to change |
+| `ugc_tagger/persistent_checkpoint.py` | Optional GCS, Supabase and Postgres checkpoint storage plus transient database retries | Shared recovery or retry behavior needs to change |
+| `ugc_tagger/tagging_worker_queue.py` | Legacy bounded-worker utility retained for compatibility; the default app flow does not enable a global batch cap | A legacy deployment explicitly uses worker admission |
 | `ugc_tagger/direct_post_scraper.py` | Direct TikTok/Instagram post retrieval before paid fallback | Public retrieval or direct metric normalization needs to change |
 | `ugc_tagger/creator_profile_enrichment.py` | Three-month creator activity and profile-metric enrichment | Top Creator profile collection or backfill needs to change |
 | `ugc_tagger/dashboard_assistant.py` | Taggy trusted help, current-page context and grounded dashboard assistance | Taggy guidance or dashboard prompts need to change |

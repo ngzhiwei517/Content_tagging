@@ -181,22 +181,18 @@ gcloud run deploy taggy \
 Cloud Run prints the new public `run.app` URL when deployment finishes.
 
 Keep `--max-instances=1` for this pilot configuration. Google Cloud Storage
-keeps Continue later data durable, while the three-job tagging guard coordinates
-browser sessions inside that one instance. Raising the instance limit requires
-a database-backed shared worker queue first.
+keeps Continue later data durable, while the per-batch execution safeguard
+prevents one recovery job from running twice inside that instance. Raising the
+instance limit requires a distributed execution lock first.
 
-### Three AI-tagging jobs does not mean three tabs
+### Concurrent AI-tagging batches
 
-People can open more than three browser tabs. The five-tab test is still valid.
-
-The limit means that at most three separate batches may actively process an AI
-tagging chunk at the same moment. A fourth AI-tagging batch is kept saved and
-is asked to try again; it does not lose its posts or Continue later link.
-
-Opening the app, uploading, selecting posts, reviewing, and viewing a dashboard
-do not use one of those three AI-tagging slots. Metrics-only work follows a
-separate path. Keep the default at three until load testing shows that 2 CPU and
-2 GiB memory can safely handle more.
+As in the existing Taggy Google Cloud version, the app does not impose a fixed
+three-job or five-job limit. Separate users may start AI-tagging batches at the
+same time. Opening tabs alone does not consume provider capacity; the heavier
+work begins when users start tagging. The practical limit depends on the
+service's 2 CPU and 2 GiB memory allocation and on Gemini and Apify quotas, so
+monitor CPU, memory, errors, latency, and provider usage during load testing.
 
 ## Choose or rename the link
 
@@ -252,16 +248,94 @@ may also have separate quotas or charges.
 
 ## Safe updates after the first deployment
 
-Do not connect automatic production deployment at first. Use this flow:
+Do not connect automatic production deployment at first. Test every change in
+a feature branch and a separate preview service.
 
-1. Create a GitHub feature branch.
-2. Push the change and open a pull request.
-3. Wait for the GitHub tests to pass.
-4. Deploy that branch manually as a separate Cloud Run preview service, for
-   example `taggy-preview`.
-5. Test upload, tagging, Continue later, and an Incognito visit.
-6. Merge the pull request into `main` only after approval.
-7. Check out the updated `main` and manually deploy `taggy` again.
+### 1. Create a test branch
+
+From the fork's local or Cloud Shell checkout:
+
+```bash
+git checkout main
+git pull --ff-only origin main
+git checkout -b test/my-change
+```
+
+Make the change, then run the same checks used by GitHub:
+
+```bash
+python -m py_compile app.py
+python -m compileall -q ugc_tagger
+python -m unittest discover -s tests
+```
+
+Only push the test branch:
+
+```bash
+git push -u origin test/my-change
+```
+
+Open a pull request but **do not merge it**. Wait for the GitHub `tests` check
+to pass. If GitHub Actions is disabled in a new fork, enable it from the fork's
+**Actions** tab first.
+
+### 2. Deploy that branch as a separate preview
+
+In Cloud Shell, check out the same branch:
+
+```bash
+git fetch origin
+git checkout test/my-change
+git pull --ff-only origin test/my-change
+```
+
+Run the Step 9 deployment command with only these two changes:
+
+- deploy the service as `taggy-preview` instead of `taggy`;
+- use `CHECKPOINT_GCS_PREFIX=taggy-preview-checkpoints` instead of
+  `CHECKPOINT_GCS_PREFIX=taggy-checkpoints`.
+
+The preview gets its own URL and recovery folder. It may reuse the same service
+account and mounted Secret Manager entries, but its Gemini and Apify usage still
+counts against the same provider accounts.
+
+Confirm which preview revision is live:
+
+```bash
+gcloud run services describe taggy-preview \
+  --region="$TAGGY_REGION" \
+  --project="$TAGGY_PROJECT_ID" \
+  --format="value(status.latestReadyRevisionName,status.url)"
+```
+
+### 3. Test the preview before approving it
+
+1. Open the preview URL in an Incognito or Private window and confirm that no
+   Google sign-in is requested.
+2. Test one uploaded file and one pasted-link batch.
+3. For Top Posts, check all ranking choices. Include decimal rate values such
+   as 9.1% and 9.9%, and confirm 9.9% wins.
+4. Test two selected ranking metrics and confirm the second metric breaks a tie
+   in the first metric.
+5. Test grouping and confirm Top N is selected separately for each group.
+6. Run a small AI-tagging batch and a Metrics-only batch.
+7. Create a Continue later link, close the tab, and reopen that private link.
+8. Confirm the preview recovery object appears under
+   `taggy-preview-checkpoints` in the private bucket.
+9. Open several separate batches only when doing a controlled load test; watch
+   Cloud Run CPU, memory, latency, 5xx responses, and provider usage.
+10. Confirm the production `taggy` URL still works and was not changed.
+
+If anything fails, fix the same feature branch, push it again, and redeploy only
+`taggy-preview`. `main` and the production `taggy` service remain untouched.
+
+### 4. Release only after approval
+
+1. Record the preview revision that passed.
+2. Merge the pull request into `main` only after explicit approval.
+3. Check out the updated `main` and manually deploy `taggy` again.
+4. Test the production link once more. If it fails, send traffic back to the
+   previous known-good Cloud Run revision.
 
 A GitHub change does not alter Cloud Run until a deployment is run, unless the
 owner deliberately adds a Cloud Build trigger later. Cloud Run keeps older

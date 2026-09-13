@@ -29,8 +29,7 @@ after 30 days.
 ## Database alternatives
 
 1. Run the current `checkpoint_schema.sql` in Supabase SQL Editor or Postgres.
-   Existing deployments must run it again after this update because it also
-   creates the shared tagging worker slots and lease functions.
+   This creates the checkpoint table and its access policies.
 2. Add one backend to Streamlit Secrets.
 
 Direct Postgres, including a Supabase Postgres connection URL:
@@ -60,17 +59,10 @@ The same values may be supplied as `CHECKPOINT_DATABASE_URL`, or
 `CHECKPOINT_SUPABASE_URL` plus `CHECKPOINT_SUPABASE_KEY` environment variables.
 `CHECKPOINT_TABLE` optionally changes the table name.
 
-The worker pool allows three concurrent AI-tagging batches by default. Override
-that server-side only when a controlled load test supports a higher value:
-
-```toml
-[tagging_workers]
-max_concurrent_jobs = 3
-```
-
-`TAGGING_MAX_CONCURRENT_JOBS` is the equivalent environment variable. Values
-are restricted to 1-16. Increasing this setting does not add CPU, memory,
-database capacity, or provider quota.
+The app does not impose a fixed global limit on the number of separate
+AI-tagging batches. It retains a per-batch execution safeguard so the same
+recovery link cannot start the same checkpoint job twice at once. Actual
+capacity depends on Cloud Run CPU and memory plus Gemini and Apify quotas.
 
 Keep these settings server-side. The app persists only allowlisted workflow
 state and sanitized tagging objects. Gemini/Apify/database credentials,
@@ -104,27 +96,19 @@ Remote checkpointing starts only after the current workflow contains at least
 one post. Opening an empty app session does not create a remote object or row;
 the local fallback remains available from the first render.
 
-## Tagging worker pool and write pattern
+## Concurrent tagging and write pattern
 
-With Supabase or Postgres, every AI-tagging batch must claim one
-database-backed worker slot before calling Gemini or the Apify fallback. Three
-independent batches may run concurrently by default. The slot is released after
-each bounded app execution, and an expired lease is cleared automatically if a
-worker stops unexpectedly.
+The app does not impose a fixed global limit on separate AI-tagging batches.
+It does use the existing recovery ID and tagging job ID to prevent the same
+checkpoint job from running twice at once. Resuming from the private recovery
+link therefore re-enters the same job and skips post positions that already
+have a saved result.
 
-Google Cloud Storage does not provide the database operation needed for an
-atomic cross-instance queue. A GCS-only Cloud Run pilot therefore must keep
-`max-instances=1`. It uses the same three-job limit inside that single app
-instance. Do not raise the Cloud Run instance limit until a database-backed
-shared queue or separate job service is configured.
-
-When all slots are busy, the app does not create a visible waiting queue or
-start another provider call. The batch remains saved under its existing recovery
-ID, and the user may try again or continue later from the private recovery link.
-
-The queue uses the existing recovery ID and tagging job ID. Resuming from the
-private recovery link therefore re-enters the same job and skips post positions
-that already have a saved result.
+A GCS-only Cloud Run pilot must keep `max-instances=1` because this per-batch
+execution safeguard is local to one app instance. Do not raise the Cloud Run
+instance limit until a distributed execution lock or separate job service is
+configured. Separate batches may run concurrently, with practical capacity
+determined by Cloud Run resources and Gemini and Apify quotas.
 
 Completed results are written to local checkpoint files immediately. At the
 end of each bounded execution, the app uploads one compact partial snapshot to

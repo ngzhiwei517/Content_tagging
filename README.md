@@ -42,7 +42,7 @@ The default model is **Gemini 3.1 Flash-Lite**. The app starts with metadata and
 
 Large batches are processed in protected chunks and saved after each completed result. Interrupted jobs resume from the first unfinished post without repeating completed Gemini analysis.
 
-Checkpoints are local by default. Google Cloud Storage, Supabase, or Postgres can optionally provide recovery after an app restart or redeployment. Supabase/Postgres can coordinate a bounded cross-instance tagging pool. A GCS-only pilot must keep Cloud Run at one instance and uses a bounded worker pool inside that instance. Completed work is saved in small recovery objects, and transient Postgres `57014` cancellations are retried with bounded backoff. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
+Checkpoints are local by default. Google Cloud Storage, Supabase, or Postgres can optionally provide recovery after an app restart or redeployment. A GCS-only pilot must keep Cloud Run at one instance because the safeguard against running the same recovery job twice is local to that instance. Separate AI-tagging batches do not have a fixed app-level concurrency cap. Completed work is saved in small recovery objects, and transient Postgres `57014` cancellations are retried with bounded backoff. Checkpoints never contain provider credentials or downloaded media. See [Persistent checkpoints](docs/PERSISTENT_CHECKPOINTS.md).
 
 Open the plain app URL for a new independent batch. Use a batch's private **Continue later** link to reopen that specific run.
 

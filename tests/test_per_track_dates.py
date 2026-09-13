@@ -186,6 +186,9 @@ class PerTrackDateSelectionTests(unittest.TestCase):
         namespace["filter_posts_by_date_window_v68"] = load_function(
             "filter_posts_by_date_window_v68", namespace
         )
+        namespace["_ranking_numeric_series_v68_109"] = load_function(
+            "_ranking_numeric_series_v68_109", namespace
+        )
         self.preview = load_function("selected_posts_preview", namespace)
         namespace["selected_posts_preview"] = self.preview
         self.all_candidates = load_function("_all_ranked_candidates_v56", namespace)
@@ -233,6 +236,94 @@ class PerTrackDateSelectionTests(unittest.TestCase):
         result = self.all_candidates(batch)
 
         self.assertEqual(result["Link"].tolist(), ["third", "first", "second"])
+
+    def test_every_rank_option_selects_the_highest_value(self):
+        self.state["use_date_filter"] = False
+        self.state["group_by"] = "No grouping"
+        self.state["top_n"] = 1
+        metrics = [
+            "Total Engagement", "Views", "Likes", "Comments", "Shares",
+            "Saves", "Followers", "Engagement Rate", "Likes Rate",
+            "Comments Rate", "Shares Rate", "Saves Rate",
+        ]
+
+        for metric in metrics:
+            with self.subTest(metric=metric):
+                self.state["rank_metrics"] = [metric]
+                batch = pd.DataFrame([
+                    {
+                        "Link": "lower",
+                        "Track": "A",
+                        "Market": "MY",
+                        "Source": "test",
+                        metric: "9.1%" if metric.endswith("Rate") else "1,001",
+                    },
+                    {
+                        "Link": "higher",
+                        "Track": "A",
+                        "Market": "MY",
+                        "Source": "test",
+                        metric: "9.9%" if metric.endswith("Rate") else "1,002",
+                    },
+                ])
+
+                result = self.preview(batch)
+
+                self.assertEqual(result.iloc[0]["Link"], "higher")
+
+    def test_multiple_rank_metrics_use_later_metrics_as_tie_breakers(self):
+        self.state["use_date_filter"] = False
+        self.state["group_by"] = "No grouping"
+        self.state["top_n"] = 1
+        self.state["rank_metrics"] = ["Views", "Likes Rate"]
+        batch = pd.DataFrame([
+            {
+                "Link": "lower",
+                "Track": "A",
+                "Market": "MY",
+                "Source": "test",
+                "Views": 1_000,
+                "Likes Rate": 9.1,
+            },
+            {
+                "Link": "higher",
+                "Track": "A",
+                "Market": "MY",
+                "Source": "test",
+                "Views": 1_000,
+                "Likes Rate": 9.9,
+            },
+        ])
+
+        result = self.preview(batch)
+
+        self.assertEqual(result.iloc[0]["Link"], "higher")
+
+    def test_confirmed_zero_ranks_before_an_unavailable_metric(self):
+        self.state["use_date_filter"] = False
+        self.state["group_by"] = "No grouping"
+        self.state["top_n"] = 1
+        self.state["rank_metrics"] = ["Views"]
+        batch = pd.DataFrame([
+            {
+                "Link": "unavailable",
+                "Track": "A",
+                "Market": "MY",
+                "Source": "test",
+                "Views": pd.NA,
+            },
+            {
+                "Link": "confirmed-zero",
+                "Track": "A",
+                "Market": "MY",
+                "Source": "test",
+                "Views": 0,
+            },
+        ])
+
+        result = self.preview(batch)
+
+        self.assertEqual(result.iloc[0]["Link"], "confirmed-zero")
 
 
 class PerTrackDateStateAndSourceTests(unittest.TestCase):

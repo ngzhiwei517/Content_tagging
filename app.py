@@ -75,11 +75,6 @@ from ugc_tagger.persistent_checkpoint import (
     checkpoint_error_code,
     create_persistent_checkpoint_backend,
 )
-from ugc_tagger.tagging_worker_queue import (
-    TaggingWorkerClaim,
-    TaggingWorkerQueue,
-    TaggingWorkerQueueUnavailable,
-)
 from ugc_tagger.drama_analysis import campaign_track_catalog_status
 from ugc_tagger.creator_profile_enrichment import (
     DEFAULT_PROFILE_HISTORY_MODE,
@@ -1404,9 +1399,6 @@ MAX_LIVE_POSTS_PER_EXECUTION_V68_52 = 2
 # whole campaign is submitted at once. Save each smaller scrape window before
 # yielding and keep every completed Gemini row restart-safe.
 MAX_APIFY_POSTS_PER_EXECUTION_V68_54 = 25
-TAGGING_GLOBAL_LEASE_SECONDS_V68_100 = 7200
-DEFAULT_TAGGING_MAX_CONCURRENT_JOBS_V68_101 = 3
-MAX_TAGGING_MAX_CONCURRENT_JOBS_V68_101 = 16
 TAGGING_CONTINUE_JOB_QUERY_V68_55 = "continue_job"
 TAGGING_CONTINUE_UNTIL_QUERY_V68_55 = "continue_until"
 TAGGING_CONTINUE_TTL_SECONDS_V68_55 = 2 * 60 * 60
@@ -1846,39 +1838,6 @@ def _configured_checkpoint_backend_v68_44():
         )
     except Exception:
         return None
-
-
-def _persistent_checkpoint_is_configured_v68_100() -> bool:
-    """Return whether the active checkpoint backend requires a database queue."""
-    # GCS takes precedence over database settings and deliberately uses the
-    # single-instance local worker pool. Old database credentials may remain
-    # attached only as a rollback option without disabling GCS tagging.
-    if _checkpoint_setting_v68_44("gcs_bucket", "CHECKPOINT_GCS_BUCKET"):
-        return False
-    return bool(
-        _checkpoint_setting_v68_44("database_url", "CHECKPOINT_DATABASE_URL")
-        or _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL")
-        or _checkpoint_setting_v68_44("supabase_key", "CHECKPOINT_SUPABASE_KEY")
-    )
-
-
-def _tagging_max_concurrent_jobs_v68_101() -> int:
-    """Return the server-managed tagging capacity, bounded to a safe range."""
-    try:
-        worker_secrets = st.secrets.get("tagging_workers", {})
-        configured = (
-            worker_secrets.get("max_concurrent_jobs", "")
-            if worker_secrets
-            else ""
-        )
-    except Exception:
-        configured = ""
-    configured = configured or os.getenv("TAGGING_MAX_CONCURRENT_JOBS", "")
-    try:
-        requested = int(configured)
-    except (TypeError, ValueError):
-        requested = DEFAULT_TAGGING_MAX_CONCURRENT_JOBS_V68_101
-    return max(1, min(MAX_TAGGING_MAX_CONCURRENT_JOBS_V68_101, requested))
 
 
 def _checkpoint_objects_v68_44(run_id: str, *, prefix: str = ""):
@@ -3444,6 +3403,17 @@ def step_strip(active: int):
     st.markdown(html_out, unsafe_allow_html=True)
 
 
+def _ranking_numeric_series_v68_109(values: pd.Series) -> pd.Series:
+    """Parse ranking values without discarding decimals or missing-state data."""
+    normalized = (
+        values.astype("string")
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(normalized, errors="coerce")
+
+
 def selected_posts_preview(
     batch: pd.DataFrame,
     *,
@@ -3521,21 +3491,25 @@ def selected_posts_preview(
 
     valid_metrics = []
     for metric in rank_metrics:
-        if metric == "Engagement Rate":
-            out["Engagement Rate"] = out.apply(calculate_engagement_rate, axis=1)
-            valid_metrics.append(metric)
-        elif metric in out.columns:
-            out[metric] = out[metric].map(clean_num)
+        if metric in out.columns:
+            out[metric] = _ranking_numeric_series_v68_109(out[metric])
             valid_metrics.append(metric)
 
     if not valid_metrics:
         valid_metrics = ["Total Engagement"]
         if "Total Engagement" not in out.columns:
             out["Total Engagement"] = 0
-        out["Total Engagement"] = out["Total Engagement"].map(clean_num)
+        out["Total Engagement"] = _ranking_numeric_series_v68_109(
+            out["Total Engagement"]
+        )
 
     def sort_and_take(df_part: pd.DataFrame) -> pd.DataFrame:
-        return df_part.sort_values(valid_metrics, ascending=[False] * len(valid_metrics)).head(n)
+        return df_part.sort_values(
+            valid_metrics,
+            ascending=[False] * len(valid_metrics),
+            na_position="last",
+            kind="stable",
+        ).head(n)
 
     def finish_selection(selected_rows: pd.DataFrame) -> pd.DataFrame:
         # Ranking decides which posts qualify; it should not silently reorder the
@@ -4135,28 +4109,6 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
     )
 
 
-def _tagging_worker_queue_v68_100(
-    store: BatchCheckpointStore,
-) -> TaggingWorkerQueue:
-    """Create the database worker pool or a single-instance local fallback.
-
-    Supabase/Postgres provide atomic cross-instance claims. Cloud Storage is
-    durable checkpoint storage but does not provide that database RPC, so a
-    Cloud Run service limited to one instance uses the process-local pool.
-    """
-    checkpoint_objects = getattr(store, "persistent_store", None)
-    backend = getattr(checkpoint_objects, "backend", None)
-    supports_shared_queue = callable(
-        getattr(backend, "claim_tagging_worker", None)
-    ) and callable(getattr(backend, "release_tagging_worker", None))
-    return TaggingWorkerQueue(
-        store,
-        persistent_backend=backend if supports_shared_queue else None,
-        persistent_required=_persistent_checkpoint_is_configured_v68_100(),
-        max_workers=_tagging_max_concurrent_jobs_v68_101(),
-    )
-
-
 def _uses_large_batch_checkpoints_v68_43(selected: pd.DataFrame) -> bool:
     """Protect every non-empty selection from a Streamlit reconnect."""
     return isinstance(selected, pd.DataFrame) and not selected.empty
@@ -4306,35 +4258,6 @@ def _render_tagging_auto_wait_v68_55(job_id: str) -> None:
     if action == "manual":
         _clear_tagging_continue_query_v68_55()
         st.rerun(scope="app")
-
-
-def _render_tagging_capacity_full_v68_101(
-    job_id: str,
-    capacity: int,
-    reason: str = "capacity_full",
-) -> None:
-    """Keep the batch recoverable without placing the user in a visible queue."""
-    capacity = max(1, int(capacity or 1))
-    if reason == "job_active":
-        st.warning(
-            "This batch is already tagging in another browser session. Its "
-            "saved progress will remain available from this recovery link."
-        )
-    else:
-        st.warning(
-            f"All {capacity} tagging workers are currently busy. This batch is "
-            "saved and has not started another provider call. Select Try again now, "
-            "or use Continue later and reopen the recovery link."
-        )
-    if st.button(
-        "Try again now",
-        type="primary",
-        width="stretch",
-        key="tagging_capacity_retry_v68_101",
-    ):
-        _set_tagging_continue_query_v68_55(job_id)
-        st.session_state.tagging_job_active_v68_43 = True
-        st.rerun()
 
 
 def _attach_comparison_metadata_v68_43(
@@ -10670,80 +10593,24 @@ elif st.session_state.step == 4:
     execution_owner = ""
     execution_lock_acquired = False
     execution_lock_error = False
-    worker_queue = None
-    worker_claim: Optional[TaggingWorkerClaim] = None
-    worker_claim_acquired = False
-    worker_queue_error = False
-    worker_capacity = _tagging_max_concurrent_jobs_v68_101()
-    worker_unavailable_reason = "capacity_full"
     if tagging_job_active and expected_large_job_id:
         execution_store = _large_batch_store_v68_43()
         execution_owner = _tagging_execution_owner_v68_55()
         try:
-            worker_queue = _tagging_worker_queue_v68_100(execution_store)
-            worker_claim = worker_queue.claim(
-                _valid_runtime_id_v68_15(
-                    st.session_state.get("runtime_run_id_v68_15")
-                ),
+            execution_lock_acquired = execution_store.try_acquire_execution(
                 expected_large_job_id,
                 execution_owner,
-                lease_seconds=TAGGING_GLOBAL_LEASE_SECONDS_V68_100,
             )
-            worker_claim_acquired = bool(worker_claim.acquired)
-        except TaggingWorkerQueueUnavailable:
-            worker_queue_error = True
-
-        if worker_queue_error:
+        except Exception:
+            execution_lock_error = True
+        if not execution_lock_acquired:
             st.session_state.tagging_job_active_v68_43 = False
             tagging_job_active = False
-            auto_resume_action = "manual"
-            _clear_tagging_continue_query_v68_55()
-        elif not worker_claim_acquired:
-            st.session_state.tagging_job_active_v68_43 = False
-            tagging_job_active = False
-            auto_resume_action = "capacity_full"
-            worker_capacity = max(
-                1,
-                int((worker_claim or TaggingWorkerClaim(False)).capacity or worker_capacity),
-            )
-            worker_unavailable_reason = safe_str(
-                (worker_claim or TaggingWorkerClaim(False)).reason
-            ) or "capacity_full"
-            _clear_tagging_continue_query_v68_55()
-        else:
-            try:
-                execution_lock_acquired = execution_store.try_acquire_execution(
-                    expected_large_job_id,
-                    execution_owner,
-                )
-            except Exception:
-                execution_lock_error = True
-            if not execution_lock_acquired:
-                st.session_state.tagging_job_active_v68_43 = False
-                tagging_job_active = False
-                if execution_lock_error:
-                    auto_resume_action = "manual"
-                    _clear_tagging_continue_query_v68_55()
-                else:
-                    auto_resume_action = "wait"
-                try:
-                    worker_queue.release(
-                        _valid_runtime_id_v68_15(
-                            st.session_state.get("runtime_run_id_v68_15")
-                        ),
-                        expected_large_job_id,
-                        execution_owner,
-                    )
-                except Exception:
-                    LOGGER.warning("Could not release an unused tagging worker lease.")
-                worker_claim_acquired = False
-
-    if worker_queue_error:
-        st.error(
-            "The shared tagging worker pool is unavailable, so no new tagging work "
-            "was started. Ask the app owner to run the latest "
-            "checkpoint_schema.sql, then select Resume tagging."
-        )
+            if execution_lock_error:
+                auto_resume_action = "manual"
+                _clear_tagging_continue_query_v68_55()
+            else:
+                auto_resume_action = "wait"
 
     if execution_lock_error:
         st.warning(
@@ -10751,13 +10618,7 @@ elif st.session_state.step == 4:
             "could not be created. Select Resume tagging to try again."
         )
 
-    if auto_resume_action == "capacity_full" and not tagging_job_active:
-        _render_tagging_capacity_full_v68_101(
-            expected_large_job_id,
-            worker_capacity,
-            worker_unavailable_reason,
-        )
-    elif auto_resume_action == "wait" and not tagging_job_active:
+    if auto_resume_action == "wait" and not tagging_job_active:
         _render_tagging_auto_wait_v68_55(expected_large_job_id)
     elif tagging_job_active:
         try:
@@ -10768,20 +10629,6 @@ elif st.session_state.step == 4:
                     expected_large_job_id,
                     execution_owner,
                 )
-            if worker_claim_acquired and worker_queue is not None:
-                try:
-                    worker_queue.release(
-                        _valid_runtime_id_v68_15(
-                            st.session_state.get("runtime_run_id_v68_15")
-                        ),
-                        expected_large_job_id,
-                        execution_owner,
-                    )
-                except Exception:
-                    LOGGER.warning(
-                        "Could not release the shared tagging worker slot; "
-                        "its expiry will make the slot available again."
-                    )
         if tagged_result is None:
             # Each bounded unit runs in a fresh Streamlit execution. This keeps
             # every run restart-safe without monopolising one script execution.
