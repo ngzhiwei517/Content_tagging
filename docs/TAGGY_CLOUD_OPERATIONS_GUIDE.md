@@ -22,7 +22,7 @@ does not make the saved files public.
 | Cloud Run | The Google server running Taggy |
 | GCS | The private folder saving Continue later progress |
 | GitHub | Where the Taggy code is kept |
-| Supabase | The old recovery storage; kept only as backup for now |
+| Supabase | The previous recovery storage; not active in the current Cloud Run setup |
 | Gemini | Performs AI tagging |
 | Apify | Helps collect post information when direct collection fails |
 | Secret Manager | Safely stores the Gemini and Apify keys |
@@ -51,7 +51,7 @@ should check whether it falls after the runs finish and the tabs are closed.
 3. Check the Cloud Run memory graph again.
 4. If memory falls, turn on the prepared new version.
 5. Test one small batch and one Continue later link.
-6. Set a spending alert, then make the app public so no Google sign-in is needed.
+6. Keep the spending alert active and confirm the public link in an Incognito window.
 7. Test two people with 25 posts each before testing larger batches.
 
 ## What happens when GitHub changes?
@@ -148,6 +148,5 @@ later link would stop working.
 
 ## Current status in one sentence
 
-The Cloud version works and is recommended for the pilot, but it is still
-private and we should confirm that memory falls after the test before opening it
-to everyone.
+The Cloud Run base link is public, its Continue later data is private in GCS,
+and the current pilot remains intentionally limited to one app instance.

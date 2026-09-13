@@ -2,6 +2,9 @@
 
 This guide creates a Taggy link that anyone can open without Google sign-in.
 
+If another person is deploying a GitHub fork in their own account, use
+[Deploy your own Taggy fork](TAGGY_FORK_DEPLOYMENT_GUIDE.md) instead.
+
 ## Best choice for you
 
 You do **not** need another Google Cloud project.
@@ -66,7 +69,7 @@ uses the existing Gemini and Apify secrets but saves recovery data in the new
 test bucket.
 
 ```bat
-gcloud run deploy taggy-test-public --source=. --region=asia-southeast1 --project=taggy-508408 --no-invoker-iam-check --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=80 --max-instances=1 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --cpu-boost --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-taggy-test-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_TABLE=batch_checkpoint_objects,APIFY_TOKEN_FILE=/var/secrets/taggy/apify-token" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,/var/secrets/taggy/apify-token=taggy-apify-token:latest"
+gcloud run deploy taggy-test-public --source=. --region=asia-southeast1 --project=taggy-508408 --no-invoker-iam-check --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=80 --max-instances=1 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --cpu-boost --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-taggy-test-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_GCS_PREFIX=taggy-checkpoints,APIFY_TOKEN_FILE=/var/secrets/apify/token,GEMINI_API_KEY_FILE=/var/secrets/gemini/key" --set-secrets="/var/secrets/apify/token=taggy-apify-token:latest,/var/secrets/gemini/key=taggy-gemini-api-key:latest"
 ```
 
 `--no-invoker-iam-check` means visitors can open the app without signing in.

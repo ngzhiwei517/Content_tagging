@@ -148,14 +148,29 @@ class TaggingWorkerQueueTests(unittest.TestCase):
         self.assertNotIn("queued at position", APP_SOURCE)
         self.assertIn("completed posts are saved", APP_SOURCE)
 
-    def test_per_post_objects_replace_periodic_full_partial_snapshots(self):
+    def test_bounded_runs_batch_partial_rows_into_one_remote_snapshot(self):
         runner = APP_SOURCE.split(
             "def _run_checkpointed_tag_every_link_v68_43",
             1,
         )[1].split("def run_real_tagging_backend", 1)[0]
         self.assertIn("store.save_partial_row(", runner)
-        self.assertNotIn("store.save_partial_snapshot(", runner)
+        self.assertIn("persist_remote=False", runner)
+        self.assertIn("store.save_partial_snapshot(", runner)
         self.assertNotIn("REMOTE_PARTIAL_SNAPSHOT_INTERVAL", APP_SOURCE)
+
+    def test_gcs_checkpoint_backend_uses_single_instance_local_worker_pool(self):
+        helper = APP_SOURCE.split(
+            "def _tagging_worker_queue_v68_100(",
+            1,
+        )[1].split("def _uses_large_batch_checkpoints_v68_43", 1)[0]
+        self.assertIn("supports_shared_queue", helper)
+        self.assertIn("backend if supports_shared_queue else None", helper)
+        configuration = APP_SOURCE.split(
+            "def _persistent_checkpoint_is_configured_v68_100()",
+            1,
+        )[1].split("def _tagging_max_concurrent_jobs_v68_101", 1)[0]
+        self.assertIn('"gcs_bucket", "CHECKPOINT_GCS_BUCKET"', configuration)
+        self.assertIn("return False", configuration)
 
     def test_saving_five_results_makes_five_small_remote_row_writes(self):
         remote = RecordingObjectStore()

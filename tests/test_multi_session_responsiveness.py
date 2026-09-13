@@ -7,12 +7,13 @@ APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 
 
 class MultiSessionResponsivenessTests(unittest.TestCase):
-    def test_local_tagging_has_no_process_wide_worker_queue(self):
+    def test_tagging_uses_bounded_worker_claim_without_a_semaphore(self):
         step_four = APP_SOURCE.split("# STEP 4: Run tagging", 1)[1].split(
             "# STEP 5: Review",
             1,
         )[0]
-        self.assertNotIn("TaggingWorkerQueue", step_four)
+        self.assertIn("worker_queue.claim(", step_four)
+        self.assertIn("worker_queue.release(", step_four)
         self.assertNotIn("Semaphore", step_four)
 
     def test_local_tagging_yields_after_two_completed_posts(self):

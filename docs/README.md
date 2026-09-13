@@ -2,6 +2,8 @@
 
 ## Current product
 
+- [Deploy your own public Taggy fork](TAGGY_FORK_DEPLOYMENT_GUIDE.md)
+- [Persistent checkpoints](PERSISTENT_CHECKPOINTS.md)
 - [Project context](PROJECT_CONTEXT.md)
 - [Technical maintainer handover](HANDOVER.md)
 - [Code map](CODE_MAP.md)

@@ -113,13 +113,21 @@ class CloudDeploymentContractTests(unittest.TestCase):
         self.assertIn("--session-affinity", CLOUD_RUN_FRONTEND_GUIDE)
         self.assertIn("400 Invalid session_id", CLOUD_RUN_FRONTEND_GUIDE)
 
-    def test_apify_secret_is_mounted_for_rotation_without_redeploy(self):
+    def test_provider_secrets_are_mounted_for_rotation_without_redeploy(self):
         self.assertIn(
-            "APIFY_TOKEN_FILE=/var/secrets/taggy/apify-token",
+            "APIFY_TOKEN_FILE=/var/secrets/apify/token",
             CLOUD_RUN_FRONTEND_GUIDE,
         )
         self.assertIn(
-            "/var/secrets/taggy/apify-token=taggy-apify-token:latest",
+            "/var/secrets/apify/token=taggy-apify-token:latest",
+            CLOUD_RUN_FRONTEND_GUIDE,
+        )
+        self.assertIn(
+            "GEMINI_API_KEY_FILE=/var/secrets/gemini/key",
+            CLOUD_RUN_FRONTEND_GUIDE,
+        )
+        self.assertIn(
+            "/var/secrets/gemini/key=taggy-gemini-api-key:latest",
             CLOUD_RUN_FRONTEND_GUIDE,
         )
 
@@ -140,10 +148,11 @@ class CloudDeploymentContractTests(unittest.TestCase):
             },
         )
 
-    def test_cloud_run_frontend_requires_iap_authentication(self):
-        self.assertIn("--no-allow-unauthenticated", CLOUD_RUN_FRONTEND_GUIDE)
-        self.assertIn("--iap", CLOUD_RUN_FRONTEND_GUIDE)
-        self.assertNotIn("--no-invoker-iam-check", CLOUD_RUN_FRONTEND_GUIDE)
+    def test_cloud_run_frontend_is_public_without_exposing_gcs(self):
+        self.assertIn("--no-invoker-iam-check", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertNotIn("--no-allow-unauthenticated", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertNotIn("--iap", CLOUD_RUN_FRONTEND_GUIDE)
+        self.assertIn("does not make\nthe GCS bucket public", CLOUD_RUN_FRONTEND_GUIDE)
 
     def test_css_does_not_force_dark_text_on_every_element(self):
         self.assertNotIn("html, body, p, span, label, div { color:", APP_SOURCE)

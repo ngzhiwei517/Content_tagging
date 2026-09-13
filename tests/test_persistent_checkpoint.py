@@ -67,8 +67,10 @@ class MemoryObjectStore:
     def __init__(self):
         self.objects = {}
         self.list_prefix_calls = 0
+        self.save_calls = 0
 
     def save(self, key, payload):
+        self.save_calls += 1
         self.objects[key] = copy.deepcopy(payload)
 
     def load(self, key):
@@ -925,6 +927,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             persist()
@@ -974,11 +977,15 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             status = persist(verify_remote=True)
+            unchanged_status = persist()
 
         self.assertEqual(status, "verified")
+        self.assertEqual(unchanged_status, "unchanged")
+        self.assertEqual(remote.save_calls, 1)
         self.assertEqual(
             FakeStreamlit.session_state.runtime_checkpoint_remote_status_v68_96,
             "verified",
@@ -1108,6 +1115,7 @@ class WorkflowCheckpointSafetyTests(unittest.TestCase):
                 "_runtime_checkpoint_has_posts_v68_44",
                 namespace,
             )
+            load_runtime_persist_helpers(namespace)
             persist = load_function("_persist_runtime_checkpoint_v68_15", namespace)
 
             status = persist(verify_remote=True)

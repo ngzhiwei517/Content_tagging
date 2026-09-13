@@ -1598,6 +1598,31 @@ def _checkpoint_json_safe_value_v68_96(value):
     return str(value)
 
 
+def _runtime_checkpoint_state_digest_v68_97(state) -> str:
+    """Return a stable digest so unchanged reruns do not rewrite checkpoints."""
+    canonical = json.dumps(
+        state,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _defer_runtime_tagged_df_v68_97() -> bool:
+    """Use row/chunk objects as the source of truth during active tagging.
+
+    A completed post is already stored once under the tagging checkpoint. The
+    runtime checkpoint must not duplicate the growing tagged DataFrame after
+    every bounded Streamlit execution.
+    """
+    return (
+        safe_str(st.session_state.get("analysis_mode_v68_86")) != "Metrics only"
+        and bool(st.session_state.get("tagging_checkpoint_incomplete_v68_97", False))
+    )
+
+
 def _runtime_checkpoint_has_posts_v68_44(state) -> bool:
     """Return whether workflow state contains at least one meaningful post."""
     if not hasattr(state, "get"):
@@ -1824,7 +1849,12 @@ def _configured_checkpoint_backend_v68_44():
 
 
 def _persistent_checkpoint_is_configured_v68_100() -> bool:
-    """Distinguish local-only use from a broken shared checkpoint setup."""
+    """Return whether the active checkpoint backend requires a database queue."""
+    # GCS takes precedence over database settings and deliberately uses the
+    # single-instance local worker pool. Old database credentials may remain
+    # attached only as a rollback option without disabling GCS tagging.
+    if _checkpoint_setting_v68_44("gcs_bucket", "CHECKPOINT_GCS_BUCKET"):
+        return False
     return bool(
         _checkpoint_setting_v68_44("database_url", "CHECKPOINT_DATABASE_URL")
         or _checkpoint_setting_v68_44("supabase_url", "CHECKPOINT_SUPABASE_URL")
@@ -1891,6 +1921,11 @@ def _load_remote_runtime_checkpoint_v68_44(run_id: str):
         payload = store.load("runtime.json")
         if isinstance(payload, dict):
             st.session_state.runtime_checkpoint_remote_status_v68_96 = "loaded"
+            state = payload.get("state", {})
+            if isinstance(state, dict):
+                st.session_state.runtime_checkpoint_remote_digest_v68_97 = (
+                    _runtime_checkpoint_state_digest_v68_97(state)
+                )
         return payload if isinstance(payload, dict) else None
     except Exception as exc:
         st.session_state.runtime_checkpoint_remote_status_v68_96 = "read_failed"
@@ -2043,14 +2078,18 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
     if not run_id:
         return "not_ready"
     state_payload = {}
+    defer_tagged_df = _defer_runtime_tagged_df_v68_97()
     for key in RUNTIME_CHECKPOINT_STATE_KEYS_V68_15:
         if key not in st.session_state:
+            continue
+        if key == "tagged_df" and defer_tagged_df:
             continue
         value = st.session_state.get(key)
         if key in RUNTIME_DATAFRAME_KEYS_V68_15:
             state_payload[key] = _checkpoint_dataframe_to_payload_v68_15(value)
         else:
             state_payload[key] = _checkpoint_json_safe_value_v68_96(value)
+    state_digest = _runtime_checkpoint_state_digest_v68_97(state_payload)
     payload = {
         "version": APP_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -2072,7 +2111,12 @@ def _persist_runtime_checkpoint_v68_15(*, verify_remote: bool = False) -> str:
             not has_posts
             and _runtime_checkpoint_has_posts_v68_44(existing_state)
         )
-        if not preserve_existing:
+        existing_digest = (
+            _runtime_checkpoint_state_digest_v68_97(existing_state)
+            if isinstance(existing_state, dict)
+            else ""
+        )
+        if not preserve_existing and existing_digest != state_digest:
             temporary = destination.with_suffix(".tmp")
             temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
             os.replace(temporary, destination)
@@ -4094,12 +4138,20 @@ def _large_batch_store_v68_43() -> BatchCheckpointStore:
 def _tagging_worker_queue_v68_100(
     store: BatchCheckpointStore,
 ) -> TaggingWorkerQueue:
-    """Create the distributed worker pool or its local development fallback."""
+    """Create the database worker pool or a single-instance local fallback.
+
+    Supabase/Postgres provide atomic cross-instance claims. Cloud Storage is
+    durable checkpoint storage but does not provide that database RPC, so a
+    Cloud Run service limited to one instance uses the process-local pool.
+    """
     checkpoint_objects = getattr(store, "persistent_store", None)
     backend = getattr(checkpoint_objects, "backend", None)
+    supports_shared_queue = callable(
+        getattr(backend, "claim_tagging_worker", None)
+    ) and callable(getattr(backend, "release_tagging_worker", None))
     return TaggingWorkerQueue(
         store,
-        persistent_backend=backend,
+        persistent_backend=backend if supports_shared_queue else None,
         persistent_required=_persistent_checkpoint_is_configured_v68_100(),
         max_workers=_tagging_max_concurrent_jobs_v68_101(),
     )
@@ -4639,6 +4691,9 @@ def _run_checkpointed_tag_every_link_v68_43(
     except Exception as exc:
         st.error(f"Could not create the tagging checkpoint: {exc}")
         return pd.DataFrame()
+    st.session_state.tagging_checkpoint_incomplete_v68_97 = (
+        manifest.get("status") != "completed"
+    )
 
     st.session_state.comparison_run_id_v68_41_4 = safe_str(
         manifest.get("comparison_run_id")
@@ -4676,8 +4731,10 @@ def _run_checkpointed_tag_every_link_v68_43(
             execution_rows,
         )
         if extended:
+            st.session_state.tagging_checkpoint_incomplete_v68_97 = True
             store.mark_continuation_ready(manifest)
             return None
+        st.session_state.tagging_checkpoint_incomplete_v68_97 = False
         completed = _without_unused_backfill_v68_58(
             store.load_completed_results(manifest)
         )
@@ -4985,6 +5042,9 @@ def _run_checkpointed_tag_every_link_v68_43(
             tagged_chunk,
             elapsed_seconds=time.perf_counter() - chunk_timer,
         )
+        st.session_state.tagging_checkpoint_incomplete_v68_97 = (
+            manifest.get("status") != "completed"
+        )
         extended = False
         if manifest.get("status") == "completed":
             manifest, extended, deficits = _extend_top_n_checkpoint_v68_58(
@@ -4995,6 +5055,7 @@ def _run_checkpointed_tag_every_link_v68_43(
                 execution_rows,
             )
             if extended:
+                st.session_state.tagging_checkpoint_incomplete_v68_97 = True
                 replacement_total = sum(deficits.values())
                 status.update(
                     label=(
@@ -10551,6 +10612,9 @@ elif st.session_state.step == 4:
     # evidence remain unresolved.
     st.session_state.enable_full_video_fallback_v46 = True
     saved_large_batch = _large_batch_manifest_v68_43(selected)
+    st.session_state.tagging_checkpoint_incomplete_v68_97 = bool(
+        saved_large_batch and saved_large_batch.get("status") != "completed"
+    )
     expected_large_job_id = _large_batch_job_id_v68_55(selected)
     if _uses_large_batch_checkpoints_v68_43(selected):
         completed_count = int(

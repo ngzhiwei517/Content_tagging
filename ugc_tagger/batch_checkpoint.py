@@ -599,6 +599,17 @@ class BatchCheckpointStore:
         self._write_local_json(path, payload)
         return False
 
+    def save_partial_snapshot(self, job_id: str, chunk_index: int) -> bool:
+        """Persist one compact snapshot for the current unfinished chunk."""
+        partial = self.load_partial_chunk_results(job_id, chunk_index)
+        if partial.empty:
+            return False
+        payload = _json_safe(dataframe_to_payload(partial.reset_index(drop=True)))
+        return self._atomic_write_json(
+            self._partial_snapshot_path(job_id, chunk_index),
+            payload,
+        )
+
     def partial_positions(self, job_id: str, chunk_index: int) -> List[int]:
         """Return saved row positions for one incomplete chunk."""
         directory = self._partial_dir(job_id, chunk_index)

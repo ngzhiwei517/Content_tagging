@@ -6,8 +6,8 @@ link naming, reliability, and routine checks, see
 
 Taggy is still a Streamlit application. Cloud Run replaces Streamlit Community
 Cloud as the host, and private Google Cloud Storage (GCS) replaces Supabase as
-the primary recovery store. Supabase remains configured only as a rollback
-option while the Cloud Run pilot is being accepted.
+the primary recovery store. Supabase is not active in the current Cloud Run
+configuration.
 
 ## Current validated service shape
 
@@ -30,14 +30,14 @@ Concurrency 80 is a simultaneous HTTP/WebSocket request allowance for the one
 container. It is not 80 users, 80 posts, or 80 actions per second. One browser
 can hold a WebSocket and make additional upload/download requests.
 
-## Deploy the private service
+## Deploy the public service
 
-Run from the intended feature-branch worktree. The Apify secret is mounted as a
-file so its `latest` version can rotate without another app deployment.
+Run only from an approved branch. Both provider secrets are mounted as files so
+their `latest` versions can rotate without rebuilding the app.
 
 ```bat
 gcloud config set project taggy-508408
-gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-allow-unauthenticated --iap --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=80 --max-instances=1 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_TABLE=batch_checkpoint_objects,APIFY_TOKEN_FILE=/var/secrets/taggy/apify-token" --set-secrets="GEMINI_API_KEY=taggy-gemini-api-key:latest,/var/secrets/taggy/apify-token=taggy-apify-token:latest,CHECKPOINT_SUPABASE_URL=taggy-supabase-url:latest,CHECKPOINT_SUPABASE_KEY=taggy-supabase-key:latest"
+gcloud run deploy taggy-web-latest-test --source=. --region=asia-southeast1 --no-invoker-iam-check --service-account=taggy-worker@taggy-508408.iam.gserviceaccount.com --concurrency=80 --max-instances=1 --min-instances=0 --timeout=3600 --memory=2Gi --cpu=2 --cpu-boost --session-affinity --set-env-vars="CHECKPOINT_GCS_BUCKET=taggy-508408-checkpoints,CHECKPOINT_GCS_PROJECT=taggy-508408,CHECKPOINT_GCS_PREFIX=taggy-checkpoints,APIFY_TOKEN_FILE=/var/secrets/apify/token,GEMINI_API_KEY_FILE=/var/secrets/gemini/key" --set-secrets="/var/secrets/apify/token=taggy-apify-token:latest,/var/secrets/gemini/key=taggy-gemini-api-key:latest"
 gcloud run services describe taggy-web-latest-test --region=asia-southeast1 --format="value(status.url)"
 ```
 
@@ -45,7 +45,7 @@ For a zero-traffic rehearsal, add `--no-traffic --tag=hot-secrets-test` to the
 deploy command. Do not move traffic away from a revision while users have active
 tagging runs.
 
-## Rotate the Apify key without redeploying
+## Rotate a provider key without redeploying
 
 1. Open **Security > Secret Manager > `taggy-apify-token`**.
 2. Add the replacement as a new secret version. Do not paste it into source,
@@ -58,8 +58,7 @@ app reads this file at the beginning of each new metrics/tagging action. A job
 already in progress keeps the credential it started with; the next action uses
 the replacement.
 
-The same code supports a mounted Gemini key through `GEMINI_API_KEY_FILE` if it
-is configured later.
+Repeat the same process for `taggy-gemini-api-key` when rotating Gemini.
 
 ## Private recovery storage
 
@@ -124,7 +123,6 @@ investigate cleanup or increase the service to 4 GiB before heavier use.
 connected. An open Streamlit tab can keep the one instance billable. Cloud Run,
 Gemini, Apify, Secret Manager, logging, and GCS have separate quotas or charges.
 
-Rollback remains straightforward: keep the last known-good Cloud Run revision,
-do not delete the Supabase fallback until the GCS pilot is accepted, and do not
-route traffic to a new revision until its health and recovery path have been
-verified.
+Rollback remains straightforward: keep the last known-good Cloud Run revision
+and do not route traffic to a new revision until its health and recovery path
+have been verified.
