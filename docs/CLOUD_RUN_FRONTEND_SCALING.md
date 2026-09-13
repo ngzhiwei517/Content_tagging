@@ -1,5 +1,9 @@
 # Cloud Run pilot configuration
 
+For a plain-language overview of the complete setup, GitHub behavior, storage,
+link naming, reliability, and routine checks, see
+[`TAGGY_CLOUD_OPERATIONS_GUIDE.md`](TAGGY_CLOUD_OPERATIONS_GUIDE.md).
+
 Taggy is still a Streamlit application. Cloud Run replaces Streamlit Community
 Cloud as the host, and private Google Cloud Storage (GCS) replaces Supabase as
 the primary recovery store. Supabase remains configured only as a rollback
